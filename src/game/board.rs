@@ -393,13 +393,19 @@ impl Board {
         (vanished_colors, vanished_rocks)
     }
 
-    /// `from_row`以降の、まだ何も上書きされていない色ブロック(`Cell::Color`)について、
-    /// 岩(X)/AIRの出現を指定の配分率(%、100=通常のまま)で再抽選する(TERM独自拡張。
-    /// ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれるようにしたい。
-    /// プレイ中でもその数値をいじれるようにしたい」)。既に岩/AIR/ダイヤ/スターとして
-    /// 確定しているマスは、元の色情報を保持していないため対象外(掘削で新たに生まれる
-    /// 色ブロックには次回以降の抽選から反映される)。再現性は求めないため、
-    /// 呼び出しごとに新しい乱数系列を使う。
+    /// `from_row`以降の未掘削マス(`Cell::Empty`以外の全セル)について、色・岩(X)・
+    /// AIR・スター・白ブロックの内訳を指定の配分率(%、100=通常のまま)で丸ごと
+    /// 再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
+    /// いじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」)。
+    ///
+    /// 最初の`Board::generate`は常定義率(100%)で岩/AIR/スター/白を配置するため、
+    /// 「まだ`Cell::Color`のセルだけ」を対象にすると、既にRock/Oxygen/Star/White
+    /// として確定していたセルは設定を0%にしても永久に残ってしまう(事故: 「白成分0%に
+    /// 設定したのに、存在するとか」)。この関数は未掘削マスであれば元の内容を問わず
+    /// 新しい乱数色を割り当てた上で再抽選するため、既に確定していたセルも含めて
+    /// 正しく反映される。`Cell::Empty`(既に掘削済み・落下等で空になったマス)だけは、
+    /// 実際にプレイヤーが見た/触れた状態を壊さないよう対象外にする。再現性は求めない
+    /// ため、呼び出しごとに新しい乱数系列を使う。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
@@ -415,17 +421,19 @@ impl Board {
 
         for row in from_row..self.rows.len() {
             for col in 0..FIELD_WIDTH {
-                if let Cell::Color(color) = self.rows[row][col] {
-                    self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
-                        &mut rng,
-                        color,
-                        row,
-                        rock_rate_percent,
-                        air_rate_percent,
-                        star_rate_percent,
-                        white_rate_percent,
-                    );
+                if self.rows[row][col] == Cell::Empty {
+                    continue;
                 }
+                let fresh_color = ColorKind::ALL[rng.random_range(0..ColorKind::ALL.len())];
+                self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
+                    &mut rng,
+                    fresh_color,
+                    row,
+                    rock_rate_percent,
+                    air_rate_percent,
+                    star_rate_percent,
+                    white_rate_percent,
+                );
             }
         }
     }
@@ -956,23 +964,46 @@ mod tests {
     // --- プレイ中の配分率(岩/AIR)変更(TERM独自拡張) ---
 
     #[test]
-    fn reroll_overlays_from_row_leaves_rows_before_from_row_and_already_overlaid_cells_untouched() {
+    fn reroll_overlays_from_row_leaves_rows_before_from_row_untouched() {
         let mut board = empty_board(5);
         for col in 0..FIELD_WIDTH {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
-            board.rows[2][col] = Cell::Color(ColorKind::Blue); // from_row以降
         }
-        board.rows[3][0] = Cell::Rock { hits: 3 }; // 既に上書き済み、再抽選対象外
 
-        board.reroll_overlays_from_row(1, 300, 300, 300, 300); // 岩/AIR/スター/白の確率を大きく引き上げる
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0); // 岩/AIR/スター/白の確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
         }
-        assert!(
-            matches!(board.cell(3, 0), Cell::Rock { hits: 3 }),
-            "既に岩として確定済みのセルは元の色情報を持たないため対象外"
-        );
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_also_rerolls_cells_already_committed_to_an_overlay() {
+        // ユーザー指摘: 「白成分0%に設定したのに、存在するとか」。最初のBoard::generate
+        // は常に既定率(100%)で岩/AIR/スター/白を配置するため、「まだCell::Colorのセルだけ」
+        // を対象にすると、既に確定していたセルは配分率を0%にしても永久に残ってしまう。
+        // Empty以外なら元の種類を問わず再抽選対象になることを確認する。
+        let mut board = empty_board(1);
+        board.rows[0][0] = Cell::Rock { hits: 3 };
+        board.rows[0][1] = Cell::Oxygen;
+        board.rows[0][2] = Cell::Star { melting: 2 };
+        board.rows[0][3] = Cell::White;
+        board.rows[0][4] = Cell::Empty; // 既に掘削済み・対象外
+
+        // 岩/AIR/スター/白の配分率を0にすれば、Empty以外の全セルは
+        // Color(通常の色ブロック)かDiamond(配分率調整の対象外、band_table規定値)の
+        // どちらかへ再抽選される。ここではRock/Oxygen/Star/Whiteが一切残らないことを
+        // 確認する(いずれも既存の確定セルからの持ち越しなら再抽選できていないことになる)。
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0);
+
+        for col in 0..4 {
+            assert!(
+                matches!(board.cell(0, col), Cell::Color(_) | Cell::Diamond),
+                "配分率0%なら既存の確定セルも含めて再抽選されるはず: col={col} -> {:?}",
+                board.cell(0, col)
+            );
+        }
+        assert_eq!(board.cell(0, 4), Cell::Empty, "既に掘削済みのセルは対象外のまま");
     }
 
     #[test]

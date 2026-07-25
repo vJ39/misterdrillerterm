@@ -1181,6 +1181,49 @@ mod tests {
     }
 
     #[test]
+    fn player_does_not_get_stuck_floating_over_a_tall_open_shaft_across_many_frames() {
+        // ユーザー指摘: 「浮いてる、おかしいこれバグ」(スクリーンショット添付、プレイヤーが
+        // 大きな縦穴の上でずっと静止して見える)。main.rsの実際の使い方(FRAME_INTERVAL_MS
+        // =33msごとにupdate()を呼ぶ)を模して、細かいフレーム単位で何十フレームも進めても、
+        // 支えを失ったプレイヤーが一度も止まらず連続して落下し続けることを確認する。
+        const FRAME_MS: u64 = 33;
+        let mut game = Game::new(30);
+        clear_board(&mut game);
+        game.player.row = 100;
+        game.player.col = 5;
+        // 100行下まで全てEmpty、その先(row 200)に床を置く。
+        game.board.rows[200][5] = Cell::Rock { hits: 0 };
+
+        let mut max_row_seen = game.player.row;
+        let mut stalled_frames_in_a_row = 0;
+        let mut worst_stall = 0;
+
+        // 150フレームぶん(約5秒相当)を1フレームずつ進め、毎フレーム行が進むか
+        // (または既に床に到達しているか)を確認する。
+        for _ in 0..150 {
+            let before = game.player.row;
+            game.update(Duration::from_millis(FRAME_MS));
+            if game.player.row == before && game.player.row < 199 {
+                stalled_frames_in_a_row += 1;
+                worst_stall = worst_stall.max(stalled_frames_in_a_row);
+            } else {
+                stalled_frames_in_a_row = 0;
+            }
+            max_row_seen = max_row_seen.max(game.player.row);
+        }
+
+        // player_fall_tick_ms(既定FALL_TICK_MS=150ms)ごとに1マス落ちるはずなので、
+        // 33ms単位のフレームでは数フレームに1回しか実際には動かない。それでも
+        // 「何十フレームも完全に静止したまま」になることはないはずで、目安として
+        // 10フレーム(約330ms、既定tickの2倍以上)を超える連続静止は異常とみなす。
+        assert!(
+            worst_stall <= 10,
+            "支えを失ったプレイヤーが{worst_stall}フレーム連続で静止した(床に到達済みでないのに浮いたまま)"
+        );
+        assert!(max_row_seen > 100, "プレイヤーは一度も動かなかった(浮いたまま)");
+    }
+
+    #[test]
     fn player_does_not_fall_when_supported() {
         let mut game = Game::new(21);
         for row in 2..6 {

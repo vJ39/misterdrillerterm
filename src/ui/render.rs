@@ -275,10 +275,11 @@ pub fn draw_help(frame: &mut Frame) {
         line("←/→: 移動(掘削を伴う)      ↑/↓: 向きを変える(掘削なし)"),
         line("Space: 掘削(向いている方向) P: 一時停止"),
         line("Q: タイトルへ戻る/終了"),
+        line("S: 設定画面   H: このヘルプ (プレイ中に押すと自動で一時停止する)"),
         line(""),
         heading("== 一時停止中のみ =="),
         line("M: MUSIC ON/OFF   E: SE ON/OFF"),
-        line("S: 設定画面(MUSIC/SE/Xブロック・AIR・スター・白配分)   H: このヘルプ"),
+        line("設定画面: MUSIC/SE/Xブロック・AIR・スター・白の配分を調整できる"),
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
@@ -597,7 +598,7 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
             colors::STAR_FG,
             colors::star_bg(melting, STAR_MELT_TICKS),
         ),
-        BoardCell::White => draw_fixed_unit(buf, x, y, [[' ', ' '], [' ', ' ']], colors::WHITE_FG, colors::WHITE_BG),
+        BoardCell::White => draw_fixed_unit(buf, x, y, [['□', '□'], ['□', '□']], colors::WHITE_FG, colors::WHITE_BG),
     }
 }
 

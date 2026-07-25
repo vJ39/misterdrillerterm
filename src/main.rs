@@ -114,11 +114,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.save();
                         }
                     }
-                    // S/Hキーでの設定/ヘルプ画面オーバーレイ表示は、一時停止中でのみ意味を
-                    // 持つ(TERM独自拡張。ユーザー指摘: 「一時停止中にもヘルプページを
-                    // 開けるようにする」「プレイ中に設定画面を呼び出せるようにし、ファイルに
-                    // 保存されている設定をいじれるものとする」)。同じキーの再入力で閉じる。
+                    // S/Hキーでの設定/ヘルプ画面オーバーレイ表示(TERM独自拡張。ユーザー指摘:
+                    // 「一時停止中にもヘルプページを開けるようにする」「プレイ中に設定画面を
+                    // 呼び出せるようにし、ファイルに保存されている設定をいじれるものとする」
+                    // 「設定(S)はポーズ(P)せずに出せるように」)。プレイ中に押した場合は
+                    // 自動的に一時停止してからオーバーレイを開く。同じキーの再入力で閉じる
+                    // (閉じても一時停止状態はそのまま、Pキーで別途再開する)。
                     InputAction::OpenSettings => {
+                        if game.status == GameStatus::Playing {
+                            game.toggle_pause();
+                        }
                         if game.status == GameStatus::Paused {
                             pause_overlay = if pause_overlay == PauseOverlay::Settings {
                                 PauseOverlay::None
@@ -128,6 +133,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         }
                     }
                     InputAction::OpenHelp => {
+                        if game.status == GameStatus::Playing {
+                            game.toggle_pause();
+                        }
                         if game.status == GameStatus::Paused {
                             pause_overlay = if pause_overlay == PauseOverlay::Help {
                                 PauseOverlay::None
