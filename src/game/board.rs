@@ -27,11 +27,6 @@ pub enum Cell {
     /// 消える。`melting`は0(まだ画面外/入った直後)〜`STAR_MELT_TICKS`(消滅)の
     /// カウンタで、掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
     Star { melting: u8 },
-    /// 白ブロック(TERM独自拡張。ユーザー指摘: 「白ブロック(結合しないブロック)」)。
-    /// 色ブロックや岩ブロックと違い、隣接する白ブロック同士でも一切連結しない
-    /// (酸素カプセル・ダイヤ・スターと同様、常に単独セル扱い)。掘削は1回で破壊され、
-    /// 得点は色ブロックの直接掘削と同じ。
-    White,
 }
 
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
@@ -59,9 +54,6 @@ pub struct BandTable {
     pub diamond: f32,
     /// スターブロックの出現率(TERM独自拡張。深度に関わらず`STAR_SPAWN_PROB`で一定)。
     pub star: f32,
-    /// 白ブロック(結合しないブロック)の出現率(TERM独自拡張。深度に関わらず
-    /// `WHITE_SPAWN_PROB`で一定)。
-    pub white: f32,
 }
 
 /// 行インデックス(=深度[m]、spec.md 2章)から出現確率テーブルを引く(spec.md 3.1)。
@@ -76,35 +68,30 @@ pub fn band_table(row: usize) -> BandTable {
             oxygen: 0.03,
             diamond: 0.02,
             star: crate::constants::STAR_SPAWN_PROB,
-            white: crate::constants::WHITE_SPAWN_PROB,
         },
         200..=399 => BandTable {
             rock: 0.08,
             oxygen: 0.04,
             diamond: 0.03,
             star: crate::constants::STAR_SPAWN_PROB,
-            white: crate::constants::WHITE_SPAWN_PROB,
         },
         400..=599 => BandTable {
             rock: 0.12,
             oxygen: 0.04,
             diamond: 0.04,
             star: crate::constants::STAR_SPAWN_PROB,
-            white: crate::constants::WHITE_SPAWN_PROB,
         },
         600..=799 => BandTable {
             rock: 0.16,
             oxygen: 0.04,
             diamond: 0.05,
             star: crate::constants::STAR_SPAWN_PROB,
-            white: crate::constants::WHITE_SPAWN_PROB,
         },
         _ => BandTable {
             rock: 0.20,
             oxygen: 0.04,
             diamond: 0.06,
             star: crate::constants::STAR_SPAWN_PROB,
-            white: crate::constants::WHITE_SPAWN_PROB,
         },
     }
 }
@@ -260,10 +247,9 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
     )
 }
 
-/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/白出現率を設定値(%、100=通常のまま)で
-/// 調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
-/// いじれるようにしたい」「スターブロック比率0〜」「白ブロック(結合しないブロック)
-/// 比率0〜」)。ダイヤの出現率は調整対象外。
+/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/ダイヤ出現率を設定値(%、100=通常の
+/// まま)で調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの
+/// 配分量をいじれるようにしたい」「スターブロック比率0〜」「ダイヤブロック0%設定」)。
 #[allow(clippy::too_many_arguments)]
 fn overlay_rock_oxygen_diamond_with_rates(
     rng: &mut ChaCha8Rng,
@@ -272,13 +258,13 @@ fn overlay_rock_oxygen_diamond_with_rates(
     rock_rate_percent: u32,
     air_rate_percent: u32,
     star_rate_percent: u32,
-    white_rate_percent: u32,
+    diamond_rate_percent: u32,
 ) -> Cell {
     let mut t = band_table(row);
     t.rock = (t.rock * rock_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.oxygen = (t.oxygen * air_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.star = (t.star * star_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
-    t.white = (t.white * white_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    t.diamond = (t.diamond * diamond_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
 
     let r: f32 = rng.random_range(0.0..1.0);
     if r < t.rock {
@@ -289,8 +275,6 @@ fn overlay_rock_oxygen_diamond_with_rates(
         Cell::Diamond
     } else if r < t.rock + t.oxygen + t.diamond + t.star {
         Cell::Star { melting: 0 }
-    } else if r < t.rock + t.oxygen + t.diamond + t.star + t.white {
-        Cell::White
     } else {
         Cell::Color(base_color)
     }
@@ -394,14 +378,15 @@ impl Board {
     }
 
     /// `from_row`以降の未掘削マス(`Cell::Empty`以外の全セル)について、色・岩(X)・
-    /// AIR・スター・白ブロックの内訳を指定の配分率(%、100=通常のまま)で丸ごと
+    /// AIR・スター・ダイヤの内訳を指定の配分率(%、100=通常のまま)で丸ごと
     /// 再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
-    /// いじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」)。
+    /// いじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」「ダイヤブロック
+    /// 0%設定」)。
     ///
-    /// 最初の`Board::generate`は常定義率(100%)で岩/AIR/スター/白を配置するため、
-    /// 「まだ`Cell::Color`のセルだけ」を対象にすると、既にRock/Oxygen/Star/White
-    /// として確定していたセルは設定を0%にしても永久に残ってしまう(事故: 「白成分0%に
-    /// 設定したのに、存在するとか」)。この関数は未掘削マスであれば元の内容を問わず
+    /// 最初の`Board::generate`は常に既定率(100%)で岩/AIR/スター/ダイヤを配置するため、
+    /// 「まだ`Cell::Color`のセルだけ」を対象にすると、既にRock/Oxygen/Star/Diamond
+    /// として確定していたセルは設定を0%にしても永久に残ってしまう(事故: 「0%に設定
+    /// したのに、存在するとか」)。この関数は未掘削マスであれば元の内容を問わず
     /// 新しい乱数色を割り当てた上で再抽選するため、既に確定していたセルも含めて
     /// 正しく反映される。`Cell::Empty`(既に掘削済み・落下等で空になったマス)だけは、
     /// 実際にプレイヤーが見た/触れた状態を壊さないよう対象外にする。再現性は求めない
@@ -413,7 +398,7 @@ impl Board {
         rock_rate_percent: u32,
         air_rate_percent: u32,
         star_rate_percent: u32,
-        white_rate_percent: u32,
+        diamond_rate_percent: u32,
     ) {
         use rand::RngExt;
         let seed: u64 = rand::rng().random();
@@ -432,7 +417,7 @@ impl Board {
                     rock_rate_percent,
                     air_rate_percent,
                     star_rate_percent,
-                    white_rate_percent,
+                    diamond_rate_percent,
                 );
             }
         }
@@ -572,13 +557,21 @@ impl GravityState {
         self.shaking_cells.contains(&pos)
     }
 
-    /// 揺れ状態を全てクリアする(TERM独自拡張)。デバッグショートカット等で盤面の
-    /// 色配置を重力ティックの外から直接書き換えた直後に呼ぶ。塊の境界が変わると
-    /// 揺れ状態が指していた代表座標の意味も変わってしまうため、次の重力ティックで
-    /// 結合関係(塊)を作り直して支持判定からやり直させる(ユーザー指摘: 「ショートカット
-    /// Cを10画面分に適用し、ちゃんと結合関係を再計算するように」)。
-    pub fn reset(&mut self) {
-        self.unsupported_ticks.clear();
+    /// 揺れ猶予中(まだ落下し始めていない)の状態だけをクリアする(TERM独自拡張)。
+    /// デバッグショートカット等で盤面の色配置を重力ティックの外から直接書き換えた直後に
+    /// 呼ぶ。塊の境界が変わると揺れ状態が指していた代表座標の意味も変わってしまうため、
+    /// 次の重力ティックで結合関係(塊)を作り直して支持判定からやり直させる(ユーザー指摘:
+    /// 「ショートカットCを10画面分に適用し、ちゃんと結合関係を再計算するように」)。
+    ///
+    /// 揺れ猶予が明けて既に連続落下中の塊(値が`current_shake_ticks`を超えている
+    /// エントリ、`apply_gravity_tick`が「揺れ直さず落下し続ける」ために使う印)は
+    /// クリア対象から除外する。ここを無条件に全クリアしてしまうと、連続落下中の
+    /// ブロックがショートカットCを押した瞬間に不必要へ揺れ直しを始めてしまい、
+    /// 「フリーズしたように見える」(ユーザー指摘: 「ショートカット:Cにした瞬間これで
+    /// 落ちずにフリーズしてるように見える」「グラグラさせたら、ちゃんと落下処理しないと」)。
+    pub fn reset_shake_progress(&mut self, current_shake_ticks: u8) {
+        self.unsupported_ticks
+            .retain(|_, ticks| *ticks as u32 > current_shake_ticks as u32);
         self.shaking_cells.clear();
     }
 }
@@ -655,7 +648,7 @@ fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
                     visited.extend(group.iter().copied());
                     groups.push(group);
                 }
-                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } | Cell::White => {
+                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } => {
                     visited.insert(pos);
                     groups.push(vec![pos]);
                 }
@@ -862,8 +855,12 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
 
         if crushed_in_group {
             outcome.crushed = true;
-            // 押し潰し確定=即ミスなので、以降の塊の処理を続ける実益はない。
-            break;
+            // ここで`break`すると、直前のループで旧位置を既にEmptyにしてしまった
+            // 「他の(無関係な)落下中の塊」が新位置への書き込みだけスキップされ、
+            // 盤面から消滅してしまう(発見: 同一tickに複数の塊が同時に落下していて、
+            // うち1つが押し潰しを起こすケース)。押し潰しミス自体はこのtickで確定する
+            // が、他の塊の移動は最後まで反映する必要がある。
+            continue;
         }
     }
 
@@ -970,7 +967,7 @@ mod tests {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0); // 岩/AIR/スター/白の確率を0に
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -979,27 +976,25 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_also_rerolls_cells_already_committed_to_an_overlay() {
-        // ユーザー指摘: 「白成分0%に設定したのに、存在するとか」。最初のBoard::generate
-        // は常に既定率(100%)で岩/AIR/スター/白を配置するため、「まだCell::Colorのセルだけ」
-        // を対象にすると、既に確定していたセルは配分率を0%にしても永久に残ってしまう。
-        // Empty以外なら元の種類を問わず再抽選対象になることを確認する。
+        // ユーザー指摘: 「0%に設定したのに、存在するとか」。最初のBoard::generateは
+        // 常に既定率(100%)で岩/AIR/スター/ダイヤを配置するため、「まだCell::Colorの
+        // セルだけ」を対象にすると、既に確定していたセルは配分率を0%にしても永久に
+        // 残ってしまう。Empty以外なら元の種類を問わず再抽選対象になることを確認する。
         let mut board = empty_board(1);
         board.rows[0][0] = Cell::Rock { hits: 3 };
         board.rows[0][1] = Cell::Oxygen;
         board.rows[0][2] = Cell::Star { melting: 2 };
-        board.rows[0][3] = Cell::White;
+        board.rows[0][3] = Cell::Diamond;
         board.rows[0][4] = Cell::Empty; // 既に掘削済み・対象外
 
-        // 岩/AIR/スター/白の配分率を0にすれば、Empty以外の全セルは
-        // Color(通常の色ブロック)かDiamond(配分率調整の対象外、band_table規定値)の
-        // どちらかへ再抽選される。ここではRock/Oxygen/Star/Whiteが一切残らないことを
-        // 確認する(いずれも既存の確定セルからの持ち越しなら再抽選できていないことになる)。
+        // 岩/AIR/スター/ダイヤの配分率を全て0にすれば、Empty以外の全セルは必ず
+        // Color(通常の色ブロック)へ再抽選される。
         board.reroll_overlays_from_row(0, 0, 0, 0, 0);
 
         for col in 0..4 {
             assert!(
-                matches!(board.cell(0, col), Cell::Color(_) | Cell::Diamond),
-                "配分率0%なら既存の確定セルも含めて再抽選されるはず: col={col} -> {:?}",
+                matches!(board.cell(0, col), Cell::Color(_)),
+                "配分率0%なら既存の確定セルも含めて色ブロックへ再抽選されるはず: col={col} -> {:?}",
                 board.cell(0, col)
             );
         }
@@ -1051,9 +1046,9 @@ mod tests {
     }
 
     #[test]
-    fn reroll_overlays_from_row_white_rate_zero_produces_no_white_cells() {
-        // ユーザー指摘: 「白ブロック(結合しないブロック)比率0〜」。0%を指定すれば、
-        // 白ブロックが一切生成されないことを確認する。
+    fn reroll_overlays_from_row_diamond_rate_zero_produces_no_diamond_cells() {
+        // ユーザー指摘: 「ダイヤブロック0%設定」。0%を指定すれば、通常なら出現するはずの
+        // ダイヤブロックが一切生成されないことを確認する。
         let mut board = empty_board(500);
         for row in 0..500 {
             for col in 0..FIELD_WIDTH {
@@ -1063,25 +1058,25 @@ mod tests {
 
         board.reroll_overlays_from_row(0, 100, 100, 100, 0);
 
-        let white_count = board.rows.iter().flatten().filter(|&&c| c == Cell::White).count();
-        assert_eq!(white_count, 0, "白配分率0%なら白ブロックは一切出現しないはず");
+        let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
+        assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
     }
 
     #[test]
-    fn white_blocks_never_merge_even_when_adjacent() {
-        // ユーザー指摘: 「白ブロック(結合しないブロック)」。隣接していても連結せず、
-        // それぞれ単独の塊として扱われる(酸素/ダイヤ/スターと同様)。
+    fn diamond_blocks_never_merge_even_when_adjacent() {
+        // ダイヤブロックは隣接していても連結せず、それぞれ単独の塊として扱われる
+        // (酸素・スターと同様、spec.md 2章)。
         let mut board = empty_board(2);
-        board.rows[0][0] = Cell::White;
-        board.rows[0][1] = Cell::White;
-        board.rows[0][2] = Cell::White;
+        board.rows[0][0] = Cell::Diamond;
+        board.rows[0][1] = Cell::Diamond;
+        board.rows[0][2] = Cell::Diamond;
 
         let groups = collect_fall_groups(&board);
-        let white_groups: Vec<&Vec<(usize, usize)>> =
-            groups.iter().filter(|g| g.iter().any(|&(r, c)| board.cell(r, c) == Cell::White)).collect();
+        let diamond_groups: Vec<&Vec<(usize, usize)>> =
+            groups.iter().filter(|g| g.iter().any(|&(r, c)| board.cell(r, c) == Cell::Diamond)).collect();
 
-        assert_eq!(white_groups.len(), 3, "隣接していても白ブロックはそれぞれ単独の塊のはず");
-        for group in white_groups {
+        assert_eq!(diamond_groups.len(), 3, "隣接していてもダイヤブロックはそれぞれ単独の塊のはず");
+        for group in diamond_groups {
             assert_eq!(group.len(), 1);
         }
     }
@@ -1505,6 +1500,46 @@ mod tests {
     }
 
     #[test]
+    fn reset_shake_progress_preserves_a_group_already_falling_continuously() {
+        // ユーザー指摘: 「ショートカット:Cにした瞬間これで落ちずにフリーズしてるように
+        // 見える」「グラグラさせたら、ちゃんと落下処理しないと」。連続落下中(揺れ猶予が
+        // 明けた後)の塊は、reset_shake_progressを呼んでも揺れ直しにならず、そのまま
+        // 連続で落下し続ける。
+        let mut board = empty_board(6);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        for _ in 0..=SHAKE_TICKS {
+            apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        }
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red), "既に1マス落下しているはず");
+
+        // ショートカットC相当の書き換え直後に呼ばれる想定の関数。
+        gravity.reset_shake_progress(SHAKE_TICKS);
+
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        assert_eq!(outcome.cells_moved, 1, "reset_shake_progress後も揺れ直さず連続で落下し続けるはず");
+        assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
+    }
+
+    #[test]
+    fn reset_shake_progress_clears_a_group_still_within_its_shake_grace_period() {
+        // まだ揺れ猶予中(落下し始めていない)の塊は、reset_shake_progressで
+        // クリアされ、次のティックからは揺れをやり直す(塊の境界が変わりうる
+        // デバッグ書き換え直後に結合関係を作り直すため)。
+        let mut board = empty_board(3);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        assert!(gravity.is_shaking((0, 0)), "揺れ猶予中のはず");
+
+        gravity.reset_shake_progress(SHAKE_TICKS);
+
+        assert!(!gravity.is_shaking((0, 0)), "揺れ猶予中の状態はクリアされるはず");
+    }
+
+    #[test]
     fn is_shaking_is_false_for_a_supported_cell() {
         let mut board = empty_board(2);
         board.rows[0][0] = Cell::Color(ColorKind::Red);
@@ -1719,6 +1754,30 @@ mod tests {
         assert_eq!(board.cell(1, 0), Cell::Empty);
     }
 
+    #[test]
+    fn crush_from_one_falling_group_does_not_erase_another_unrelated_falling_group_in_the_same_tick() {
+        // 発見: 同一tickに複数の無関係な塊が同時に落下していて、そのうち1つが
+        // プレイヤーを押し潰す場合、旧実装では押し潰し確定時に即座にbreakしていたため、
+        // 「他の(無関係な)塊」は旧位置こそ既にEmptyにされているのに新位置への
+        // 書き込みだけスキップされ、盤面から消滅してしまっていた(revive()は盤面を
+        // そのまま維持するため、このデータ消失は復活後のプレイにも影響する)。
+        let mut board = empty_board(4);
+        board.rows[0][0] = Cell::Color(ColorKind::Red); // プレイヤーを押し潰す塊
+        board.rows[0][5] = Cell::Color(ColorKind::Blue); // 無関係な塊(消えてはいけない)
+        let player_pos = (1, 0);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity);
+
+        assert!(outcome.crushed, "プレイヤーは押し潰されるはず");
+        assert_eq!(board.cell(1, 0), Cell::Empty, "押し潰した塊の旧位置は空になる");
+        assert_eq!(
+            board.cell(1, 5),
+            Cell::Color(ColorKind::Blue),
+            "無関係な塊は消滅せず、ちゃんと1マス落下しているはず"
+        );
+    }
+
     // --- 重力: 着地時の自動消滅(4.5、4個以上のみ) ---
 
     #[test]
@@ -1785,6 +1844,65 @@ mod tests {
         assert_eq!(board.cell(1, 1), Cell::Empty);
         assert_eq!(board.cell(2, 0), Cell::Empty);
         assert_eq!(board.cell(2, 1), Cell::Empty);
+    }
+
+    #[test]
+    fn l_shaped_falling_group_merges_with_static_group_offset_from_its_own_representative_cell() {
+        // ユーザー指摘: 「結合されてるブロックの数が正しく4個以上と判定されてないかも。
+        // この計上のとき、あらたに隣接したときに消えないことがある」。落下グループの
+        // 代表座標(最小(row,col))自体は接触点に無くても、L字等の複雑な形でBFSが
+        // 正しく全体を辿って4個以上を検出できることを確認する。
+        //
+        // 落下グループ(Red、L字): (0,3)-(1,3)-(1,2) の3セル。代表座標は(0,3)で、
+        // 実際に接触するのは(1,2)側。既存の支持グループ(Red、3セル、最深行)は
+        // row3のcol0,1,2。
+        let mut board = empty_board(4);
+        board.rows[3][0] = Cell::Color(ColorKind::Red);
+        board.rows[3][1] = Cell::Color(ColorKind::Red);
+        board.rows[3][2] = Cell::Color(ColorKind::Red);
+        board.rows[0][3] = Cell::Color(ColorKind::Red);
+        board.rows[1][2] = Cell::Color(ColorKind::Red);
+        board.rows[1][3] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        // 接触前は別グループ。
+        assert_eq!(connected_same_color(&board, (3, 0), ColorKind::Red).len(), 3);
+        assert_eq!(connected_same_color(&board, (0, 3), ColorKind::Red).len(), 3);
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.auto_vanished_blocks, 6, "接触後は合計6個で自動消滅するはず");
+        for &(r, c) in &[(2, 3), (3, 3), (3, 2), (3, 1), (3, 0)] {
+            assert_eq!(board.cell(r, c), Cell::Empty, "row={r},col={c}が消えていない");
+        }
+    }
+
+    #[test]
+    fn falling_block_touching_a_static_t_shaped_group_of_four_triggers_auto_vanish() {
+        // ユーザー指摘: 「テトリスのトの字になってる構造に1個結合したら本来きえるべきが、
+        // 消えない」。静的に生成されたT字/ト字型の4連結(それ自体は一度も落下していない
+        // ため単独では消えない)に、落下してきた1個が新たに接触して合計5個になった
+        // 場合、正しく自動消滅することを確認する。
+        let mut board = empty_board(4);
+        // 静的なT字(4個、最深行に固定=常に支持されている、一度も落下していない)。
+        board.rows[3][0] = Cell::Color(ColorKind::Red);
+        board.rows[3][1] = Cell::Color(ColorKind::Red);
+        board.rows[3][2] = Cell::Color(ColorKind::Red);
+        board.rows[2][1] = Cell::Color(ColorKind::Red);
+        // 落下してくる1個(T字の縦棒の真上、col1)。
+        board.rows[0][1] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        // 接触前はT字(4個)と落下セル(1個)は別グループ。
+        assert_eq!(connected_same_color(&board, (3, 0), ColorKind::Red).len(), 4);
+        assert_eq!(connected_same_color(&board, (0, 1), ColorKind::Red).len(), 1);
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.auto_vanished_blocks, 5, "T字4個+落下1個=5個で自動消滅するはず");
+        for &(r, c) in &[(1, 1), (3, 0), (3, 1), (3, 2), (2, 1)] {
+            assert_eq!(board.cell(r, c), Cell::Empty, "row={r},col={c}が消えていない");
+        }
     }
 
     #[test]

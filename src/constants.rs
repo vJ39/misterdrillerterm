@@ -110,10 +110,6 @@ pub const STAR_MELT_TICKS: u8 = 6;
 /// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数)に合わせている。
 pub const STAR_VISIBLE_RANGE_ROWS: usize = 14;
 
-/// 白ブロック(結合しないブロック)の出現率(全深度帯共通、TERM独自拡張。ユーザー指摘:
-/// 「白ブロック(結合しないブロック)比率0〜」)。
-pub const WHITE_SPAWN_PROB: f32 = 0.015;
-
 /// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま。
 /// TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
 /// ようにしたい。プレイ中でもその数値をいじれるようにしたい」)。設定画面から
@@ -127,11 +123,11 @@ pub const SPAWN_RATE_PERCENT_STEP: u32 = 20;
 /// 比率0〜」。岩/AIRと異なり、完全に出現させない(0%)設定も許可する。
 pub const STAR_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 
-/// 白ブロックの出現率設定の下限(%、TERM独自拡張)。スターと同様、完全に出現させない
-/// (0%)設定も許可する。
-pub const WHITE_SPAWN_RATE_PERCENT_MIN: u32 = 0;
+/// ダイヤブロックの出現率設定の下限(%、TERM独自拡張)。スターと同様、完全に
+/// 出現させない(0%)設定も許可する。ユーザー指摘: 「ダイヤブロック0%設定」。
+pub const DIAMOND_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 
-/// プレイ中に配分率(岩/AIR/スター/白)を変更した際、書き換え対象をプレイヤーの十分先
+/// プレイ中に配分率(岩/AIR/スター/ダイヤ)を変更した際、書き換え対象をプレイヤーの十分先
 /// (画面外)に限定するための安全マージン(行数、TERM独自拡張)。既に見えている範囲の
 /// 地形が突然変わって見えることを防ぐ。
 pub const SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS: usize = 40;

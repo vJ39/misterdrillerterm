@@ -279,7 +279,7 @@ pub fn draw_help(frame: &mut Frame) {
         line(""),
         heading("== 一時停止中のみ =="),
         line("M: MUSIC ON/OFF   E: SE ON/OFF"),
-        line("設定画面: MUSIC/SE/Xブロック・AIR・スター・白の配分を調整できる"),
+        line("設定画面: MUSIC/SE/Xブロック・AIR・スター・ダイヤの配分を調整できる"),
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
@@ -315,9 +315,9 @@ pub enum SettingsChoice {
     /// スターブロックの出現率(%、0まで下げられる)。TERM独自拡張。
     /// ユーザー指摘: 「スターブロック比率0〜」
     StarRate,
-    /// 白ブロック(結合しないブロック)の出現率(%、0まで下げられる)。TERM独自拡張。
-    /// ユーザー指摘: 「白ブロック(結合しないブロック)比率0〜」
-    WhiteRate,
+    /// ダイヤブロックの出現率(%、0まで下げられる)。TERM独自拡張。
+    /// ユーザー指摘: 「ダイヤブロック0%設定」
+    DiamondRate,
 }
 
 impl SettingsChoice {
@@ -328,8 +328,8 @@ impl SettingsChoice {
             SettingsChoice::Se => SettingsChoice::RockRate,
             SettingsChoice::RockRate => SettingsChoice::AirRate,
             SettingsChoice::AirRate => SettingsChoice::StarRate,
-            SettingsChoice::StarRate => SettingsChoice::WhiteRate,
-            SettingsChoice::WhiteRate => SettingsChoice::Music,
+            SettingsChoice::StarRate => SettingsChoice::DiamondRate,
+            SettingsChoice::DiamondRate => SettingsChoice::Music,
         }
     }
 
@@ -338,17 +338,17 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::WhiteRate,
+            SettingsChoice::Music => SettingsChoice::DiamondRate,
             SettingsChoice::Se => SettingsChoice::Music,
             SettingsChoice::RockRate => SettingsChoice::Se,
             SettingsChoice::AirRate => SettingsChoice::RockRate,
             SettingsChoice::StarRate => SettingsChoice::AirRate,
-            SettingsChoice::WhiteRate => SettingsChoice::StarRate,
+            SettingsChoice::DiamondRate => SettingsChoice::StarRate,
         }
     }
 }
 
-/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/白の出現率(%)、
+/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤの出現率(%)、
 /// 現在選択中の項目をカーソル(反転表示)で示す。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_settings(
@@ -359,7 +359,7 @@ pub fn draw_settings(
     rock_rate_percent: u32,
     air_rate_percent: u32,
     star_rate_percent: u32,
-    white_rate_percent: u32,
+    diamond_rate_percent: u32,
 ) {
     let area = frame.area();
 
@@ -397,7 +397,7 @@ pub fn draw_settings(
         rate_line("Xブロック配分", rock_rate_percent, selection == SettingsChoice::RockRate),
         rate_line("AIR配分", air_rate_percent, selection == SettingsChoice::AirRate),
         rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
-        rate_line("白配分", white_rate_percent, selection == SettingsChoice::WhiteRate),
+        rate_line("ダイヤ配分", diamond_rate_percent, selection == SettingsChoice::DiamondRate),
         Line::from(""),
         Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
         Line::from(Span::styled("配分は←→で調整 / Qでタイトルへ", text_style)),
@@ -598,7 +598,6 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
             colors::STAR_FG,
             colors::star_bg(melting, STAR_MELT_TICKS),
         ),
-        BoardCell::White => draw_fixed_unit(buf, x, y, [['□', '□'], ['□', '□']], colors::WHITE_FG, colors::WHITE_BG),
     }
 }
 
@@ -748,7 +747,6 @@ fn natural_cell_bg(cell: BoardCell) -> Color {
         BoardCell::Oxygen => colors::OXYGEN_BG,
         BoardCell::Diamond => colors::DIAMOND_BG,
         BoardCell::Star { melting } => colors::star_bg(melting, STAR_MELT_TICKS),
-        BoardCell::White => colors::WHITE_BG,
     }
 }
 
@@ -959,7 +957,7 @@ mod tests {
             SettingsChoice::RockRate,
             SettingsChoice::AirRate,
             SettingsChoice::StarRate,
-            SettingsChoice::WhiteRate,
+            SettingsChoice::DiamondRate,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);

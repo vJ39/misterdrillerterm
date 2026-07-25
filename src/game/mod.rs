@@ -362,7 +362,7 @@ impl Game {
             }
             DrillOutcome::OxygenUntouchedByDrill => {}
             DrillOutcome::CollectedDiamond => events.push(GameEvent::DiamondCollected),
-            DrillOutcome::StarDestroyed | DrillOutcome::WhiteDestroyed => {
+            DrillOutcome::StarDestroyed => {
                 events.push(GameEvent::DrillImpact);
                 events.push(GameEvent::BlockDestroyed { blocks: 1 });
             }
@@ -635,12 +635,13 @@ impl Game {
         self.shake_duration_ms = ms.clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
     }
 
-    /// `from_row`以降の岩(X)/AIR/スター/白ブロック出現率を、指定の配分率(%、100=通常の
-    /// まま)で再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの
-    /// 配分量をいじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」)。
-    /// 新規ゲーム開始直後は`from_row`に安全地帯明けの行を渡せば盤面全体に反映され、
-    /// プレイ中に呼ぶ場合は呼び出し側が`player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`
-    /// のような画面外の行を渡すことで、既に見えている地形を変えてしまわないようにする。
+    /// `from_row`以降の岩(X)/AIR/スター/ダイヤブロック出現率を、指定の配分率(%、
+    /// 100=通常のまま)で再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの
+    /// 配分量・AIRの配分量をいじれるようにしたい。プレイ中でもその数値をいじれるように
+    /// したい」「ダイヤブロック0%設定」)。新規ゲーム開始直後は`from_row`に安全地帯明けの
+    /// 行を渡せば盤面全体に反映され、プレイ中に呼ぶ場合は呼び出し側が
+    /// `player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`のような画面外の行を渡すことで、
+    /// 既に見えている地形を変えてしまわないようにする。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_spawn_rates_from(
         &mut self,
@@ -648,14 +649,14 @@ impl Game {
         rock_rate_percent: u32,
         air_rate_percent: u32,
         star_rate_percent: u32,
-        white_rate_percent: u32,
+        diamond_rate_percent: u32,
     ) {
         self.board.reroll_overlays_from_row(
             from_row,
             rock_rate_percent,
             air_rate_percent,
             star_rate_percent,
-            white_rate_percent,
+            diamond_rate_percent,
         );
     }
 
@@ -727,9 +728,14 @@ impl Game {
         }
 
         // 重力ティックの外から色配置を直接書き換えたため、塊(連結グループ)の境界が
-        // 変わっている。古い揺れ状態を引きずらず、次の重力ティックで結合関係を
-        // 一から作り直させる(ユーザー指摘: 「ちゃんと結合関係を再計算するように」)。
-        self.gravity_state.reset();
+        // 変わっている。まだ揺れ猶予中(落下し始めていない)の古い揺れ状態は引きずらず、
+        // 次の重力ティックで結合関係を一から作り直させる(ユーザー指摘: 「ちゃんと結合
+        // 関係を再計算するように」)。ただし既に揺れが明けて連続落下中の塊まで巻き込んで
+        // 揺れ直させてしまうと、Cを押した瞬間に「フリーズしたように見える」(ユーザー指摘:
+        // 「ショートカット:Cにした瞬間これで落ちずにフリーズしてるように見える」)ため、
+        // そちらは対象外にする。
+        let current_shake_ticks = (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
+        self.gravity_state.reset_shake_progress(current_shake_ticks);
 
         // 塗り替えによって既存の4連結以上の塊に同色ブロックが新たに隣接し、結合が
         // 拡大した場合も、実際に落下するのを待たずこの場で自動消滅させる(ユーザー指摘:
@@ -1158,6 +1164,49 @@ mod tests {
     }
 
     #[test]
+    fn falling_block_merges_after_a_long_multi_row_fall_via_many_small_frame_updates() {
+        // ユーザー指摘: 「この緑の横に2つのところに、たて5が結合した。しかし消えなかった」
+        // 「こういうテストをちゃんとやってほしい」。1回の大きなdeltaでまとめて進める
+        // 既存テストと異なり、実際のmain.rs(FRAME_INTERVAL_MS=33msごとにupdate()を呼ぶ)
+        // と同じ細かい刻みで、かつ何十行分もの長い空洞を連続落下させたうえで、
+        // 既存の縦に連結した塊(3個)と接触・合流して合計5個以上になった時点で
+        // 自動消滅することを確認する。
+        const FRAME_MS: u64 = 33;
+        let mut game = Game::new(40);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 11; // 落下グループから十分離す
+
+        // 既存の縦連結(3個、最深行に固定、常に支持されている)。
+        game.board.rows[997][0] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][0] = Cell::Color(ColorKind::Red);
+        game.board.rows[999][0] = Cell::Color(ColorKind::Red);
+
+        // 遠く離れた上空から落ちてくる縦連結(2個)。間の行は全てEmptyのまま
+        // (=何十行分もの空洞)なので、既存の連結に到達するまで何十ティックもかかる。
+        game.board.rows[900][0] = Cell::Color(ColorKind::Red);
+        game.board.rows[901][0] = Cell::Color(ColorKind::Red);
+
+        let mut events = Vec::new();
+        // 十分な時間(揺れ+96行ぶんの落下)を、実フレームと同じ33ms刻みで積み上げる。
+        let total_ms_needed = (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 97 * FALL_TICK_MS;
+        let mut elapsed_ms = 0u64;
+        while elapsed_ms < total_ms_needed {
+            events.extend(game.update(Duration::from_millis(FRAME_MS)));
+            elapsed_ms += FRAME_MS;
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 5 })),
+            "縦5個での自動消滅イベントが発生していない"
+        );
+        assert_eq!(game.player.score, 5 * 30, "5個ぶんの自動消滅スコアが入っているはず");
+        for row in [997, 998, 999] {
+            assert_eq!(game.board.cell(row, 0), Cell::Empty, "row={row}が消えていない");
+        }
+    }
+
+    #[test]
     fn player_falls_automatically_through_empty_space_without_any_input() {
         // spec.md 1章(TERM独自拡張): 支えを失った(直下がEmptyな)プレイヤーは、入力が
         // 無くてもFALL_TICK_MSごとに1マスずつ自動的に落下し続ける。
@@ -1306,6 +1355,35 @@ mod tests {
         // CRUSH_FLASH_MSぶん時間を進めると演出は終わる
         game.update(Duration::from_millis(crate::constants::CRUSH_FLASH_MS + 10));
         assert!(!game.crush_flash_active(), "CRUSH_FLASH_MS経過後は演出が終わっているはず");
+    }
+
+    #[test]
+    fn taking_air_from_under_a_block_does_not_cause_an_immediate_crush_it_shakes_first() {
+        // ユーザー指摘: 「AIRのうえにブロックがあるとき、そのAIRをとったら、すぐに
+        // そのうえのブロックが落ちてつぶされるバグ」。AIRを取得して支えを失った
+        // 直後も、通常の支え喪失(crush_flash_decays_to_inactive_after_crush_flash_duration
+        // 等)と同様にSHAKE_TICKSぶん揺れてから落下するはずで、即座には押し潰されない。
+        let mut game = Game::new(50);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.player.facing = Direction::Right;
+        game.board.rows[999][6] = Cell::Oxygen; // 取得対象のAIR(プレイヤーと同じ高さ)
+        game.board.rows[998][6] = Cell::Color(ColorKind::Red); // AIRの真上のブロック
+
+        let events = game.try_move_right();
+        assert!(events.iter().any(|e| matches!(e, GameEvent::OxygenCollected)));
+        assert_eq!(game.player.col, 6, "AIRのマスへ移動しているはず");
+        assert_eq!(game.player.lives, LIVES_DEFAULT, "移動しただけではまだ潰されていない");
+
+        // 支えを失った直後、SHAKE_TICKSぶんはまだ落下しない(押し潰されない)。
+        game.update(Duration::from_millis(SHAKE_TICKS as u64 * FALL_TICK_MS));
+        assert_eq!(game.player.lives, LIVES_DEFAULT, "揺れている間は押し潰されないはず");
+        assert_eq!(game.board.cell(998, 6), Cell::Color(ColorKind::Red), "まだ落下していない");
+
+        // 揺れが明けた次のティックで初めて落下し、押し潰される。
+        game.update(Duration::from_millis(FALL_TICK_MS + 10));
+        assert_eq!(game.player.lives, LIVES_DEFAULT - 1, "揺れが明けてから押し潰されるはず");
     }
 
     // --- 移動の見た目補間アニメーション(TERM独自拡張、9章) ---

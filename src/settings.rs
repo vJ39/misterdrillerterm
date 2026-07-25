@@ -34,9 +34,9 @@ pub struct Settings {
     /// スターブロックの出現率(%、100=通常のまま。0=完全に出現させない。TERM独自拡張)。
     /// 設定画面から調整する。
     pub star_spawn_rate_percent: u32,
-    /// 白ブロック(結合しないブロック)の出現率(%、100=通常のまま。0=完全に出現させない。
-    /// TERM独自拡張)。設定画面から調整する。
-    pub white_spawn_rate_percent: u32,
+    /// ダイヤブロックの出現率(%、100=通常のまま。0=完全に出現させない。TERM独自拡張)。
+    /// 設定画面から調整する。
+    pub diamond_spawn_rate_percent: u32,
 }
 
 impl Default for Settings {
@@ -50,7 +50,7 @@ impl Default for Settings {
             rock_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             air_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             star_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
-            white_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            diamond_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
         }
     }
 }
@@ -92,9 +92,9 @@ impl Settings {
             star_spawn_rate_percent: parse_u64_field(&text, "star_spawn_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.star_spawn_rate_percent),
-            white_spawn_rate_percent: parse_u64_field(&text, "white_spawn_rate_percent")
+            diamond_spawn_rate_percent: parse_u64_field(&text, "diamond_spawn_rate_percent")
                 .map(|v| v as u32)
-                .unwrap_or(default.white_spawn_rate_percent),
+                .unwrap_or(default.diamond_spawn_rate_percent),
         }
     }
 
@@ -116,7 +116,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"white_spawn_rate_percent\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
@@ -125,7 +125,7 @@ impl Settings {
             self.rock_spawn_rate_percent,
             self.air_spawn_rate_percent,
             self.star_spawn_rate_percent,
-            self.white_spawn_rate_percent
+            self.diamond_spawn_rate_percent
         );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(settings.rock_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.air_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.star_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
-        assert_eq!(settings.white_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(settings.diamond_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
     }
 
     #[test]
@@ -231,7 +231,7 @@ mod tests {
             rock_spawn_rate_percent: 140,
             air_spawn_rate_percent: 60,
             star_spawn_rate_percent: 0,
-            white_spawn_rate_percent: 300,
+            diamond_spawn_rate_percent: 0,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -245,7 +245,7 @@ mod tests {
             rock_spawn_rate_percent: 300,
             air_spawn_rate_percent: 20,
             star_spawn_rate_percent: 300,
-            white_spawn_rate_percent: 0,
+            diamond_spawn_rate_percent: 300,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

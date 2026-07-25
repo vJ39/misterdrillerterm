@@ -17,8 +17,8 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
-    STAR_SPAWN_RATE_PERCENT_MIN, WHITE_SPAWN_RATE_PERCENT_MIN,
+    DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
+    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -168,12 +168,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
-                            | ui::render::SettingsChoice::WhiteRate => {}
+                            | ui::render::SettingsChoice::DiamondRate => {}
                         }
                     }
-                    // Xブロック/AIR/スター/白の配分率調整(TERM独自拡張)。プレイ中なので、既に
-                    // 画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する
-                    // (ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
+                    // Xブロック/AIR/スター/ダイヤの配分率調整(TERM独自拡張)。プレイ中なので、
+                    // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映
+                    // する(ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
                             && matches!(
@@ -181,7 +181,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 ui::render::SettingsChoice::RockRate
                                     | ui::render::SettingsChoice::AirRate
                                     | ui::render::SettingsChoice::StarRate
-                                    | ui::render::SettingsChoice::WhiteRate
+                                    | ui::render::SettingsChoice::DiamondRate
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -198,9 +198,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.star_spawn_rate_percent =
                                     adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
                             }
-                            ui::render::SettingsChoice::WhiteRate => {
-                                settings.white_spawn_rate_percent =
-                                    adjust_rate_percent(settings.white_spawn_rate_percent, increase, WHITE_SPAWN_RATE_PERCENT_MIN);
+                            ui::render::SettingsChoice::DiamondRate => {
+                                settings.diamond_spawn_rate_percent = adjust_rate_percent(
+                                    settings.diamond_spawn_rate_percent,
+                                    increase,
+                                    DIAMOND_SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             _ => {}
                         }
@@ -211,7 +214,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
-                            settings.white_spawn_rate_percent,
+                            settings.diamond_spawn_rate_percent,
                         );
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
@@ -301,7 +304,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
-                            settings.white_spawn_rate_percent,
+                            settings.diamond_spawn_rate_percent,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -319,7 +322,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.rock_spawn_rate_percent,
                     settings.air_spawn_rate_percent,
                     settings.star_spawn_rate_percent,
-                    settings.white_spawn_rate_percent,
+                    settings.diamond_spawn_rate_percent,
                 )
             })?;
 
@@ -351,7 +354,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
-                            | ui::render::SettingsChoice::WhiteRate => {}
+                            | ui::render::SettingsChoice::DiamondRate => {}
                         }
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -360,7 +363,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::RockRate
                                 | ui::render::SettingsChoice::AirRate
                                 | ui::render::SettingsChoice::StarRate
-                                | ui::render::SettingsChoice::WhiteRate
+                                | ui::render::SettingsChoice::DiamondRate
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -377,9 +380,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.star_spawn_rate_percent =
                                     adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
                             }
-                            ui::render::SettingsChoice::WhiteRate => {
-                                settings.white_spawn_rate_percent =
-                                    adjust_rate_percent(settings.white_spawn_rate_percent, increase, WHITE_SPAWN_RATE_PERCENT_MIN);
+                            ui::render::SettingsChoice::DiamondRate => {
+                                settings.diamond_spawn_rate_percent = adjust_rate_percent(
+                                    settings.diamond_spawn_rate_percent,
+                                    increase,
+                                    DIAMOND_SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             _ => {}
                         }
@@ -414,14 +420,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                         game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                         game.set_shake_duration_ms(settings.shake_duration_ms);
-                        // Xブロック/AIR/スター/白の配分率設定も、新規ゲーム開始時に安全地帯
-                        // 明け(行2)以降の全体へ反映する(TERM独自拡張)。
+                        // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
+                        // 安全地帯明け(行2)以降の全体へ反映する(TERM独自拡張)。
                         game.reroll_spawn_rates_from(
                             2,
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
-                            settings.white_spawn_rate_percent,
+                            settings.diamond_spawn_rate_percent,
                         );
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
