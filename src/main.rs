@@ -61,6 +61,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     let mut last_tick = Instant::now();
     // 設定画面(TERM独自拡張)での現在の選択項目。
     let mut settings_selection = ui::render::SettingsChoice::Music;
+    // 一時停止中にオーバーレイ表示する設定/ヘルプ画面(TERM独自拡張。ユーザー指摘:
+    // 「一時停止中にもヘルプページを開けるようにする」「プレイ中に設定画面を呼び出せる
+    // ようにし、ファイルに保存されている設定をいじれるものとする」)。Gameを作り直さず
+    // Screen::Playingのまま上に重ねて描画するだけなので、画面遷移ではなくこのローカルな
+    // 状態フラグで管理する。
+    let mut pause_overlay = PauseOverlay::None;
 
     loop {
         // Playing→Titleへの遷移フラグ。`screen`自体への再代入は、`game`(screenを
@@ -78,8 +84,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     break; // Quit済みなら以降のキューされたアクションは処理しない
                 }
                 match action {
+                    // オーバーレイ(設定/ヘルプ)が開いている間のQはタイトルへ戻らず、
+                    // オーバーレイを閉じるだけにする(TERM独自拡張)。
+                    InputAction::Quit if pause_overlay != PauseOverlay::None => {
+                        pause_overlay = PauseOverlay::None;
+                    }
                     InputAction::Quit => back_to_title = true,
-                    InputAction::TogglePause => game.toggle_pause(),
+                    InputAction::TogglePause => {
+                        game.toggle_pause();
+                        pause_overlay = PauseOverlay::None;
+                    }
                     // M/EキーでのMUSIC/SE切り替えは、一時停止画面でのみ意味を持つ
                     // (spec.md 1章・10章、TERM独自拡張)。プレイ中(Paused以外)は無視する。
                     InputAction::ToggleMusic => {
@@ -95,6 +109,49 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                             settings.save();
                         }
+                    }
+                    // S/Hキーでの設定/ヘルプ画面オーバーレイ表示は、一時停止中でのみ意味を
+                    // 持つ(TERM独自拡張。ユーザー指摘: 「一時停止中にもヘルプページを
+                    // 開けるようにする」「プレイ中に設定画面を呼び出せるようにし、ファイルに
+                    // 保存されている設定をいじれるものとする」)。同じキーの再入力で閉じる。
+                    InputAction::OpenSettings => {
+                        if game.status == GameStatus::Paused {
+                            pause_overlay = if pause_overlay == PauseOverlay::Settings {
+                                PauseOverlay::None
+                            } else {
+                                PauseOverlay::Settings
+                            };
+                        }
+                    }
+                    InputAction::OpenHelp => {
+                        if game.status == GameStatus::Paused {
+                            pause_overlay = if pause_overlay == PauseOverlay::Help {
+                                PauseOverlay::None
+                            } else {
+                                PauseOverlay::Help
+                            };
+                        }
+                    }
+                    // 設定オーバーレイ表示中は上下キー/Spaceを選択操作として扱う(タイトル画面
+                    // のScreen::Settingsと同じ操作感)。
+                    InputAction::FaceUp | InputAction::FaceDown if pause_overlay == PauseOverlay::Settings => {
+                        settings_selection = match settings_selection {
+                            ui::render::SettingsChoice::Music => ui::render::SettingsChoice::Se,
+                            ui::render::SettingsChoice::Se => ui::render::SettingsChoice::Music,
+                        };
+                    }
+                    InputAction::Drill if pause_overlay == PauseOverlay::Settings => {
+                        match settings_selection {
+                            ui::render::SettingsChoice::Music => {
+                                settings.music_enabled = !settings.music_enabled;
+                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::Se => {
+                                settings.se_enabled = !settings.se_enabled;
+                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                            }
+                        }
+                        settings.save();
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
                     // (TERM独自拡張。ユーザー指摘: 「タイトルに戻るか、その場から復活して
@@ -166,7 +223,18 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
                 let music_on = music_enabled.load(Ordering::Relaxed);
                 let se_on = se_enabled.load(Ordering::Relaxed);
-                terminal.draw(|frame| ui::render::draw(frame, game, music_on, se_on))?;
+                terminal.draw(|frame| {
+                    ui::render::draw(frame, game, music_on, se_on);
+                    // 一時停止中の設定/ヘルプオーバーレイ(TERM独自拡張)。Screen::Playingの
+                    // ままGameを手放さずに上へ重ね描きするだけで、専用のScreen遷移は行わない。
+                    match pause_overlay {
+                        PauseOverlay::None => {}
+                        PauseOverlay::Settings => {
+                            ui::render::draw_settings(frame, settings_selection, music_on, se_on)
+                        }
+                        PauseOverlay::Help => ui::render::draw_help(frame),
+                    }
+                })?;
             }
         } else if let Screen::Settings = screen {
             let music_on = settings.music_enabled;
@@ -236,6 +304,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
         if back_to_title {
             screen = Screen::Title;
+            pause_overlay = PauseOverlay::None;
         }
     }
 
@@ -270,6 +339,15 @@ enum Screen {
     Settings,
     Help,
     Playing(Box<Game>),
+}
+
+/// 一時停止中にオーバーレイ表示する画面(TERM独自拡張)。`Screen::Playing`のまま
+/// (Gameを手放さず)上に重ねて描画するだけなので、独立した状態として持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PauseOverlay {
+    None,
+    Settings,
+    Help,
 }
 
 /// ゲームイベントを対応する効果音再生へ変換する。SE OFF設定中は何もしない。

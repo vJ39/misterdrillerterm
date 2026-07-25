@@ -188,6 +188,7 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
                     on_off_label(music_enabled),
                     on_off_label(se_enabled)
                 ),
+                "Sキーで設定画面 / Hキーでヘルプ",
             ],
         ),
         // 押し潰されてのミスは、GameOverオーバーレイを出す前に一呼吸「潰れた」演出

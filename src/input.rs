@@ -23,6 +23,9 @@ fn action_from_key_code(code: KeyCode) -> Option<InputAction> {
         // 「サウンドON/OFFではなくMUSIC/SEをそれぞれトグルできるように」)。
         KeyCode::Char('m') | KeyCode::Char('M') => InputAction::ToggleMusic,
         KeyCode::Char('e') | KeyCode::Char('E') => InputAction::ToggleSe,
+        // 一時停止中のみ意味を持つ、設定画面/ヘルプ画面のオーバーレイ表示(TERM独自拡張)。
+        KeyCode::Char('s') | KeyCode::Char('S') => InputAction::OpenSettings,
+        KeyCode::Char('h') | KeyCode::Char('H') => InputAction::OpenHelp,
         // デバッグショートカット(TERM独自拡張、動作確認用)。
         KeyCode::Char('c') | KeyCode::Char('C') => InputAction::DebugUnifyNearbyColors,
         KeyCode::Char('l') | KeyCode::Char('L') => InputAction::DebugAddLife,

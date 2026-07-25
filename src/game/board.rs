@@ -422,6 +422,15 @@ impl GravityState {
     pub fn is_shaking(&self, pos: (usize, usize)) -> bool {
         self.unsupported_ticks.contains_key(&pos)
     }
+
+    /// 揺れ状態を全てクリアする(TERM独自拡張)。デバッグショートカット等で盤面の
+    /// 色配置を重力ティックの外から直接書き換えた直後に呼ぶ。塊の境界が変わると
+    /// 揺れ状態が指していた代表座標の意味も変わってしまうため、次の重力ティックで
+    /// 結合関係(塊)を作り直して支持判定からやり直させる(ユーザー指摘: 「ショートカット
+    /// Cを10画面分に適用し、ちゃんと結合関係を再計算するように」)。
+    pub fn reset(&mut self) {
+        self.unsupported_ticks.clear();
+    }
 }
 
 /// 1回の重力ティックの結果。

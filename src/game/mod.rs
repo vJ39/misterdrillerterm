@@ -64,6 +64,12 @@ pub enum InputAction {
     DebugShakeDurationLonger,
     /// デバッグ: 揺れ時間(落下開始までの時間)を短くする(TERM独自拡張、動作確認用ショートカット)
     DebugShakeDurationShorter,
+    /// 設定画面(MUSIC/SE)をオーバーレイ表示する(TERM独自拡張)。一時停止画面でのみ
+    /// 意味を持つ。Gameの内部状態には影響しないため、この解釈もGameの外側=main.rsが担う
+    OpenSettings,
+    /// ヘルプ画面をオーバーレイ表示する(TERM独自拡張)。一時停止画面でのみ意味を持つ。
+    /// ユーザー指摘: 「一時停止中にもヘルプページを開けるようにする」
+    OpenHelp,
 }
 
 /// ゲーム全体の進行状態。
@@ -688,6 +694,11 @@ impl Game {
                 }
             }
         }
+
+        // 重力ティックの外から色配置を直接書き換えたため、塊(連結グループ)の境界が
+        // 変わっている。古い揺れ状態を引きずらず、次の重力ティックで結合関係を
+        // 一から作り直させる(ユーザー指摘: 「ちゃんと結合関係を再計算するように」)。
+        self.gravity_state.reset();
     }
 }
 
@@ -733,7 +744,8 @@ mod tests {
         let last_row = FIELD_DEPTH_M - 1;
         game.board.rows[last_row][game.player.col] = Cell::Empty;
 
-        let events = game.try_drill();
+        game.try_drill(); // 掘るだけでは移動しない(自然落下ペースを追い越さない)
+        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下で最深行へ進む
 
         assert_eq!(game.status, GameStatus::Cleared);
         assert!(events.iter().any(|e| matches!(e, GameEvent::Cleared)));
@@ -868,7 +880,8 @@ mod tests {
         game.player.facing = Direction::Down;
         game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
 
-        let events = game.try_drill(); // depth=31 -> level 2へ
+        game.try_drill(); // 掘るだけでは移動しない
+        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下でdepth=31 -> level 2へ
 
         assert!(events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 2 })));
     }
@@ -998,10 +1011,13 @@ mod tests {
 
         assert_eq!(game.board.cell(target_row, col), Cell::Empty);
         assert_eq!(game.player.oxygen, oxygen_before - 20.0);
-        assert_eq!(game.player.row, target_row, "破壊後は続けて1マス下降する");
+        assert_eq!(game.player.row, target_row - 1, "掘っただけでは移動しない");
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 1 })));
+
+        game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下で開いたマスへ進む
+        assert_eq!(game.player.row, target_row, "自由落下で続けて1マス下降する");
     }
 
     #[test]

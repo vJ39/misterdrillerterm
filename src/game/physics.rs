@@ -41,18 +41,6 @@ pub enum DrillOutcome {
     StarDestroyed,
 }
 
-/// 掘削の結果、対象セルが(既にEmptyだった場合も含め)空になったかどうか。
-/// 空になった場合のみ、そのマスへプレイヤーが進入できる(spec.md 1章)。
-fn drill_cleared_the_cell(outcome: DrillOutcome) -> bool {
-    !matches!(
-        outcome,
-        DrillOutcome::OutOfBounds
-            | DrillOutcome::RockHitIntact
-            | DrillOutcome::CrushedByUnstableOverhead
-            | DrillOutcome::OxygenUntouchedByDrill
-    )
-}
-
 /// 指定セルに対して掘削を1回実行し、盤面・プレイヤーのスコア/酸素へ反映する
 /// (移動は行わない。呼び出し側がoutcomeを見て移動の要否を判断する)。
 fn drill_cell(board: &mut Board, player: &mut Player, target: (usize, usize)) -> DrillOutcome {
@@ -189,20 +177,26 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
     LateralOutcome::Blocked
 }
 
-/// facingがUpの掘削対象セル`target`が「不安定」(まだ支持されていない、または揺れている)
-/// かどうかを判定する(TERM独自拡張)。色ブロック・岩ブロックは連結している塊全体で、
-/// 酸素カプセル・ダイヤは単独セルで判定する(spec.md 4章「同色ブロックが隣接したら
-/// 必ず結合する」と同じ考え方を、上向き掘削の安定判定にも適用する)。
+/// facingがUpの掘削対象セル`target`が「不安定」(支えを失い、かつ揺れの猶予期間も
+/// 明けて実際に落下している最中)かどうかを判定する(TERM独自拡張)。色ブロック・
+/// 岩ブロックは連結している塊全体で、酸素カプセル・ダイヤ・スターは単独セルで判定する
+/// (spec.md 4章「同色ブロックが隣接したら必ず結合する」と同じ考え方を、上向き掘削の
+/// 安定判定にも適用する)。
+///
+/// 揺れている最中(まだ静止していて、これから落下する予告状態)は押し潰しの対象に
+/// **しない**(ユーザー指摘: 「結合して引っかかったブロックに対しては上向き掘ったら、
+/// ちゃんと掘れる(つぶされない)」「ぐらぐら中は、上に掘ったら掘れる」)。揺れの
+/// 猶予期間はプレイヤーへの警告演出であり、その間に掘り出せば安全に処理できる。
 fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, usize), player_pos: (usize, usize)) -> bool {
     match board.cell(target.0, target.1) {
         Cell::Empty => false,
         Cell::Color(color) => {
             let group = connected_same_color(board, target, color);
-            !is_group_supported(board, &group, player_pos) || group.iter().any(|&p| gravity.is_shaking(p))
+            !is_group_supported(board, &group, player_pos) && !group.iter().any(|&p| gravity.is_shaking(p))
         }
         Cell::Rock { .. } => {
             let group = connected_rock_group(board, target);
-            !is_group_supported(board, &group, player_pos) || group.iter().any(|&p| gravity.is_shaking(p))
+            !is_group_supported(board, &group, player_pos) && !group.iter().any(|&p| gravity.is_shaking(p))
         }
         // AIR(酸素カプセル)は押し潰しの脅威にはならない(ユーザー指摘: 「AIRだったら、
         // 掘れはしないけどちゃんと取れてほしい。AIRに対しては掘っても無効化しておけば
@@ -211,20 +205,24 @@ fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, u
         // 自動取得を通じて行われる。
         Cell::Oxygen => false,
         Cell::Diamond | Cell::Star { .. } => {
-            !is_supported(board, target, player_pos) || gravity.is_shaking(target)
+            !is_supported(board, target, player_pos) && !gravity.is_shaking(target)
         }
     }
 }
 
 /// Space(Drill)入力を1回処理する(spec.md 1章)。
 ///
-/// facing方向の1マス先を、**移動を伴わずに**掘削する。facingがDownの場合のみ、
-/// 掘削の結果そのマスが空いていれば続けて1マス下降する。
+/// facing方向の1マス先を、**移動を伴わずに**掘削する。掘った結果そのマスが空いても、
+/// プレイヤーはその場に留まる(TERM独自拡張。ユーザー指摘: 「掘ったからと言って、
+/// プレイヤー落下速度が上がってはいけない」)。掘って開けたマスへ実際に進むのは、
+/// 既存の自由落下(`apply_player_free_fall`、`player_fall_tick_ms`ごとの論理ティック)
+/// に委ねる。これにより、掘削の連打で通常の落下ペースを追い越すことができなくなる
+/// (ブロックの重力や揺れ演出と同じ拍に、プレイヤー自身の下降も揃う)。
 ///
 /// facingがUpの場合のみ追加のチェックがある: 頭上のブロックがまだ支持されて
-/// いない(または揺れている)不安定な状態なら、掘削せずにその場で押し潰される
-/// (TERM独自拡張。ユーザー指摘: 「落下中のブロックは掘れない(つぶされる)。
-/// 結合して止まってるブロックが上にあるときは掘れる」)。
+/// おらず、かつ揺れの猶予も明けて実際に落下中の不安定な状態なら、掘削せずにその場で
+/// 押し潰される(TERM独自拡張。ユーザー指摘: 「落下中のブロックは掘れない(つぶされる)。
+/// 結合して止まってるブロックが上にあるときは掘れる」「ぐらぐら中は、上に掘ったら掘れる」)。
 ///
 /// 掘削キーを挟んだ場合は、Left/Rightの2ステップ段差登り(move_lateral)における
 /// 「ぶつかって停止中」の状態をリセットする(spec.md 1章、TERM独自拡張)。
@@ -244,14 +242,7 @@ pub fn drill_facing(board: &mut Board, player: &mut Player, gravity: &GravitySta
         return DrillOutcome::CrushedByUnstableOverhead;
     }
 
-    let outcome = drill_cell(board, player, target);
-
-    if player.facing == Direction::Down && drill_cleared_the_cell(outcome) {
-        player.row = target.0;
-        player.col = target.1;
-    }
-
-    outcome
+    drill_cell(board, player, target)
 }
 
 /// 酸素の自然減少を適用する(spec.md 6章)。生死判定は呼び出し側(Game)が行う。
@@ -610,7 +601,10 @@ mod tests {
     }
 
     #[test]
-    fn drill_facing_down_descends_after_clearing_the_cell() {
+    fn drill_facing_down_clears_the_cell_but_does_not_move_the_player() {
+        // ユーザー指摘: 「掘ったからと言って、プレイヤー落下速度が上がってはいけない」。
+        // 下方向への掘削はマスを空けるだけで、実際にそこへ進むのは既存の自由落下
+        // (apply_player_free_fall、player_fall_tick_msごとの論理ティック)に委ねる。
         let mut board = empty_board(3);
         let mut player = Player::new();
         player.facing = Direction::Down;
@@ -619,6 +613,12 @@ mod tests {
         let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
 
         assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
+        assert_eq!(player.row, 0, "掘っただけでは移動しない");
+        assert_eq!(board.cell(1, player.col), Cell::Empty);
+
+        // 掘って開けたマスへは、自由落下ティックで自然に進む。
+        let fall_outcome = apply_player_free_fall(&mut board, &mut player);
+        assert_eq!(fall_outcome, FreeFallOutcome::Fell);
         assert_eq!(player.row, 1);
     }
 

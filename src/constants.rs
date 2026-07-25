@@ -87,10 +87,10 @@ pub const DEBUG_FALL_TICK_MS_MAX: u64 = 600;
 
 /// デバッグショートカット「付近のブロックを2色に揃える」の対象範囲
 /// (プレイヤーの行を中心に上下何行を対象にするか)。TERM独自拡張・動作確認用。
-/// ユーザー指摘: 「ショートカット:Cの機能は、3画面分反映してほしい」を受け、
-/// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数、14)の3画面分
-/// (上下合計42行=半径21行)をカバーする値にしている。
-pub const DEBUG_UNIFY_COLORS_RANGE_ROWS: usize = 21;
+/// ユーザー指摘: 「ショートカットCを10画面分に適用」を受け、
+/// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数、14)の10画面分
+/// (上下合計140行=半径70行)をカバーする値にしている。
+pub const DEBUG_UNIFY_COLORS_RANGE_ROWS: usize = 70;
 
 /// デバッグショートカット: 揺れ時間(`SHAKE_DURATION_MS`相当)を1回の,/.入力で
 /// どれだけ増減させるか(ms)。TERM独自拡張・動作確認用・設定ファイルに永続化する。
