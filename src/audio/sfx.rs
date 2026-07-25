@@ -1,5 +1,6 @@
-//! 効果音(SE)。rodioの`Source`トレイトを自前実装し、矩形波をその場で生成する
-//! (spec.md 10章)。実機音源(WAV/MP3等のサンプル素材)は使用しない。
+//! 効果音(SE)・BGM用の波形ジェネレータ。rodioの`Source`トレイトを自前実装し、
+//! 矩形波・三角波・サイン波(和音)をその場で生成する(spec.md 10章)。
+//! 実機音源(WAV/MP3等のサンプル素材)は使用しない。
 
 use std::num::NonZero;
 use std::time::Duration;
@@ -33,25 +34,52 @@ fn tail_envelope(sample_index: u64, total_samples: u64, fade_samples: u64) -> f3
     }
 }
 
-/// `SquareWave`/`SquareChirp`共通の「サンプル進行・末尾フェード管理」状態。
-/// 波形そのものの計算(位相の進め方)だけが両者で異なるため、その他の管理項目と
+/// 各波形共通の「サンプル進行・エンベロープ管理」状態。
+/// 波形そのものの計算(位相の進め方)だけが型ごとに異なるため、その他の管理項目と
 /// `Source`トレイト実装をここに集約する。
+///
+/// エンベロープはアタック(0→1に立ち上がる)・ディケイ(1→`sustain_level`まで減衰する)・
+/// サステイン(`sustain_level`を維持する)・末尾フェード(クリック音防止のため0へ収束する)の
+/// 4段で構成する簡易AD(+S+末尾フェード)方式(BGMの単調なビープ感を抑えるためのTERM独自拡張)。
+/// 既存のSE(attack=0, decay=0, sustain=1.0)は末尾フェードのみとなり、従来通りの挙動を保つ。
 struct Oscillator {
     sample_rate: u32,
     sample_index: u64,
     total_samples: u64,
     fade_samples: u64,
+    attack_samples: u64,
+    decay_samples: u64,
+    sustain_level: f32,
     amplitude: f32,
 }
 
 impl Oscillator {
     fn new(duration_ms: u64, amplitude: f32) -> Self {
+        Oscillator::new_with_envelope(duration_ms, amplitude, 0, 0, 1.0)
+    }
+
+    /// アタック・ディケイ付きのオシレータを生成する。
+    /// `attack_ms`で0→1に立ち上がった後、`decay_ms`かけて`sustain_level`まで減衰し、
+    /// 以降は末尾フェードが始まるまで`sustain_level`を維持する。
+    fn new_with_envelope(
+        duration_ms: u64,
+        amplitude: f32,
+        attack_ms: u64,
+        decay_ms: u64,
+        sustain_level: f32,
+    ) -> Self {
         let (total_samples, fade_samples) = sample_counts(SAMPLE_RATE, duration_ms);
+        let attack_samples = (SAMPLE_RATE as u64 * attack_ms / 1000).min(total_samples);
+        let remaining_after_attack = total_samples.saturating_sub(attack_samples);
+        let decay_samples = (SAMPLE_RATE as u64 * decay_ms / 1000).min(remaining_after_attack);
         Oscillator {
             sample_rate: SAMPLE_RATE,
             sample_index: 0,
             total_samples,
             fade_samples,
+            attack_samples,
+            decay_samples,
+            sustain_level: sustain_level.clamp(0.0, 1.0),
             amplitude,
         }
     }
@@ -60,8 +88,22 @@ impl Oscillator {
         self.sample_index >= self.total_samples
     }
 
+    /// アタック→ディケイ→サステインの段階を表す振幅係数(0.0〜1.0)。
+    fn attack_decay_level(&self) -> f32 {
+        if self.attack_samples > 0 && self.sample_index < self.attack_samples {
+            return self.sample_index as f32 / self.attack_samples as f32;
+        }
+        let after_attack = self.sample_index.saturating_sub(self.attack_samples);
+        if self.decay_samples == 0 || after_attack >= self.decay_samples {
+            self.sustain_level
+        } else {
+            let progress = after_attack as f32 / self.decay_samples as f32;
+            1.0 - progress * (1.0 - self.sustain_level)
+        }
+    }
+
     fn envelope(&self) -> f32 {
-        tail_envelope(self.sample_index, self.total_samples, self.fade_samples)
+        self.attack_decay_level() * tail_envelope(self.sample_index, self.total_samples, self.fade_samples)
     }
 
     fn advance(&mut self) {
@@ -106,6 +148,21 @@ impl SquareWave {
         SquareWave {
             freq,
             osc: Oscillator::new(duration_ms, amplitude),
+        }
+    }
+
+    /// アタック・ディケイのエンベロープ付きで生成する(BGMのメロディ用)。
+    fn with_envelope(
+        freq: f32,
+        duration_ms: u64,
+        amplitude: f32,
+        attack_ms: u64,
+        decay_ms: u64,
+        sustain_level: f32,
+    ) -> Self {
+        SquareWave {
+            freq,
+            osc: Oscillator::new_with_envelope(duration_ms, amplitude, attack_ms, decay_ms, sustain_level),
         }
     }
 }
@@ -167,9 +224,133 @@ impl Iterator for SquareChirp {
 
 impl_source_via_oscillator!(SquareChirp);
 
+/// 単一周波数の三角波(有限長・AD/末尾フェード付き)。BGMのベースライン用。
+/// 矩形波より倍音が少なく丸い音色になるため、低音のベースパートに向く。
+pub struct TriangleWave {
+    freq: f32,
+    osc: Oscillator,
+}
+
+impl TriangleWave {
+    fn with_envelope(
+        freq: f32,
+        duration_ms: u64,
+        amplitude: f32,
+        attack_ms: u64,
+        decay_ms: u64,
+        sustain_level: f32,
+    ) -> Self {
+        TriangleWave {
+            freq,
+            osc: Oscillator::new_with_envelope(duration_ms, amplitude, attack_ms, decay_ms, sustain_level),
+        }
+    }
+}
+
+impl Iterator for TriangleWave {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.osc.finished() {
+            return None;
+        }
+        let t = self.osc.sample_index as f32 / self.osc.sample_rate as f32;
+        let phase = (t * self.freq).fract();
+        // 標準的な三角波: 0→1で-1→1へ線形上昇、1→0.5→1(次周期)で1→-1へ線形下降。
+        let raw = if phase < 0.5 { -1.0 + 4.0 * phase } else { 3.0 - 4.0 * phase };
+        let value = raw * self.osc.amplitude * self.osc.envelope();
+        self.osc.advance();
+        Some(value)
+    }
+}
+
+impl_source_via_oscillator!(TriangleWave);
+
+/// 複数周波数のサイン波を加算合成した和音(有限長・AD/末尾フェード付き)。
+/// BGMのハーモニー/パッド用(中音域に長めの和音を敷いて音の厚みを出す)。
+pub struct SineChord {
+    freqs: Vec<f32>,
+    osc: Oscillator,
+}
+
+impl SineChord {
+    fn with_envelope(
+        freqs: Vec<f32>,
+        duration_ms: u64,
+        amplitude: f32,
+        attack_ms: u64,
+        decay_ms: u64,
+        sustain_level: f32,
+    ) -> Self {
+        SineChord {
+            freqs,
+            osc: Oscillator::new_with_envelope(duration_ms, amplitude, attack_ms, decay_ms, sustain_level),
+        }
+    }
+}
+
+impl Iterator for SineChord {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.osc.finished() {
+            return None;
+        }
+        let t = self.osc.sample_index as f32 / self.osc.sample_rate as f32;
+        let voice_count = self.freqs.len().max(1) as f32;
+        let raw: f32 = self
+            .freqs
+            .iter()
+            .map(|freq| (2.0 * std::f32::consts::PI * freq * t).sin())
+            .sum::<f32>()
+            / voice_count;
+        let value = raw * self.osc.amplitude * self.osc.envelope();
+        self.osc.advance();
+        Some(value)
+    }
+}
+
+impl_source_via_oscillator!(SineChord);
+
 /// 単一周波数の矩形波を作る(BGM用にも共用)。
 pub fn square_tone(freq: f32, duration_ms: u64, amplitude: f32) -> SquareWave {
     SquareWave::new(freq, duration_ms, amplitude)
+}
+
+/// アタック・ディケイ付きの矩形波を作る(BGMのメロディ用)。
+pub fn square_tone_enveloped(
+    freq: f32,
+    duration_ms: u64,
+    amplitude: f32,
+    attack_ms: u64,
+    decay_ms: u64,
+    sustain_level: f32,
+) -> SquareWave {
+    SquareWave::with_envelope(freq, duration_ms, amplitude, attack_ms, decay_ms, sustain_level)
+}
+
+/// アタック・ディケイ付きの三角波を作る(BGMのベースライン用)。
+pub fn triangle_tone_enveloped(
+    freq: f32,
+    duration_ms: u64,
+    amplitude: f32,
+    attack_ms: u64,
+    decay_ms: u64,
+    sustain_level: f32,
+) -> TriangleWave {
+    TriangleWave::with_envelope(freq, duration_ms, amplitude, attack_ms, decay_ms, sustain_level)
+}
+
+/// アタック・ディケイ付きのサイン波和音を作る(BGMのハーモニー/パッド用)。
+pub fn sine_chord(
+    freqs: &[f32],
+    duration_ms: u64,
+    amplitude: f32,
+    attack_ms: u64,
+    decay_ms: u64,
+    sustain_level: f32,
+) -> SineChord {
+    SineChord::with_envelope(freqs.to_vec(), duration_ms, amplitude, attack_ms, decay_ms, sustain_level)
 }
 
 /// 周波数が線形に変化する矩形波(チャープ)を作る。
@@ -197,9 +378,16 @@ fn play_sequence(mixer: &Mixer, tones: Vec<Box<dyn Source<Item = f32> + Send>>, 
     player.detach();
 }
 
-/// 掘削音: 掘削入力を受け付けた瞬間(ブロックの有無に関わらず)。矩形波 440Hz, 20ms。
+/// 掘削音: 色ブロックの直接掘削、または岩ブロックへのヒットが実際に発生した瞬間。
+/// 矩形波 440Hz, 20ms(spec.md 10章)。
 pub fn play_dig(mixer: &Mixer) {
     play_tone(mixer, square_tone(440.0, 20, 0.5), SE_VOLUME);
+}
+
+/// 岩ブロックヒット音(未破壊): 岩ブロックへ掘削入力し、5回目未満でまだ破壊に至らない瞬間。
+/// 矩形波(短い低音) 220Hz, 20ms(spec.md 10章)。
+pub fn play_rock_hit(mixer: &Mixer) {
+    play_tone(mixer, square_tone(220.0, 20, 0.5), SE_VOLUME);
 }
 
 /// 破壊音: ブロックが破壊され消滅した瞬間。矩形波(下降チャープ) 220Hz→110Hz, 60ms。
@@ -224,9 +412,9 @@ pub fn play_oxygen_warning(mixer: &Mixer) {
     play_tone(mixer, square_tone(880.0, 200, 0.5), SE_VOLUME);
 }
 
-/// チェックポイント到達音: 200/400/600/800m到達時。矩形波4音アルペジオ
-/// 523/659/784/1046Hz、各80ms。
-pub fn play_checkpoint(mixer: &Mixer) {
+/// レベルアップ音: 30mごとのレベル到達時(spec.md 7章)。矩形波4音アルペジオ
+/// 523/659/784/1046Hz、各80ms(spec.md 10章)。
+pub fn play_level_up(mixer: &Mixer) {
     play_sequence(
         mixer,
         vec![
@@ -255,12 +443,14 @@ pub fn play_clear_fanfare(mixer: &Mixer) {
     );
 }
 
-/// ミス音: ゲームオーバー時。矩形波(下降チャープ) 440Hz→110Hz, 500ms。
+/// ミス音(ゲームオーバー): 最後のライフを失った瞬間。矩形波(下降チャープ)
+/// 440Hz→110Hz, 500ms(spec.md 10章)。
 pub fn play_miss(mixer: &Mixer) {
     play_tone(mixer, square_chirp(440.0, 110.0, 500, 0.5), SE_VOLUME);
 }
 
-/// 掘削失敗音(任意): 岩ブロックへ入力した時。矩形波(低音単発) 110Hz, 30ms。
-pub fn play_dig_fail(mixer: &Mixer) {
-    play_tone(mixer, square_tone(110.0, 30, 0.5), SE_VOLUME);
+/// ライフロス音: ライフを1つ失ったが、まだライフが残っている瞬間。矩形波(短い下降チャープ)
+/// 440Hz→220Hz, 250ms(spec.md 10章)。
+pub fn play_life_lost(mixer: &Mixer) {
+    play_tone(mixer, square_chirp(440.0, 220.0, 250, 0.5), SE_VOLUME);
 }
