@@ -691,7 +691,14 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
         let representative = group[0];
         let ticks_unsupported = gravity.unsupported_ticks.get(&representative).copied().unwrap_or(0) + 1;
         if ticks_unsupported as u32 > shake_ticks as u32 {
-            // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する
+            // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する。
+            // 移動後もなお未支持なら、次のティック以降は揺れ直さずそのまま落下し続ける
+            // (ユーザー指摘: 「落下開始したら、ぐらぐらしなくてもいい」)。移動先の
+            // 代表座標(行+1・列は変わらない)へ、既に揺れが明けたことを示す印を
+            // 引き継いでおく。値を`shake_ticks+1`に固定するのは、落下し続ける間に
+            // ここへ延々と加算してu8オーバーフローするのを避けるため。
+            let unlocked_representative = (representative.0 + 1, representative.1);
+            next_unsupported_ticks.insert(unlocked_representative, shake_ticks.saturating_add(1));
             falling_groups.push(group);
         } else {
             // まだ揺れている最中 -> 移動しない。描画用に塊の全セルを揺れ中として記録する。
@@ -1232,6 +1239,35 @@ mod tests {
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
         assert!(!gravity.is_shaking((1, 0)), "着地して支持されればもう揺れていない");
+    }
+
+    #[test]
+    fn once_falling_starts_it_continues_every_tick_without_re_shaking() {
+        // ユーザー指摘: 「落下開始したら、ぐらぐらしなくてもいい」。開放された縦穴を
+        // 連続で落ちる間、1マス落ちるたびに揺れ直すことはない(揺れるのは最初の
+        // SHAKE_TICKSぶんだけ)。
+        let mut board = empty_board(6);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        for _ in 0..SHAKE_TICKS {
+            apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        }
+
+        // SHAKE_TICKS+1回目の呼び出しで揺れが明けて最初の1マスが落ちる。
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        assert_eq!(outcome.cells_moved, 1);
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
+        assert!(!gravity.is_shaking((1, 0)));
+
+        // 以降、最深行に着地するまで毎ティック連続で1マスずつ落下し続け、
+        // 揺れ状態(is_shaking)には一切戻らない。
+        for expected_row in 2..6 {
+            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+            assert_eq!(outcome.cells_moved, 1, "row={expected_row}到達時点で連続落下しているはず");
+            assert_eq!(board.cell(expected_row, 0), Cell::Color(ColorKind::Red));
+            assert!(!gravity.is_shaking((expected_row, 0)), "落下中は揺れ状態に戻らないはず");
+        }
     }
 
     #[test]
