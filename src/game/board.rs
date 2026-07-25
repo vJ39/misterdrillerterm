@@ -885,12 +885,23 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
         if board.cell(to.0, to.1) == Cell::Empty {
             continue; // 押し潰しでこの塊自体が消滅済み
         }
-        if !is_group_supported(board, &moved_group, player_pos) {
-            continue; // まだ落下中(次ティック以降に改めて着地判定する)
-        }
         match board.cell(to.0, to.1) {
             Cell::Color(color) => {
                 let vanish_group = connected_same_color(board, to, color);
+                // 支持判定は「落下してきた塊自身のセルだけ」ではなく、新たに接触した
+                // 既存の塊も含めた現在の連結グループ全体で行う。既存の静的な塊の
+                // 「真横」に接触して結合した場合、落下塊自身のセルの直下は空のままの
+                // ことがあり(例: 縦棒の隣に落ちてきた1個)、moved_groupだけを見ると
+                // 未支持=まだ落下中と判定されてこのtickの自動消滅チェックをスキップ
+                // してしまう。ところが次tickにはcollect_fall_groupsが両者を1つの
+                // 塊として合体させ、既存側の支え(最深行等)によって「支持済み」に
+                // 分類されるため、以後二度と自動消滅チェックの対象にならず、
+                // 4連結以上のまま永久に残ってしまう(発見: 「結合したのに消えない」
+                // 報告群の実体)。着地判定と自動消滅判定を同じ「現在の連結グループ」
+                // 基準に揃えることで、この食い違いを無くす。
+                if !is_group_supported(board, &vanish_group, player_pos) {
+                    continue; // まだ落下中(次ティック以降に改めて着地判定する)
+                }
                 if vanish_group.len() >= 4 {
                     for &(vr, vc) in &vanish_group {
                         board.set(vr, vc, Cell::Empty);
@@ -900,6 +911,9 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
             }
             Cell::Rock { .. } => {
                 let vanish_group = connected_rock_group(board, to);
+                if !is_group_supported(board, &vanish_group, player_pos) {
+                    continue;
+                }
                 if vanish_group.len() >= 4 {
                     for &(vr, vc) in &vanish_group {
                         board.set(vr, vc, Cell::Empty);
@@ -1906,6 +1920,37 @@ mod tests {
         for &(r, c) in &[(2, 3), (3, 3), (3, 2), (3, 1), (3, 0)] {
             assert_eq!(board.cell(r, c), Cell::Empty, "row={r},col={c}が消えていない");
         }
+    }
+
+    #[test]
+    fn falling_block_that_lands_beside_a_static_column_still_triggers_auto_vanish() {
+        // 発見: 落下してきた塊が既存の静的な塊の「真上」ではなく「横」に接触して
+        // 結合する場合、着地したそのtickでは is_group_supported が「落下塊自身の
+        // セルだけ」を見るため(隣の静的構造は別グループ扱いで支えの根拠にならない)
+        // 未支持と判定されて自動消滅チェックがスキップされる。ところが次のtickには
+        // collect_fall_groupsが両者を1つの塊として合体させ、静的構造側の支え
+        // (最深行)によって「支持済み」と分類されてしまうため、二度と自動消滅
+        // チェックの対象にならず、4連結以上のまま永久に残ってしまう。
+        let mut board = empty_board(6); // row5が最深行
+        board.rows[3][0] = Cell::Color(ColorKind::Red);
+        board.rows[4][0] = Cell::Color(ColorKind::Red);
+        board.rows[5][0] = Cell::Color(ColorKind::Red); // 静的な3連結(最深行で支持済み)
+        board.rows[0][1] = Cell::Color(ColorKind::Red); // 隣の列を落ちてくる1個
+        let mut gravity = GravityState::new();
+        let player_pos = (usize::MAX, usize::MAX);
+
+        for _ in 0..(SHAKE_TICKS as usize + 1) * 10 {
+            apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+        }
+
+        for r in 0..6 {
+            assert_eq!(
+                board.cell(r, 0),
+                Cell::Empty,
+                "row={r} col=0: 4連結以上になったので自動消滅しているはず"
+            );
+        }
+        assert_eq!(board.cell(3, 1), Cell::Empty, "落下してきた側も自動消滅しているはず");
     }
 
     #[test]
