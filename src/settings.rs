@@ -31,6 +31,9 @@ pub struct Settings {
     pub rock_spawn_rate_percent: u32,
     /// AIR(酸素カプセル)の出現率(%、100=通常のまま。TERM独自拡張)。設定画面から調整する。
     pub air_spawn_rate_percent: u32,
+    /// スターブロックの出現率(%、100=通常のまま。0=完全に出現させない。TERM独自拡張)。
+    /// 設定画面から調整する。
+    pub star_spawn_rate_percent: u32,
 }
 
 impl Default for Settings {
@@ -43,6 +46,7 @@ impl Default for Settings {
             shake_duration_ms: SHAKE_DURATION_MS,
             rock_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             air_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            star_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
         }
     }
 }
@@ -81,6 +85,9 @@ impl Settings {
             air_spawn_rate_percent: parse_u64_field(&text, "air_spawn_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.air_spawn_rate_percent),
+            star_spawn_rate_percent: parse_u64_field(&text, "star_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.star_spawn_rate_percent),
         }
     }
 
@@ -102,14 +109,15 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
             self.player_fall_tick_ms,
             self.shake_duration_ms,
             self.rock_spawn_rate_percent,
-            self.air_spawn_rate_percent
+            self.air_spawn_rate_percent,
+            self.star_spawn_rate_percent
         );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
@@ -159,6 +167,7 @@ mod tests {
         assert_eq!(settings.player_fall_tick_ms, FALL_TICK_MS);
         assert_eq!(settings.rock_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.air_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(settings.star_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
     }
 
     #[test]
@@ -212,6 +221,7 @@ mod tests {
             shake_duration_ms: 300,
             rock_spawn_rate_percent: 140,
             air_spawn_rate_percent: 60,
+            star_spawn_rate_percent: 0,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -224,6 +234,7 @@ mod tests {
             shake_duration_ms: 600,
             rock_spawn_rate_percent: 300,
             air_spawn_rate_percent: 20,
+            star_spawn_rate_percent: 300,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

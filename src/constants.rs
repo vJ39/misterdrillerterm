@@ -119,7 +119,11 @@ pub const SPAWN_RATE_PERCENT_MIN: u32 = 20;
 pub const SPAWN_RATE_PERCENT_MAX: u32 = 300;
 pub const SPAWN_RATE_PERCENT_STEP: u32 = 20;
 
-/// プレイ中に配分率(岩/AIR)を変更した際、書き換え対象をプレイヤーの十分先(画面外)
-/// に限定するための安全マージン(行数、TERM独自拡張)。既に見えている範囲の地形が
-/// 突然変わって見えることを防ぐ。
+/// スターブロックの出現率設定の下限(%、TERM独自拡張)。ユーザー指摘: 「スターブロック
+/// 比率0〜」。岩/AIRと異なり、完全に出現させない(0%)設定も許可する。
+pub const STAR_SPAWN_RATE_PERCENT_MIN: u32 = 0;
+
+/// プレイ中に配分率(岩/AIR/スター)を変更した際、書き換え対象をプレイヤーの十分先
+/// (画面外)に限定するための安全マージン(行数、TERM独自拡張)。既に見えている範囲の
+/// 地形が突然変わって見えることを防ぐ。
 pub const SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS: usize = 40;

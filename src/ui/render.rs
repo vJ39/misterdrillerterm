@@ -278,7 +278,7 @@ pub fn draw_help(frame: &mut Frame) {
         line(""),
         heading("== 一時停止中のみ =="),
         line("M: MUSIC ON/OFF   E: SE ON/OFF"),
-        line("S: 設定画面(MUSIC/SE/Xブロック配分/AIR配分)   H: このヘルプ"),
+        line("S: 設定画面(MUSIC/SE/Xブロック・AIR・スター配分)   H: このヘルプ"),
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
@@ -311,6 +311,9 @@ pub enum SettingsChoice {
     RockRate,
     /// AIR(酸素カプセル)の出現率(%)。TERM独自拡張。
     AirRate,
+    /// スターブロックの出現率(%、0まで下げられる)。TERM独自拡張。
+    /// ユーザー指摘: 「スターブロック比率0〜」
+    StarRate,
 }
 
 impl SettingsChoice {
@@ -320,13 +323,14 @@ impl SettingsChoice {
             SettingsChoice::Music => SettingsChoice::Se,
             SettingsChoice::Se => SettingsChoice::RockRate,
             SettingsChoice::RockRate => SettingsChoice::AirRate,
-            SettingsChoice::AirRate => SettingsChoice::Music,
+            SettingsChoice::AirRate => SettingsChoice::StarRate,
+            SettingsChoice::StarRate => SettingsChoice::Music,
         }
     }
 }
 
-/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIRの出現率(%)、現在選択中の
-/// 項目をカーソル(反転表示)で示す。
+/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スターの出現率(%)、
+/// 現在選択中の項目をカーソル(反転表示)で示す。
 pub fn draw_settings(
     frame: &mut Frame,
     selection: SettingsChoice,
@@ -334,6 +338,7 @@ pub fn draw_settings(
     se_enabled: bool,
     rock_rate_percent: u32,
     air_rate_percent: u32,
+    star_rate_percent: u32,
 ) {
     let area = frame.area();
 
@@ -370,6 +375,7 @@ pub fn draw_settings(
         toggle_line("SE", se_enabled, selection == SettingsChoice::Se),
         rate_line("Xブロック配分", rock_rate_percent, selection == SettingsChoice::RockRate),
         rate_line("AIR配分", air_rate_percent, selection == SettingsChoice::AirRate),
+        rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
         Line::from(""),
         Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
         Line::from(Span::styled("配分は←→で調整 / Qでタイトルへ", text_style)),

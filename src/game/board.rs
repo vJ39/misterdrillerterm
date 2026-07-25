@@ -242,22 +242,25 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         row,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
     )
 }
 
-/// `overlay_rock_oxygen_diamond`の、岩/AIR出現率を設定値(%、100=通常のまま)で
+/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター出現率を設定値(%、100=通常のまま)で
 /// 調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
-/// いじれるようにしたい」)。ダイヤ・スターの出現率は調整対象外。
+/// いじれるようにしたい」「スターブロック比率0〜」)。ダイヤの出現率は調整対象外。
 fn overlay_rock_oxygen_diamond_with_rates(
     rng: &mut ChaCha8Rng,
     base_color: ColorKind,
     row: usize,
     rock_rate_percent: u32,
     air_rate_percent: u32,
+    star_rate_percent: u32,
 ) -> Cell {
     let mut t = band_table(row);
     t.rock = (t.rock * rock_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.oxygen = (t.oxygen * air_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    t.star = (t.star * star_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
 
     let r: f32 = rng.random_range(0.0..1.0);
     if r < t.rock {
@@ -325,7 +328,13 @@ impl Board {
     /// 確定しているマスは、元の色情報を保持していないため対象外(掘削で新たに生まれる
     /// 色ブロックには次回以降の抽選から反映される)。再現性は求めないため、
     /// 呼び出しごとに新しい乱数系列を使う。
-    pub fn reroll_overlays_from_row(&mut self, from_row: usize, rock_rate_percent: u32, air_rate_percent: u32) {
+    pub fn reroll_overlays_from_row(
+        &mut self,
+        from_row: usize,
+        rock_rate_percent: u32,
+        air_rate_percent: u32,
+        star_rate_percent: u32,
+    ) {
         use rand::RngExt;
         let seed: u64 = rand::rng().random();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -333,8 +342,14 @@ impl Board {
         for row in from_row..self.rows.len() {
             for col in 0..FIELD_WIDTH {
                 if let Cell::Color(color) = self.rows[row][col] {
-                    self.rows[row][col] =
-                        overlay_rock_oxygen_diamond_with_rates(&mut rng, color, row, rock_rate_percent, air_rate_percent);
+                    self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
+                        &mut rng,
+                        color,
+                        row,
+                        rock_rate_percent,
+                        air_rate_percent,
+                        star_rate_percent,
+                    );
                 }
             }
         }
@@ -873,7 +888,7 @@ mod tests {
         }
         board.rows[3][0] = Cell::Rock { hits: 3 }; // 既に上書き済み、再抽選対象外
 
-        board.reroll_overlays_from_row(1, 300, 300); // 岩/AIRの確率を大きく引き上げる
+        board.reroll_overlays_from_row(1, 300, 300, 300); // 岩/AIR/スターの確率を大きく引き上げる
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -900,15 +915,32 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100);
+        low.reroll_overlays_from_row(0, 20, 100, 100);
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100);
+        high.reroll_overlays_from_row(0, 300, 100, 100);
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
             high_count > low_count * 2,
             "配分率を上げれば統計的に岩ブロックが明確に増えるはず: low={low_count}, high={high_count}"
         );
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_star_rate_zero_produces_no_star_cells() {
+        // ユーザー指摘: 「スターブロック比率0〜」。0%を指定すれば、通常なら出現するはずの
+        // スターブロックが一切生成されないことを確認する。
+        let mut board = empty_board(500);
+        for row in 0..500 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 100, 100, 0);
+
+        let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
+        assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
     }
 
     #[test]

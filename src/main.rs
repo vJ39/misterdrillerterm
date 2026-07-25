@@ -16,7 +16,10 @@ use std::time::{Duration, Instant};
 use rand::RngExt;
 use rodio::mixer::Mixer;
 
-use constants::{SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS};
+use constants::{
+    SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
+    STAR_SPAWN_RATE_PERCENT_MIN,
+};
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
 
@@ -151,32 +154,47 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.save();
                             }
                             // 配分率は←→で調整するので、Spaceは無効(トグル対象ではない)。
-                            ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate => {}
+                            ui::render::SettingsChoice::RockRate
+                            | ui::render::SettingsChoice::AirRate
+                            | ui::render::SettingsChoice::StarRate => {}
                         }
                     }
-                    // Xブロック/AIRの配分率調整(TERM独自拡張)。プレイ中なので、既に画面に
-                    // 見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する
+                    // Xブロック/AIR/スターの配分率調整(TERM独自拡張)。プレイ中なので、既に
+                    // 画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する
                     // (ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
                             && matches!(
                                 settings_selection,
-                                ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate
+                                ui::render::SettingsChoice::RockRate
+                                    | ui::render::SettingsChoice::AirRate
+                                    | ui::render::SettingsChoice::StarRate
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
                         match settings_selection {
                             ui::render::SettingsChoice::RockRate => {
-                                settings.rock_spawn_rate_percent = adjust_rate_percent(settings.rock_spawn_rate_percent, increase);
+                                settings.rock_spawn_rate_percent =
+                                    adjust_rate_percent(settings.rock_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
                             }
                             ui::render::SettingsChoice::AirRate => {
-                                settings.air_spawn_rate_percent = adjust_rate_percent(settings.air_spawn_rate_percent, increase);
+                                settings.air_spawn_rate_percent =
+                                    adjust_rate_percent(settings.air_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
+                            }
+                            ui::render::SettingsChoice::StarRate => {
+                                settings.star_spawn_rate_percent =
+                                    adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
                             }
                             _ => {}
                         }
                         settings.save();
                         let from_row = game.player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS;
-                        game.reroll_spawn_rates_from(from_row, settings.rock_spawn_rate_percent, settings.air_spawn_rate_percent);
+                        game.reroll_spawn_rates_from(
+                            from_row,
+                            settings.rock_spawn_rate_percent,
+                            settings.air_spawn_rate_percent,
+                            settings.star_spawn_rate_percent,
+                        );
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
                     // (TERM独自拡張。ユーザー指摘: 「タイトルに戻るか、その場から復活して
@@ -261,6 +279,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             se_on,
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
+                            settings.star_spawn_rate_percent,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -277,6 +296,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     se_on,
                     settings.rock_spawn_rate_percent,
                     settings.air_spawn_rate_percent,
+                    settings.star_spawn_rate_percent,
                 )
             })?;
 
@@ -302,22 +322,32 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
-                            ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate => {}
+                            ui::render::SettingsChoice::RockRate
+                            | ui::render::SettingsChoice::AirRate
+                            | ui::render::SettingsChoice::StarRate => {}
                         }
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
                         if matches!(
                             settings_selection,
-                            ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate
+                            ui::render::SettingsChoice::RockRate
+                                | ui::render::SettingsChoice::AirRate
+                                | ui::render::SettingsChoice::StarRate
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
                         match settings_selection {
                             ui::render::SettingsChoice::RockRate => {
-                                settings.rock_spawn_rate_percent = adjust_rate_percent(settings.rock_spawn_rate_percent, increase);
+                                settings.rock_spawn_rate_percent =
+                                    adjust_rate_percent(settings.rock_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
                             }
                             ui::render::SettingsChoice::AirRate => {
-                                settings.air_spawn_rate_percent = adjust_rate_percent(settings.air_spawn_rate_percent, increase);
+                                settings.air_spawn_rate_percent =
+                                    adjust_rate_percent(settings.air_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
+                            }
+                            ui::render::SettingsChoice::StarRate => {
+                                settings.star_spawn_rate_percent =
+                                    adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
                             }
                             _ => {}
                         }
@@ -354,7 +384,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_shake_duration_ms(settings.shake_duration_ms);
                         // Xブロック/AIRの配分率設定も、新規ゲーム開始時に安全地帯明け
                         // (行2)以降の全体へ反映する(TERM独自拡張)。
-                        game.reroll_spawn_rates_from(2, settings.rock_spawn_rate_percent, settings.air_spawn_rate_percent);
+                        game.reroll_spawn_rates_from(
+                            2,
+                            settings.rock_spawn_rate_percent,
+                            settings.air_spawn_rate_percent,
+                            settings.star_spawn_rate_percent,
+                        );
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
                     }
@@ -410,14 +445,15 @@ enum PauseOverlay {
     Help,
 }
 
-/// Xブロック/AIRの出現率設定(%)を1ステップぶん増減し、既定の範囲にクランプする
-/// (TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
-/// ようにしたい」)。
-fn adjust_rate_percent(current: u32, increase: bool) -> u32 {
+/// Xブロック/AIR/スターの出現率設定(%)を1ステップぶん増減し、指定した下限
+/// (岩/AIRは`SPAWN_RATE_PERCENT_MIN`、スターは0まで下げられる`STAR_SPAWN_RATE_PERCENT_MIN`)
+/// 〜`SPAWN_RATE_PERCENT_MAX`にクランプする(TERM独自拡張。ユーザー指摘: 「設定で
+/// Xブロックの配分量・AIRの配分量をいじれるようにしたい」「スターブロック比率0〜」)。
+fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
     if increase {
         (current + SPAWN_RATE_PERCENT_STEP).min(SPAWN_RATE_PERCENT_MAX)
     } else {
-        current.saturating_sub(SPAWN_RATE_PERCENT_STEP).max(SPAWN_RATE_PERCENT_MIN)
+        current.saturating_sub(SPAWN_RATE_PERCENT_STEP).max(min)
     }
 }
 

@@ -641,8 +641,15 @@ impl Game {
     /// 開始直後は`from_row`に安全地帯明けの行を渡せば盤面全体に反映され、プレイ中に
     /// 呼ぶ場合は呼び出し側が`player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`のような
     /// 画面外の行を渡すことで、既に見えている地形を変えてしまわないようにする。
-    pub fn reroll_spawn_rates_from(&mut self, from_row: usize, rock_rate_percent: u32, air_rate_percent: u32) {
-        self.board.reroll_overlays_from_row(from_row, rock_rate_percent, air_rate_percent);
+    pub fn reroll_spawn_rates_from(
+        &mut self,
+        from_row: usize,
+        rock_rate_percent: u32,
+        air_rate_percent: u32,
+        star_rate_percent: u32,
+    ) {
+        self.board
+            .reroll_overlays_from_row(from_row, rock_rate_percent, air_rate_percent, star_rate_percent);
     }
 
     /// デバッグ: 揺れ時間(ブロックが支えを失ってから実際に落下し始めるまでの時間)を
