@@ -1413,4 +1413,46 @@ mod tests {
         game.update(Duration::from_millis(crate::constants::MOVE_ANIM_DURATION_MS + 10));
         assert_eq!(game.move_anim_progress(), 1.0, "MOVE_ANIM_DURATION_MS経過後は補間が完了しているはず");
     }
+
+    // --- ショートカットC: 2色化+結合再計算(TERM独自拡張) ---
+
+    #[test]
+    fn debug_unify_nearby_colors_repaints_to_exactly_two_colors_and_vanishes_new_four_connections() {
+        // ユーザー指摘: 「ショートカット:Cは、既存ブロックを2色に変化するように
+        // してほしい。その際結合関係を再計算で」。ランダムな2色のみへ塗り替え、
+        // 塗り替えによって新たに4連結以上になった箇所はその場で自動消滅することを
+        // 確認する(色の選択はOS乱数のため非決定的。十分な回数試行して確認する)。
+        let mut merged_at_least_once = false;
+        for _ in 0..300 {
+            let mut game = Game::new(1);
+            clear_board(&mut game);
+            game.player.row = 500;
+            game.player.col = 5;
+            game.board.rows[500][0] = Cell::Color(ColorKind::Red);
+            game.board.rows[500][1] = Cell::Color(ColorKind::Blue);
+            game.board.rows[500][2] = Cell::Color(ColorKind::Green);
+            game.board.rows[500][3] = Cell::Color(ColorKind::Yellow);
+
+            let events = game.debug_unify_nearby_colors();
+
+            let mut colors_seen: Vec<ColorKind> = Vec::new();
+            for c in 0..4 {
+                if let Cell::Color(k) = game.board.cell(500, c)
+                    && !colors_seen.contains(&k)
+                {
+                    colors_seen.push(k);
+                }
+            }
+            assert!(colors_seen.len() <= 2, "2色より多い色が残っている: {colors_seen:?}");
+
+            if events.iter().any(|e| matches!(e, GameEvent::BlockDestroyed { .. })) {
+                for c in 0..4 {
+                    assert_eq!(game.board.cell(500, c), Cell::Empty, "4連結になった箇所は自動消滅しているはず");
+                }
+                merged_at_least_once = true;
+                break;
+            }
+        }
+        assert!(merged_at_least_once, "300回試行しても4連結による自動消滅が一度も発生しなかった");
+    }
 }
