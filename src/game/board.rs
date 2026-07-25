@@ -2123,6 +2123,41 @@ mod tests {
     }
 
     #[test]
+    fn a_plus_shaped_group_floating_over_a_wide_open_cavity_eventually_falls() {
+        // ユーザー報告(スクリーンショット): 横棒3個+縦棒3個(縦棒が横棒の中央を貫く
+        // 「十字/プラス」型)の赤ブロック塊が、直下が広い空洞なのに落ちてこない。
+        let mut board = empty_board(30);
+        board.rows[0][4] = Cell::Color(ColorKind::Red); // 十字の頭頂部
+        board.rows[1][3] = Cell::Color(ColorKind::Red); // 横棒(左)
+        board.rows[1][4] = Cell::Color(ColorKind::Red); // 横棒(中央、縦棒と共有)
+        board.rows[1][5] = Cell::Color(ColorKind::Red); // 横棒(右)
+        board.rows[2][4] = Cell::Color(ColorKind::Red); // 縦棒(下へ続く)
+        board.rows[3][4] = Cell::Color(ColorKind::Red); // 縦棒(下へ続く)
+        // row4以降、col4は最深行(row29)までずっとEmpty(広い空洞)。
+        let mut gravity = GravityState::new();
+        let player_pos = (usize::MAX, usize::MAX);
+
+        for _ in 0..(SHAKE_TICKS as usize + 1) * 30 {
+            apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+        }
+
+        for group in collect_fall_groups(&board) {
+            assert!(
+                is_group_supported(&board, &group, player_pos),
+                "十分な時間が経っても未支持のまま残っている塊がある: {group:?}"
+            );
+        }
+        // 元の位置(浮いていた場所)からは動いているはず。6個連結なので最深行まで
+        // 落ちきった時点で4個以上自動消滅ルールにより消滅する可能性もあるが、
+        // 「浮いたまま元の位置に固まって残る」ことさえなければ良い。
+        assert_eq!(
+            board.cell(0, 4),
+            Cell::Empty,
+            "十字の頭頂部が元の位置に浮いたまま残っている(落下していない)"
+        );
+    }
+
+    #[test]
     fn no_group_remains_unsupported_forever_on_random_boards() {
         // ユーザー報告「孤立した赤ブロックが落ちてこない」の統計的な回帰検証。
         // ランダム生成した盤面を十分な回数ティックさせ、最終的に全ての塊が
