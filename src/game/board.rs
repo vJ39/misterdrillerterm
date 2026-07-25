@@ -325,57 +325,6 @@ impl Board {
         self.rows[row][col] = cell;
     }
 
-    /// 指定行範囲内で、4個以上連結した色ブロック・岩ブロックの塊を即座に消滅させる
-    /// (TERM独自拡張)。ショートカットC(付近ブロックの色統一)のように、重力ティックの
-    /// 外から盤面を直接書き換えて新たに4連結以上の塊が生まれた場合、既存の自動消滅判定
-    /// (`apply_gravity_tick`の着地チェック)は実際に落下するまで働かないため、この関数を
-    /// 書き換え直後に呼んで即座に判定する(ユーザー指摘: 「すでに4個以上の結合ブロックに、
-    /// 同色のブロックが隣接したら結合が拡大するが、この変化においてもブロックは消えないと
-    /// だめ」)。連結範囲は行範囲をまたいでも正しく辿るため、`start_row`〜`end_row`は
-    /// 「走査を開始する行の範囲」であって「消滅対象を打ち切る境界」ではない。
-    /// 戻り値は(消滅した色ブロック数, 消滅した岩ブロック数)。
-    pub fn vanish_four_or_more_connected_groups_in_range(&mut self, start_row: usize, end_row: usize) -> (usize, usize) {
-        let mut visited: HashSet<(usize, usize)> = HashSet::new();
-        let mut vanished_colors = 0;
-        let mut vanished_rocks = 0;
-        let end_row = end_row.min(self.depth_rows().saturating_sub(1));
-
-        for row in start_row..=end_row {
-            for col in 0..FIELD_WIDTH {
-                let pos = (row, col);
-                if visited.contains(&pos) {
-                    continue;
-                }
-                match self.cell(row, col) {
-                    Cell::Color(color) => {
-                        let group = connected_same_color(self, pos, color);
-                        visited.extend(group.iter().copied());
-                        if group.len() >= 4 {
-                            for &(r, c) in &group {
-                                self.set(r, c, Cell::Empty);
-                            }
-                            vanished_colors += group.len();
-                        }
-                    }
-                    Cell::Rock { .. } => {
-                        let group = connected_rock_group(self, pos);
-                        visited.extend(group.iter().copied());
-                        if group.len() >= 4 {
-                            for &(r, c) in &group {
-                                self.set(r, c, Cell::Empty);
-                            }
-                            vanished_rocks += group.len();
-                        }
-                    }
-                    _ => {
-                        visited.insert(pos);
-                    }
-                }
-            }
-        }
-
-        (vanished_colors, vanished_rocks)
-    }
 
     /// `from_row`以降の未掘削マス(`Cell::Empty`以外の全セル)について、色・岩(X)・
     /// AIR・スター・ダイヤの内訳を指定の配分率(%、100=通常のまま)で丸ごと
@@ -1096,65 +1045,6 @@ mod tests {
         assert_eq!(diamond_groups.len(), 3, "隣接していてもダイヤブロックはそれぞれ単独の塊のはず");
         for group in diamond_groups {
             assert_eq!(group.len(), 1);
-        }
-    }
-
-    // --- ショートカットC相当: 重力ティック外での直接書き換え後の即時自動消滅 ---
-
-    #[test]
-    fn vanish_four_or_more_connected_groups_in_range_clears_a_newly_expanded_group() {
-        // ユーザー指摘: 「すでに4個以上の結合ブロックに、同色のブロックが隣接したら
-        // 結合が拡大するが、この変化においてもブロックは消えないとだめ」。重力ティックを
-        // 経由しない直接書き換え(ショートカットC等)で新たに4連結以上になった場合でも、
-        // この関数を呼べばその場で消滅させられる。
-        let mut board = empty_board(1);
-        board.rows[0][0] = Cell::Color(ColorKind::Red);
-        board.rows[0][1] = Cell::Color(ColorKind::Red);
-        board.rows[0][2] = Cell::Color(ColorKind::Red);
-        // 4個目は書き換え直後を想定し、既存の3連結に新たに隣接したものとする。
-        board.rows[0][3] = Cell::Color(ColorKind::Red);
-
-        let (vanished_colors, vanished_rocks) = board.vanish_four_or_more_connected_groups_in_range(0, 0);
-
-        assert_eq!(vanished_colors, 4);
-        assert_eq!(vanished_rocks, 0);
-        for col in 0..4 {
-            assert_eq!(board.cell(0, col), Cell::Empty);
-        }
-    }
-
-    #[test]
-    fn vanish_four_or_more_connected_groups_in_range_leaves_groups_of_three_or_fewer() {
-        let mut board = empty_board(1);
-        board.rows[0][0] = Cell::Color(ColorKind::Blue);
-        board.rows[0][1] = Cell::Color(ColorKind::Blue);
-        board.rows[0][2] = Cell::Color(ColorKind::Blue);
-
-        let (vanished_colors, vanished_rocks) = board.vanish_four_or_more_connected_groups_in_range(0, 0);
-
-        assert_eq!(vanished_colors, 0);
-        assert_eq!(vanished_rocks, 0);
-        for col in 0..3 {
-            assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Blue));
-        }
-    }
-
-    #[test]
-    fn vanish_four_or_more_connected_groups_in_range_finds_full_group_beyond_the_scan_range() {
-        // スキャン開始行の範囲は「消滅対象を打ち切る境界」ではなく「走査を始める範囲」
-        // なので、範囲外に伸びた連結部分もまとめて消える。
-        let mut board = empty_board(4);
-        board.rows[0][0] = Cell::Color(ColorKind::Green);
-        board.rows[1][0] = Cell::Color(ColorKind::Green);
-        board.rows[2][0] = Cell::Color(ColorKind::Green);
-        board.rows[3][0] = Cell::Color(ColorKind::Green);
-
-        // start_row=end_row=0のみを走査対象にしても、BFSは連結全体を辿る。
-        let (vanished_colors, _) = board.vanish_four_or_more_connected_groups_in_range(0, 0);
-
-        assert_eq!(vanished_colors, 4);
-        for row in 0..4 {
-            assert_eq!(board.cell(row, 0), Cell::Empty);
         }
     }
 

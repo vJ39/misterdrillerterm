@@ -704,9 +704,8 @@ impl Game {
     /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
     /// ランダムに選んだ2色だけへ揃える。Playing中のみ有効。
     pub fn debug_unify_nearby_colors(&mut self) -> Vec<GameEvent> {
-        let mut events = Vec::new();
         if self.status != GameStatus::Playing {
-            return events;
+            return Vec::new();
         }
         use rand::RngExt;
         let mut rng = rand::rng();
@@ -734,25 +733,16 @@ impl Game {
         // 揺れ直させてしまうと、Cを押した瞬間に「フリーズしたように見える」(ユーザー指摘:
         // 「ショートカット:Cにした瞬間これで落ちずにフリーズしてるように見える」)ため、
         // そちらは対象外にする。
+        //
+        // なお、塗り替えで新たに4連結以上になった箇所を即座に自動消滅させる処理は
+        // 過去に実装していたが、「単にブロックの色を2色に変換するだけでよくて、
+        // 消滅させなくていい」というユーザー指摘により廃止した。連結の再計算(揺れ状態の
+        // リセット)だけ行い、実際の消滅判定は通常の重力ティック(支えを失って落下・
+        // 着地した場合のみ)に委ねる。
         let current_shake_ticks = (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
         self.gravity_state.reset_shake_progress(current_shake_ticks);
 
-        // 塗り替えによって既存の4連結以上の塊に同色ブロックが新たに隣接し、結合が
-        // 拡大した場合も、実際に落下するのを待たずこの場で自動消滅させる(ユーザー指摘:
-        // 「すでに4個以上の結合ブロックに、同色のブロックが隣接したら結合が拡大するが、
-        // この変化においてもブロックは消えないとだめ」)。
-        let (vanished_colors, vanished_rocks) =
-            self.board.vanish_four_or_more_connected_groups_in_range(start_row, end_row);
-        if vanished_colors > 0 {
-            self.player.award_auto_vanish_score(vanished_colors);
-            events.push(GameEvent::BlockDestroyed { blocks: vanished_colors });
-        }
-        if vanished_rocks > 0 {
-            // 岩ブロックの自動消滅は得点対象外(spec.md 4.9・既存ルールと同じ)。
-            events.push(GameEvent::BlockDestroyed { blocks: vanished_rocks });
-        }
-
-        events
+        Vec::new()
     }
 }
 
@@ -1417,12 +1407,12 @@ mod tests {
     // --- ショートカットC: 2色化+結合再計算(TERM独自拡張) ---
 
     #[test]
-    fn debug_unify_nearby_colors_repaints_to_exactly_two_colors_and_vanishes_new_four_connections() {
-        // ユーザー指摘: 「ショートカット:Cは、既存ブロックを2色に変化するように
-        // してほしい。その際結合関係を再計算で」。ランダムな2色のみへ塗り替え、
-        // 塗り替えによって新たに4連結以上になった箇所はその場で自動消滅することを
-        // 確認する(色の選択はOS乱数のため非決定的。十分な回数試行して確認する)。
-        let mut merged_at_least_once = false;
+    fn debug_unify_nearby_colors_repaints_to_exactly_two_colors_and_never_vanishes() {
+        // ユーザー指摘: 「単にブロックの色を2色に変換するだけでよくて、消滅させなくて
+        // いい」。ランダムな2色のみへ塗り替えることは行うが、塗り替えによって新たに
+        // 4連結以上になった箇所があっても即座には自動消滅させない(色の選択はOS乱数の
+        // ため非決定的。十分な回数試行して両方の性質を確認する)。
+        let mut saw_four_or_more_connected_and_intact = false;
         for _ in 0..300 {
             let mut game = Game::new(1);
             clear_board(&mut game);
@@ -1435,6 +1425,8 @@ mod tests {
 
             let events = game.debug_unify_nearby_colors();
 
+            assert!(events.is_empty(), "塗り替えだけで自動消滅イベントは発生しないはず");
+
             let mut colors_seen: Vec<ColorKind> = Vec::new();
             for c in 0..4 {
                 if let Cell::Color(k) = game.board.cell(500, c)
@@ -1444,15 +1436,18 @@ mod tests {
                 }
             }
             assert!(colors_seen.len() <= 2, "2色より多い色が残っている: {colors_seen:?}");
+            for c in 0..4 {
+                assert_ne!(game.board.cell(500, c), Cell::Empty, "塗り替えただけで消滅してはいけない");
+            }
 
-            if events.iter().any(|e| matches!(e, GameEvent::BlockDestroyed { .. })) {
-                for c in 0..4 {
-                    assert_eq!(game.board.cell(500, c), Cell::Empty, "4連結になった箇所は自動消滅しているはず");
-                }
-                merged_at_least_once = true;
+            if colors_seen.len() == 1 {
+                saw_four_or_more_connected_and_intact = true;
                 break;
             }
         }
-        assert!(merged_at_least_once, "300回試行しても4連結による自動消滅が一度も発生しなかった");
+        assert!(
+            saw_four_or_more_connected_and_intact,
+            "300回試行しても4連結が形成されるケースを確認できなかった"
+        );
     }
 }
