@@ -635,6 +635,16 @@ impl Game {
         self.shake_duration_ms = ms.clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
     }
 
+    /// `from_row`以降の岩(X)/AIR出現率を、指定の配分率(%、100=通常のまま)で
+    /// 再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
+    /// いじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」)。新規ゲーム
+    /// 開始直後は`from_row`に安全地帯明けの行を渡せば盤面全体に反映され、プレイ中に
+    /// 呼ぶ場合は呼び出し側が`player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`のような
+    /// 画面外の行を渡すことで、既に見えている地形を変えてしまわないようにする。
+    pub fn reroll_spawn_rates_from(&mut self, from_row: usize, rock_rate_percent: u32, air_rate_percent: u32) {
+        self.board.reroll_overlays_from_row(from_row, rock_rate_percent, air_rate_percent);
+    }
+
     /// デバッグ: 揺れ時間(ブロックが支えを失ってから実際に落下し始めるまでの時間)を
     /// `DEBUG_SHAKE_DURATION_STEP_MS`ぶん増減する。`longer`がtrueなら長く(遅く反応)、
     /// falseなら短く(速く反応、0まで)する。

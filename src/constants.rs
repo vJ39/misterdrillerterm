@@ -109,3 +109,17 @@ pub const STAR_MELT_TICKS: u8 = 6;
 /// 「画面内」とみなす、プレイヤー位置からの行範囲(上下±この値、TERM独自拡張)。
 /// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数)に合わせている。
 pub const STAR_VISIBLE_RANGE_ROWS: usize = 14;
+
+/// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま。
+/// TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
+/// ようにしたい。プレイ中でもその数値をいじれるようにしたい」)。設定画面から
+/// 調整でき、settings.jsonに永続化する。
+pub const SPAWN_RATE_PERCENT_DEFAULT: u32 = 100;
+pub const SPAWN_RATE_PERCENT_MIN: u32 = 20;
+pub const SPAWN_RATE_PERCENT_MAX: u32 = 300;
+pub const SPAWN_RATE_PERCENT_STEP: u32 = 20;
+
+/// プレイ中に配分率(岩/AIR)を変更した際、書き換え対象をプレイヤーの十分先(画面外)
+/// に限定するための安全マージン(行数、TERM独自拡張)。既に見えている範囲の地形が
+/// 突然変わって見えることを防ぐ。
+pub const SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS: usize = 40;

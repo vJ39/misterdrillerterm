@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use rand::RngExt;
 use rodio::mixer::Mixer;
 
+use constants::{SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS};
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
 
@@ -135,23 +136,47 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     // 設定オーバーレイ表示中は上下キー/Spaceを選択操作として扱う(タイトル画面
                     // のScreen::Settingsと同じ操作感)。
                     InputAction::FaceUp | InputAction::FaceDown if pause_overlay == PauseOverlay::Settings => {
-                        settings_selection = match settings_selection {
-                            ui::render::SettingsChoice::Music => ui::render::SettingsChoice::Se,
-                            ui::render::SettingsChoice::Se => ui::render::SettingsChoice::Music,
-                        };
+                        settings_selection = settings_selection.cycle();
                     }
                     InputAction::Drill if pause_overlay == PauseOverlay::Settings => {
                         match settings_selection {
                             ui::render::SettingsChoice::Music => {
                                 settings.music_enabled = !settings.music_enabled;
                                 music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                                settings.save();
                             }
                             ui::render::SettingsChoice::Se => {
                                 settings.se_enabled = !settings.se_enabled;
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                                settings.save();
                             }
+                            // 配分率は←→で調整するので、Spaceは無効(トグル対象ではない)。
+                            ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate => {}
+                        }
+                    }
+                    // Xブロック/AIRの配分率調整(TERM独自拡張)。プレイ中なので、既に画面に
+                    // 見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する
+                    // (ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if pause_overlay == PauseOverlay::Settings
+                            && matches!(
+                                settings_selection,
+                                ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate
+                            ) =>
+                    {
+                        let increase = action == InputAction::MoveRight;
+                        match settings_selection {
+                            ui::render::SettingsChoice::RockRate => {
+                                settings.rock_spawn_rate_percent = adjust_rate_percent(settings.rock_spawn_rate_percent, increase);
+                            }
+                            ui::render::SettingsChoice::AirRate => {
+                                settings.air_spawn_rate_percent = adjust_rate_percent(settings.air_spawn_rate_percent, increase);
+                            }
+                            _ => {}
                         }
                         settings.save();
+                        let from_row = game.player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS;
+                        game.reroll_spawn_rates_from(from_row, settings.rock_spawn_rate_percent, settings.air_spawn_rate_percent);
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
                     // (TERM独自拡張。ユーザー指摘: 「タイトルに戻るか、その場から復活して
@@ -229,9 +254,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     // ままGameを手放さずに上へ重ね描きするだけで、専用のScreen遷移は行わない。
                     match pause_overlay {
                         PauseOverlay::None => {}
-                        PauseOverlay::Settings => {
-                            ui::render::draw_settings(frame, settings_selection, music_on, se_on)
-                        }
+                        PauseOverlay::Settings => ui::render::draw_settings(
+                            frame,
+                            settings_selection,
+                            music_on,
+                            se_on,
+                            settings.rock_spawn_rate_percent,
+                            settings.air_spawn_rate_percent,
+                        ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
                 })?;
@@ -239,30 +269,57 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         } else if let Screen::Settings = screen {
             let music_on = settings.music_enabled;
             let se_on = settings.se_enabled;
-            terminal.draw(|frame| ui::render::draw_settings(frame, settings_selection, music_on, se_on))?;
+            terminal.draw(|frame| {
+                ui::render::draw_settings(
+                    frame,
+                    settings_selection,
+                    music_on,
+                    se_on,
+                    settings.rock_spawn_rate_percent,
+                    settings.air_spawn_rate_percent,
+                )
+            })?;
 
             // 設定画面もpoll_input_batchを使う(FaceUp/FaceDown=選択切替、Drill=トグル、
-            // Quit=タイトルへ戻る、を既存のInputActionそのまま再利用できるため。
-            // TERM独自拡張。ユーザー指摘: 「カーソルで選んでスペースでトグル」)。
+            // MoveLeft/MoveRight=配分率調整、Quit=タイトルへ戻る、を既存のInputActionそのまま
+            // 再利用できるため。TERM独自拡張。ユーザー指摘: 「カーソルで選んでスペースで
+            // トグル」「設定でXブロックの配分量・AIRの配分量をいじれるようにしたい」)。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 match action {
                     InputAction::Quit => screen = Screen::Title,
                     InputAction::FaceUp | InputAction::FaceDown => {
-                        settings_selection = match settings_selection {
-                            ui::render::SettingsChoice::Music => ui::render::SettingsChoice::Se,
-                            ui::render::SettingsChoice::Se => ui::render::SettingsChoice::Music,
-                        };
+                        settings_selection = settings_selection.cycle();
                     }
                     InputAction::Drill => {
                         match settings_selection {
                             ui::render::SettingsChoice::Music => {
                                 settings.music_enabled = !settings.music_enabled;
                                 music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                                settings.save();
                             }
                             ui::render::SettingsChoice::Se => {
                                 settings.se_enabled = !settings.se_enabled;
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                                settings.save();
                             }
+                            ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate => {}
+                        }
+                    }
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if matches!(
+                            settings_selection,
+                            ui::render::SettingsChoice::RockRate | ui::render::SettingsChoice::AirRate
+                        ) =>
+                    {
+                        let increase = action == InputAction::MoveRight;
+                        match settings_selection {
+                            ui::render::SettingsChoice::RockRate => {
+                                settings.rock_spawn_rate_percent = adjust_rate_percent(settings.rock_spawn_rate_percent, increase);
+                            }
+                            ui::render::SettingsChoice::AirRate => {
+                                settings.air_spawn_rate_percent = adjust_rate_percent(settings.air_spawn_rate_percent, increase);
+                            }
+                            _ => {}
                         }
                         settings.save();
                     }
@@ -295,6 +352,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                         game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                         game.set_shake_duration_ms(settings.shake_duration_ms);
+                        // Xブロック/AIRの配分率設定も、新規ゲーム開始時に安全地帯明け
+                        // (行2)以降の全体へ反映する(TERM独自拡張)。
+                        game.reroll_spawn_rates_from(2, settings.rock_spawn_rate_percent, settings.air_spawn_rate_percent);
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
                     }
@@ -348,6 +408,17 @@ enum PauseOverlay {
     None,
     Settings,
     Help,
+}
+
+/// Xブロック/AIRの出現率設定(%)を1ステップぶん増減し、既定の範囲にクランプする
+/// (TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
+/// ようにしたい」)。
+fn adjust_rate_percent(current: u32, increase: bool) -> u32 {
+    if increase {
+        (current + SPAWN_RATE_PERCENT_STEP).min(SPAWN_RATE_PERCENT_MAX)
+    } else {
+        current.saturating_sub(SPAWN_RATE_PERCENT_STEP).max(SPAWN_RATE_PERCENT_MIN)
+    }
 }
 
 /// ゲームイベントを対応する効果音再生へ変換する。SE OFF設定中は何もしない。

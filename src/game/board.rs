@@ -236,7 +236,29 @@ fn fix_isolated_cells(base: &mut [[Option<ColorKind>; FIELD_WIDTH]]) {
 
 /// 岩・酸素・ダイヤの上書き配置(spec.md 3.5)。マスごとに独立抽選する。
 fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row: usize) -> Cell {
-    let t = band_table(row);
+    overlay_rock_oxygen_diamond_with_rates(
+        rng,
+        base_color,
+        row,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+    )
+}
+
+/// `overlay_rock_oxygen_diamond`の、岩/AIR出現率を設定値(%、100=通常のまま)で
+/// 調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
+/// いじれるようにしたい」)。ダイヤ・スターの出現率は調整対象外。
+fn overlay_rock_oxygen_diamond_with_rates(
+    rng: &mut ChaCha8Rng,
+    base_color: ColorKind,
+    row: usize,
+    rock_rate_percent: u32,
+    air_rate_percent: u32,
+) -> Cell {
+    let mut t = band_table(row);
+    t.rock = (t.rock * rock_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    t.oxygen = (t.oxygen * air_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+
     let r: f32 = rng.random_range(0.0..1.0);
     if r < t.rock {
         Cell::Rock { hits: 0 }
@@ -294,6 +316,28 @@ impl Board {
 
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         self.rows[row][col] = cell;
+    }
+
+    /// `from_row`以降の、まだ何も上書きされていない色ブロック(`Cell::Color`)について、
+    /// 岩(X)/AIRの出現を指定の配分率(%、100=通常のまま)で再抽選する(TERM独自拡張。
+    /// ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれるようにしたい。
+    /// プレイ中でもその数値をいじれるようにしたい」)。既に岩/AIR/ダイヤ/スターとして
+    /// 確定しているマスは、元の色情報を保持していないため対象外(掘削で新たに生まれる
+    /// 色ブロックには次回以降の抽選から反映される)。再現性は求めないため、
+    /// 呼び出しごとに新しい乱数系列を使う。
+    pub fn reroll_overlays_from_row(&mut self, from_row: usize, rock_rate_percent: u32, air_rate_percent: u32) {
+        use rand::RngExt;
+        let seed: u64 = rand::rng().random();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+        for row in from_row..self.rows.len() {
+            for col in 0..FIELD_WIDTH {
+                if let Cell::Color(color) = self.rows[row][col] {
+                    self.rows[row][col] =
+                        overlay_rock_oxygen_diamond_with_rates(&mut rng, color, row, rock_rate_percent, air_rate_percent);
+                }
+            }
+        }
     }
 }
 
@@ -809,6 +853,55 @@ mod tests {
             assert_eq!(board.cell(0, col), Cell::Empty);
             assert_eq!(board.cell(1, col), Cell::Empty);
         }
+    }
+
+    // --- プレイ中の配分率(岩/AIR)変更(TERM独自拡張) ---
+
+    #[test]
+    fn reroll_overlays_from_row_leaves_rows_before_from_row_and_already_overlaid_cells_untouched() {
+        let mut board = empty_board(5);
+        for col in 0..FIELD_WIDTH {
+            board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
+            board.rows[2][col] = Cell::Color(ColorKind::Blue); // from_row以降
+        }
+        board.rows[3][0] = Cell::Rock { hits: 3 }; // 既に上書き済み、再抽選対象外
+
+        board.reroll_overlays_from_row(1, 300, 300); // 岩/AIRの確率を大きく引き上げる
+
+        for col in 0..FIELD_WIDTH {
+            assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
+        }
+        assert!(
+            matches!(board.cell(3, 0), Cell::Rock { hits: 3 }),
+            "既に岩として確定済みのセルは元の色情報を持たないため対象外"
+        );
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_higher_rock_rate_yields_more_rock_cells_on_average() {
+        fn all_color_board(rows: usize) -> Board {
+            let mut b = empty_board(rows);
+            for row in 0..rows {
+                for col in 0..FIELD_WIDTH {
+                    b.rows[row][col] = Cell::Color(ColorKind::Red);
+                }
+            }
+            b
+        }
+        fn count_rocks(board: &Board) -> usize {
+            board.rows.iter().flatten().filter(|c| matches!(c, Cell::Rock { .. })).count()
+        }
+
+        let mut low = all_color_board(500);
+        low.reroll_overlays_from_row(0, 20, 100);
+        let mut high = all_color_board(500);
+        high.reroll_overlays_from_row(0, 300, 100);
+
+        let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
+        assert!(
+            high_count > low_count * 2,
+            "配分率を上げれば統計的に岩ブロックが明確に増えるはず: low={low_count}, high={high_count}"
+        );
     }
 
     #[test]

@@ -278,6 +278,7 @@ pub fn draw_help(frame: &mut Frame) {
         line(""),
         heading("== 一時停止中のみ =="),
         line("M: MUSIC ON/OFF   E: SE ON/OFF"),
+        line("S: 設定画面(MUSIC/SE/Xブロック配分/AIR配分)   H: このヘルプ"),
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
@@ -305,11 +306,35 @@ pub fn draw_help(frame: &mut Frame) {
 pub enum SettingsChoice {
     Music,
     Se,
+    /// Xブロック(岩)の出現率(%)。TERM独自拡張。ユーザー指摘: 「設定でXブロックの
+    /// 配分量・AIRの配分量をいじれるようにしたい」
+    RockRate,
+    /// AIR(酸素カプセル)の出現率(%)。TERM独自拡張。
+    AirRate,
 }
 
-/// 設定画面を描画する。MUSIC/SEの各項目とON/OFF状態、現在選択中の項目を
-/// カーソル(反転表示)で示す。
-pub fn draw_settings(frame: &mut Frame, selection: SettingsChoice, music_enabled: bool, se_enabled: bool) {
+impl SettingsChoice {
+    /// ↑↓での選択項目の巡回(TERM独自拡張)。
+    pub fn cycle(self) -> Self {
+        match self {
+            SettingsChoice::Music => SettingsChoice::Se,
+            SettingsChoice::Se => SettingsChoice::RockRate,
+            SettingsChoice::RockRate => SettingsChoice::AirRate,
+            SettingsChoice::AirRate => SettingsChoice::Music,
+        }
+    }
+}
+
+/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIRの出現率(%)、現在選択中の
+/// 項目をカーソル(反転表示)で示す。
+pub fn draw_settings(
+    frame: &mut Frame,
+    selection: SettingsChoice,
+    music_enabled: bool,
+    se_enabled: bool,
+    rock_rate_percent: u32,
+    air_rate_percent: u32,
+) {
     let area = frame.area();
 
     frame
@@ -317,7 +342,7 @@ pub fn draw_settings(frame: &mut Frame, selection: SettingsChoice, music_enabled
         .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-    let settings_area = centered_rect(60, 40, frame_rect);
+    let settings_area = centered_rect(60, 50, frame_rect);
     frame.render_widget(Clear, settings_area);
 
     let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
@@ -327,19 +352,27 @@ pub fn draw_settings(frame: &mut Frame, selection: SettingsChoice, music_enabled
         .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
-    let item_line = |label: &str, enabled: bool, is_selected: bool| {
+    let toggle_line = |label: &str, enabled: bool, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
         let style = if is_selected { selected_style } else { text_style };
         Line::from(Span::styled(format!("{prefix}{label}: {}", on_off_label(enabled)), style))
+    };
+    let rate_line = |label: &str, percent: u32, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected_style } else { text_style };
+        Line::from(Span::styled(format!("{prefix}{label}: {percent}%"), style))
     };
 
     let paragraph = Paragraph::new(vec![
         Line::from(Span::styled("SETTINGS", text_style)),
         Line::from(""),
-        item_line("MUSIC", music_enabled, selection == SettingsChoice::Music),
-        item_line("SE", se_enabled, selection == SettingsChoice::Se),
+        toggle_line("MUSIC", music_enabled, selection == SettingsChoice::Music),
+        toggle_line("SE", se_enabled, selection == SettingsChoice::Se),
+        rate_line("Xブロック配分", rock_rate_percent, selection == SettingsChoice::RockRate),
+        rate_line("AIR配分", air_rate_percent, selection == SettingsChoice::AirRate),
         Line::from(""),
-        Line::from(Span::styled("↑↓で選択 / Spaceでトグル / Qでタイトルへ", text_style)),
+        Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
+        Line::from(Span::styled("配分は←→で調整 / Qでタイトルへ", text_style)),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))

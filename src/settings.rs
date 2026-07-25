@@ -8,7 +8,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::constants::{FALL_TICK_MS, SHAKE_DURATION_MS};
+use crate::constants::{FALL_TICK_MS, SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT};
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -27,6 +27,10 @@ pub struct Settings {
     pub player_fall_tick_ms: u64,
     /// デバッグショートカット(, . キー)で調整する揺れ時間(落下開始までの時間, ms)。
     pub shake_duration_ms: u64,
+    /// Xブロック(岩)の出現率(%、100=通常のまま。TERM独自拡張)。設定画面から調整する。
+    pub rock_spawn_rate_percent: u32,
+    /// AIR(酸素カプセル)の出現率(%、100=通常のまま。TERM独自拡張)。設定画面から調整する。
+    pub air_spawn_rate_percent: u32,
 }
 
 impl Default for Settings {
@@ -37,6 +41,8 @@ impl Default for Settings {
             block_fall_tick_ms: FALL_TICK_MS,
             player_fall_tick_ms: FALL_TICK_MS,
             shake_duration_ms: SHAKE_DURATION_MS,
+            rock_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            air_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
         }
     }
 }
@@ -69,6 +75,12 @@ impl Settings {
             block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms").unwrap_or(default.block_fall_tick_ms),
             player_fall_tick_ms: parse_u64_field(&text, "player_fall_tick_ms").unwrap_or(default.player_fall_tick_ms),
             shake_duration_ms: parse_u64_field(&text, "shake_duration_ms").unwrap_or(default.shake_duration_ms),
+            rock_spawn_rate_percent: parse_u64_field(&text, "rock_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.rock_spawn_rate_percent),
+            air_spawn_rate_percent: parse_u64_field(&text, "air_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.air_spawn_rate_percent),
         }
     }
 
@@ -90,8 +102,14 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {}\n}}\n",
-            self.music_enabled, self.se_enabled, self.block_fall_tick_ms, self.player_fall_tick_ms, self.shake_duration_ms
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {}\n}}\n",
+            self.music_enabled,
+            self.se_enabled,
+            self.block_fall_tick_ms,
+            self.player_fall_tick_ms,
+            self.shake_duration_ms,
+            self.rock_spawn_rate_percent,
+            self.air_spawn_rate_percent
         );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
@@ -139,6 +157,8 @@ mod tests {
         assert!(settings.se_enabled);
         assert_eq!(settings.block_fall_tick_ms, FALL_TICK_MS);
         assert_eq!(settings.player_fall_tick_ms, FALL_TICK_MS);
+        assert_eq!(settings.rock_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(settings.air_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
     }
 
     #[test]
@@ -190,6 +210,8 @@ mod tests {
             block_fall_tick_ms: 200,
             player_fall_tick_ms: 100,
             shake_duration_ms: 300,
+            rock_spawn_rate_percent: 140,
+            air_spawn_rate_percent: 60,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -200,6 +222,8 @@ mod tests {
             block_fall_tick_ms: 50,
             player_fall_tick_ms: 400,
             shake_duration_ms: 600,
+            rock_spawn_rate_percent: 300,
+            air_spawn_rate_percent: 20,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);
