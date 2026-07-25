@@ -279,7 +279,7 @@ pub fn draw_help(frame: &mut Frame) {
         line(""),
         heading("== 一時停止中のみ =="),
         line("M: MUSIC ON/OFF   E: SE ON/OFF"),
-        line("設定画面: MUSIC/SE/Xブロック・AIR・スター・ダイヤの配分を調整できる"),
+        line("設定画面: MUSIC/SE/Xブロック・AIR・スター・ダイヤの配分・色数を調整できる"),
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
@@ -318,6 +318,9 @@ pub enum SettingsChoice {
     /// ダイヤブロックの出現率(%、0まで下げられる)。TERM独自拡張。
     /// ユーザー指摘: 「ダイヤブロック0%設定」
     DiamondRate,
+    /// 出現する色ブロックの色数(1〜4)。TERM独自拡張。ユーザー指摘: 「出現する色
+    /// ブロックの色数を設定で選べるようにしたい(1〜4)」
+    ColorCount,
 }
 
 impl SettingsChoice {
@@ -329,7 +332,8 @@ impl SettingsChoice {
             SettingsChoice::RockRate => SettingsChoice::AirRate,
             SettingsChoice::AirRate => SettingsChoice::StarRate,
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
-            SettingsChoice::DiamondRate => SettingsChoice::Music,
+            SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
+            SettingsChoice::ColorCount => SettingsChoice::Music,
         }
     }
 
@@ -338,18 +342,19 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::DiamondRate,
+            SettingsChoice::Music => SettingsChoice::ColorCount,
             SettingsChoice::Se => SettingsChoice::Music,
             SettingsChoice::RockRate => SettingsChoice::Se,
             SettingsChoice::AirRate => SettingsChoice::RockRate,
             SettingsChoice::StarRate => SettingsChoice::AirRate,
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
+            SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
         }
     }
 }
 
 /// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤの出現率(%)、
-/// 現在選択中の項目をカーソル(反転表示)で示す。
+/// 色ブロックの色数、現在選択中の項目をカーソル(反転表示)で示す。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_settings(
     frame: &mut Frame,
@@ -360,6 +365,7 @@ pub fn draw_settings(
     air_rate_percent: u32,
     star_rate_percent: u32,
     diamond_rate_percent: u32,
+    color_count: u8,
 ) {
     let area = frame.area();
 
@@ -388,6 +394,11 @@ pub fn draw_settings(
         let style = if is_selected { selected_style } else { text_style };
         Line::from(Span::styled(format!("{prefix}{label}: {percent}%"), style))
     };
+    let count_line = |label: &str, count: u8, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected_style } else { text_style };
+        Line::from(Span::styled(format!("{prefix}{label}: {count}"), style))
+    };
 
     let paragraph = Paragraph::new(vec![
         Line::from(Span::styled("SETTINGS", text_style)),
@@ -398,9 +409,10 @@ pub fn draw_settings(
         rate_line("AIR配分", air_rate_percent, selection == SettingsChoice::AirRate),
         rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
         rate_line("ダイヤ配分", diamond_rate_percent, selection == SettingsChoice::DiamondRate),
+        count_line("色数", color_count, selection == SettingsChoice::ColorCount),
         Line::from(""),
         Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
-        Line::from(Span::styled("配分は←→で調整 / Qでタイトルへ", text_style)),
+        Line::from(Span::styled("配分・色数は←→で調整 / Qでタイトルへ", text_style)),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))
@@ -958,6 +970,7 @@ mod tests {
             SettingsChoice::AirRate,
             SettingsChoice::StarRate,
             SettingsChoice::DiamondRate,
+            SettingsChoice::ColorCount,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);

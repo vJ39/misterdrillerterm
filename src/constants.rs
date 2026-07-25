@@ -87,10 +87,10 @@ pub const DEBUG_FALL_TICK_MS_MAX: u64 = 600;
 
 /// デバッグショートカット「付近のブロックを2色に揃える」の対象範囲
 /// (プレイヤーの行を中心に上下何行を対象にするか)。TERM独自拡張・動作確認用。
-/// ユーザー指摘: 「ショートカットCを10画面分に適用」を受け、
-/// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数、14)の10画面分
-/// (上下合計140行=半径70行)をカバーする値にしている。
-pub const DEBUG_UNIFY_COLORS_RANGE_ROWS: usize = 70;
+/// 当初「10画面分」だったが、ユーザー指摘により「3画面分」へ変更した。
+/// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数、14)の3画面分
+/// (上下合計42行=半径21行)をカバーする値にしている。
+pub const DEBUG_UNIFY_COLORS_RANGE_ROWS: usize = 21;
 
 /// デバッグショートカット: 揺れ時間(`SHAKE_DURATION_MS`相当)を1回の,/.入力で
 /// どれだけ増減させるか(ms)。TERM独自拡張・動作確認用・設定ファイルに永続化する。
@@ -126,6 +126,12 @@ pub const STAR_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 /// ダイヤブロックの出現率設定の下限(%、TERM独自拡張)。スターと同様、完全に
 /// 出現させない(0%)設定も許可する。ユーザー指摘: 「ダイヤブロック0%設定」。
 pub const DIAMOND_SPAWN_RATE_PERCENT_MIN: u32 = 0;
+
+/// 出現する色ブロックの色数設定(TERM独自拡張)。`ColorKind::ALL`の先頭からこの数だけを
+/// 使う。ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい(1〜4)」。
+pub const COLOR_COUNT_MIN: u8 = 1;
+pub const COLOR_COUNT_MAX: u8 = 4;
+pub const COLOR_COUNT_DEFAULT: u8 = 4;
 
 /// プレイ中に配分率(岩/AIR/スター/ダイヤ)を変更した際、書き換え対象をプレイヤーの十分先
 /// (画面外)に限定するための安全マージン(行数、TERM独自拡張)。既に見えている範囲の

@@ -340,6 +340,10 @@ impl Board {
     /// 正しく反映される。`Cell::Empty`(既に掘削済み・落下等で空になったマス)だけは、
     /// 実際にプレイヤーが見た/触れた状態を壊さないよう対象外にする。再現性は求めない
     /// ため、呼び出しごとに新しい乱数系列を使う。
+    ///
+    /// `color_count`(1〜4)は新しい色ブロックの抽選を`ColorKind::ALL`の先頭からこの数
+    /// だけに制限する(TERM独自拡張。ユーザー指摘: 「出現する色ブロックの色数を設定で
+    /// 選べるようにしたい(1〜4)」)。範囲外の値は1〜4にクランプする。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
@@ -348,17 +352,19 @@ impl Board {
         air_rate_percent: u32,
         star_rate_percent: u32,
         diamond_rate_percent: u32,
+        color_count: u8,
     ) {
         use rand::RngExt;
         let seed: u64 = rand::rng().random();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let color_count = (color_count as usize).clamp(1, ColorKind::ALL.len());
 
         for row in from_row..self.rows.len() {
             for col in 0..FIELD_WIDTH {
                 if self.rows[row][col] == Cell::Empty {
                     continue;
                 }
-                let fresh_color = ColorKind::ALL[rng.random_range(0..ColorKind::ALL.len())];
+                let fresh_color = ColorKind::ALL[rng.random_range(0..color_count)];
                 self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
                     &mut rng,
                     fresh_color,
@@ -934,7 +940,7 @@ mod tests {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0); // 岩/AIR/スター/ダイヤの確率を0に
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 4); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -956,7 +962,7 @@ mod tests {
 
         // 岩/AIR/スター/ダイヤの配分率を全て0にすれば、Empty以外の全セルは必ず
         // Color(通常の色ブロック)へ再抽選される。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0);
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4);
 
         for col in 0..4 {
             assert!(
@@ -984,9 +990,9 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100, 100, 100);
+        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 4);
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100, 100, 100);
+        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 4);
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
@@ -1006,7 +1012,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 0, 100);
+        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4);
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
@@ -1023,10 +1029,57 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 0);
+        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 4);
 
         let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
         assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_color_count_restricts_the_palette_to_the_first_n_colors() {
+        // ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい(1〜4)」。
+        // color_countを指定すると、ColorKind::ALLの先頭からその数だけに色ブロックの
+        // 抽選が制限されることを確認する(岩/AIR/スター/ダイヤは0%にして純粋に
+        // 色ブロックだけを観測する)。
+        let mut board = empty_board(500);
+        for row in 0..500 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 2);
+
+        let mut colors_seen: Vec<ColorKind> = Vec::new();
+        for cell in board.rows.iter().flatten() {
+            if let Cell::Color(k) = cell
+                && !colors_seen.contains(k)
+            {
+                colors_seen.push(*k);
+            }
+        }
+        colors_seen.sort_by_key(|c| ColorKind::ALL.iter().position(|a| a == c).unwrap());
+        assert_eq!(
+            colors_seen,
+            vec![ColorKind::Red, ColorKind::Blue],
+            "color_count=2ならRed/Blueの2色のみが出現するはず: {colors_seen:?}"
+        );
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_color_count_one_produces_a_single_color() {
+        let mut board = empty_board(200);
+        for row in 0..200 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Blue);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1);
+
+        for cell in board.rows.iter().flatten() {
+            assert_eq!(*cell, Cell::Color(ColorKind::Red), "color_count=1なら常にColorKind::ALLの先頭色のみ");
+        }
     }
 
     #[test]

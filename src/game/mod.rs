@@ -650,6 +650,7 @@ impl Game {
         air_rate_percent: u32,
         star_rate_percent: u32,
         diamond_rate_percent: u32,
+        color_count: u8,
     ) {
         self.board.reroll_overlays_from_row(
             from_row,
@@ -657,6 +658,7 @@ impl Game {
             air_rate_percent,
             star_rate_percent,
             diamond_rate_percent,
+            color_count,
         );
     }
 

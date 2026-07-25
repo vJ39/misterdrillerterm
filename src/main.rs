@@ -17,8 +17,8 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
-    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -164,14 +164,15 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
-                            // 配分率は←→で調整するので、Spaceは無効(トグル対象ではない)。
+                            // 配分率・色数は←→で調整するので、Spaceは無効(トグル対象ではない)。
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
-                            | ui::render::SettingsChoice::DiamondRate => {}
+                            | ui::render::SettingsChoice::DiamondRate
+                            | ui::render::SettingsChoice::ColorCount => {}
                         }
                     }
-                    // Xブロック/AIR/スター/ダイヤの配分率調整(TERM独自拡張)。プレイ中なので、
+                    // Xブロック/AIR/スター/ダイヤの配分率・色数調整(TERM独自拡張)。プレイ中なので、
                     // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映
                     // する(ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -182,6 +183,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::AirRate
                                     | ui::render::SettingsChoice::StarRate
                                     | ui::render::SettingsChoice::DiamondRate
+                                    | ui::render::SettingsChoice::ColorCount
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -205,6 +207,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     DIAMOND_SPAWN_RATE_PERCENT_MIN,
                                 );
                             }
+                            ui::render::SettingsChoice::ColorCount => {
+                                settings.color_count = adjust_color_count(settings.color_count, increase);
+                            }
                             _ => {}
                         }
                         settings.save();
@@ -215,6 +220,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
+                            settings.color_count,
                         );
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
@@ -305,6 +311,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
+                            settings.color_count,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -323,6 +330,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.air_spawn_rate_percent,
                     settings.star_spawn_rate_percent,
                     settings.diamond_spawn_rate_percent,
+                    settings.color_count,
                 )
             })?;
 
@@ -354,7 +362,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
-                            | ui::render::SettingsChoice::DiamondRate => {}
+                            | ui::render::SettingsChoice::DiamondRate
+                            | ui::render::SettingsChoice::ColorCount => {}
                         }
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -364,6 +373,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::AirRate
                                 | ui::render::SettingsChoice::StarRate
                                 | ui::render::SettingsChoice::DiamondRate
+                                | ui::render::SettingsChoice::ColorCount
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -386,6 +396,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     increase,
                                     DIAMOND_SPAWN_RATE_PERCENT_MIN,
                                 );
+                            }
+                            ui::render::SettingsChoice::ColorCount => {
+                                settings.color_count = adjust_color_count(settings.color_count, increase);
                             }
                             _ => {}
                         }
@@ -428,6 +441,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
+                            settings.color_count,
                         );
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
@@ -493,6 +507,17 @@ fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
         (current + SPAWN_RATE_PERCENT_STEP).min(SPAWN_RATE_PERCENT_MAX)
     } else {
         current.saturating_sub(SPAWN_RATE_PERCENT_STEP).max(min)
+    }
+}
+
+/// 出現する色ブロックの色数(`COLOR_COUNT_MIN`〜`COLOR_COUNT_MAX`)を1ずつ増減する
+/// (TERM独自拡張。ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい
+/// (1〜4)」)。
+fn adjust_color_count(current: u8, increase: bool) -> u8 {
+    if increase {
+        (current + 1).min(COLOR_COUNT_MAX)
+    } else {
+        current.saturating_sub(1).max(COLOR_COUNT_MIN)
     }
 }
 
