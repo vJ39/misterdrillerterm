@@ -39,6 +39,9 @@ pub enum DrillOutcome {
     /// スターブロックを掘削で破壊した(スコア+10はこの呼び出し内で適用済み、TERM独自
     /// 拡張)。放置しても画面内に入れば自然に溶けて消えるが、掘削でも即座に壊せる。
     StarDestroyed,
+    /// 白ブロック(結合しないブロック)を掘削で破壊した(得点は色ブロックの直接掘削と
+    /// 同じ。この呼び出し内で適用済み。TERM独自拡張)。
+    WhiteDestroyed,
 }
 
 /// 指定セルに対して掘削を1回実行し、盤面・プレイヤーのスコア/酸素へ反映する
@@ -70,6 +73,11 @@ fn drill_cell(board: &mut Board, player: &mut Player, target: (usize, usize)) ->
             board.set(target.0, target.1, Cell::Empty);
             player.award_drill_score(1);
             DrillOutcome::StarDestroyed
+        }
+        Cell::White => {
+            board.set(target.0, target.1, Cell::Empty);
+            player.award_drill_score(1);
+            DrillOutcome::WhiteDestroyed
         }
     }
 }
@@ -208,7 +216,7 @@ fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, u
         // そのまま流れ、押し潰しにはならない。取得は歩み寄り・自由落下・重力ティックでの
         // 自動取得を通じて行われる。
         Cell::Oxygen => false,
-        Cell::Diamond | Cell::Star { .. } => {
+        Cell::Diamond | Cell::Star { .. } | Cell::White => {
             !is_supported(board, target, player_pos) && !gravity.is_shaking(target)
         }
     }
@@ -671,6 +679,39 @@ mod tests {
 
         assert_eq!(outcome, DrillOutcome::NoEffect);
         assert_eq!(player.row, 1); // Upは移動しない(spec.md 1章)
+    }
+
+    // --- 白ブロック(結合しないブロック、TERM独自拡張) ---
+
+    #[test]
+    fn drill_facing_destroys_white_block_in_one_hit_with_drill_score() {
+        // ユーザー指摘: 「白ブロック(結合しないブロック)」。掘削は色ブロックの直接
+        // 掘削と同じ得点(1ブロックぶん)で、1回のヒットで破壊される。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.facing = Direction::Down;
+        board.rows[player.row + 1][player.col] = Cell::White;
+        let score_before = player.score;
+
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+
+        assert_eq!(outcome, DrillOutcome::WhiteDestroyed);
+        assert_eq!(board.cell(player.row + 1, player.col), Cell::Empty);
+        assert!(player.score > score_before, "白ブロックの掘削で得点が入るはず");
+    }
+
+    #[test]
+    fn is_overhead_unstable_treats_falling_white_block_the_same_as_diamond() {
+        // 白ブロックはダイヤ/スターと同様、支えを失って落下中なら上向き掘削で押し潰される。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        player.facing = Direction::Up;
+        board.rows[0][player.col] = Cell::White; // 直下(row0)を含め周囲は空=未支持
+
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+
+        assert_eq!(outcome, DrillOutcome::CrushedByUnstableOverhead);
     }
 
     // --- 酸素自然減少 ---

@@ -82,6 +82,11 @@ pub const STAR_BG: Color = Color::Rgb(230, 200, 40);
 /// スターブロックの前景色。
 pub const STAR_FG: Color = Color::Rgb(255, 250, 210);
 
+/// 白ブロック(結合しないブロック、TERM独自拡張)の背景色。
+pub const WHITE_BG: Color = Color::Rgb(235, 235, 235);
+/// 白ブロックの前景色(罫線)。白背景に対してコントラストが出るよう暗めのグレーにする。
+pub const WHITE_FG: Color = Color::Rgb(90, 90, 90);
+
 /// スターブロックの背景色を溶解の進行度(`melting / STAR_MELT_TICKS`)から、
 /// フィールド背景色(`FIELD_EMPTY_BG`)へ向けて補間する。
 pub fn star_bg(melting: u8, melt_ticks: u8) -> Color {

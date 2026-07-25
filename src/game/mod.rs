@@ -362,7 +362,7 @@ impl Game {
             }
             DrillOutcome::OxygenUntouchedByDrill => {}
             DrillOutcome::CollectedDiamond => events.push(GameEvent::DiamondCollected),
-            DrillOutcome::StarDestroyed => {
+            DrillOutcome::StarDestroyed | DrillOutcome::WhiteDestroyed => {
                 events.push(GameEvent::DrillImpact);
                 events.push(GameEvent::BlockDestroyed { blocks: 1 });
             }
@@ -635,21 +635,28 @@ impl Game {
         self.shake_duration_ms = ms.clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
     }
 
-    /// `from_row`以降の岩(X)/AIR出現率を、指定の配分率(%、100=通常のまま)で
-    /// 再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
-    /// いじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」)。新規ゲーム
-    /// 開始直後は`from_row`に安全地帯明けの行を渡せば盤面全体に反映され、プレイ中に
-    /// 呼ぶ場合は呼び出し側が`player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`のような
-    /// 画面外の行を渡すことで、既に見えている地形を変えてしまわないようにする。
+    /// `from_row`以降の岩(X)/AIR/スター/白ブロック出現率を、指定の配分率(%、100=通常の
+    /// まま)で再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの
+    /// 配分量をいじれるようにしたい。プレイ中でもその数値をいじれるようにしたい」)。
+    /// 新規ゲーム開始直後は`from_row`に安全地帯明けの行を渡せば盤面全体に反映され、
+    /// プレイ中に呼ぶ場合は呼び出し側が`player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`
+    /// のような画面外の行を渡すことで、既に見えている地形を変えてしまわないようにする。
+    #[allow(clippy::too_many_arguments)]
     pub fn reroll_spawn_rates_from(
         &mut self,
         from_row: usize,
         rock_rate_percent: u32,
         air_rate_percent: u32,
         star_rate_percent: u32,
+        white_rate_percent: u32,
     ) {
-        self.board
-            .reroll_overlays_from_row(from_row, rock_rate_percent, air_rate_percent, star_rate_percent);
+        self.board.reroll_overlays_from_row(
+            from_row,
+            rock_rate_percent,
+            air_rate_percent,
+            star_rate_percent,
+            white_rate_percent,
+        );
     }
 
     /// デバッグ: 揺れ時間(ブロックが支えを失ってから実際に落下し始めるまでの時間)を
@@ -694,11 +701,11 @@ impl Game {
     }
 
     /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
-    /// ランダムに選んだ2色だけへ揃える。同色4連結以上の自動消滅ロジックを意図的に
-    /// 誘発させ、動作確認をしやすくするためのショートカット。Playing中のみ有効。
-    pub fn debug_unify_nearby_colors(&mut self) {
+    /// ランダムに選んだ2色だけへ揃える。Playing中のみ有効。
+    pub fn debug_unify_nearby_colors(&mut self) -> Vec<GameEvent> {
+        let mut events = Vec::new();
         if self.status != GameStatus::Playing {
-            return;
+            return events;
         }
         use rand::RngExt;
         let mut rng = rand::rng();
@@ -723,6 +730,23 @@ impl Game {
         // 変わっている。古い揺れ状態を引きずらず、次の重力ティックで結合関係を
         // 一から作り直させる(ユーザー指摘: 「ちゃんと結合関係を再計算するように」)。
         self.gravity_state.reset();
+
+        // 塗り替えによって既存の4連結以上の塊に同色ブロックが新たに隣接し、結合が
+        // 拡大した場合も、実際に落下するのを待たずこの場で自動消滅させる(ユーザー指摘:
+        // 「すでに4個以上の結合ブロックに、同色のブロックが隣接したら結合が拡大するが、
+        // この変化においてもブロックは消えないとだめ」)。
+        let (vanished_colors, vanished_rocks) =
+            self.board.vanish_four_or_more_connected_groups_in_range(start_row, end_row);
+        if vanished_colors > 0 {
+            self.player.award_auto_vanish_score(vanished_colors);
+            events.push(GameEvent::BlockDestroyed { blocks: vanished_colors });
+        }
+        if vanished_rocks > 0 {
+            // 岩ブロックの自動消滅は得点対象外(spec.md 4.9・既存ルールと同じ)。
+            events.push(GameEvent::BlockDestroyed { blocks: vanished_rocks });
+        }
+
+        events
     }
 }
 

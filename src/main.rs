@@ -18,7 +18,7 @@ use rodio::mixer::Mixer;
 
 use constants::{
     SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
-    STAR_SPAWN_RATE_PERCENT_MIN,
+    STAR_SPAWN_RATE_PERCENT_MIN, WHITE_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -138,7 +138,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     }
                     // 設定オーバーレイ表示中は上下キー/Spaceを選択操作として扱う(タイトル画面
                     // のScreen::Settingsと同じ操作感)。
-                    InputAction::FaceUp | InputAction::FaceDown if pause_overlay == PauseOverlay::Settings => {
+                    InputAction::FaceUp if pause_overlay == PauseOverlay::Settings => {
+                        settings_selection = settings_selection.cycle_back();
+                    }
+                    InputAction::FaceDown if pause_overlay == PauseOverlay::Settings => {
                         settings_selection = settings_selection.cycle();
                     }
                     InputAction::Drill if pause_overlay == PauseOverlay::Settings => {
@@ -156,10 +159,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             // 配分率は←→で調整するので、Spaceは無効(トグル対象ではない)。
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
-                            | ui::render::SettingsChoice::StarRate => {}
+                            | ui::render::SettingsChoice::StarRate
+                            | ui::render::SettingsChoice::WhiteRate => {}
                         }
                     }
-                    // Xブロック/AIR/スターの配分率調整(TERM独自拡張)。プレイ中なので、既に
+                    // Xブロック/AIR/スター/白の配分率調整(TERM独自拡張)。プレイ中なので、既に
                     // 画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する
                     // (ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -169,6 +173,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 ui::render::SettingsChoice::RockRate
                                     | ui::render::SettingsChoice::AirRate
                                     | ui::render::SettingsChoice::StarRate
+                                    | ui::render::SettingsChoice::WhiteRate
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -185,6 +190,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.star_spawn_rate_percent =
                                     adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
                             }
+                            ui::render::SettingsChoice::WhiteRate => {
+                                settings.white_spawn_rate_percent =
+                                    adjust_rate_percent(settings.white_spawn_rate_percent, increase, WHITE_SPAWN_RATE_PERCENT_MIN);
+                            }
                             _ => {}
                         }
                         settings.save();
@@ -194,6 +203,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
+                            settings.white_spawn_rate_percent,
                         );
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
@@ -220,7 +230,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         let events = game.try_drill();
                         handle_events(&events, mixer.as_ref(), &se_enabled);
                     }
-                    InputAction::DebugUnifyNearbyColors => game.debug_unify_nearby_colors(),
+                    InputAction::DebugUnifyNearbyColors => {
+                        let events = game.debug_unify_nearby_colors();
+                        handle_events(&events, mixer.as_ref(), &se_enabled);
+                    }
                     InputAction::DebugAddLife => game.debug_add_life(),
                     InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
                     InputAction::DebugBlockFallSlower => {
@@ -280,6 +293,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
+                            settings.white_spawn_rate_percent,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -297,6 +311,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.rock_spawn_rate_percent,
                     settings.air_spawn_rate_percent,
                     settings.star_spawn_rate_percent,
+                    settings.white_spawn_rate_percent,
                 )
             })?;
 
@@ -307,7 +322,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 match action {
                     InputAction::Quit => screen = Screen::Title,
-                    InputAction::FaceUp | InputAction::FaceDown => {
+                    InputAction::FaceUp => {
+                        settings_selection = settings_selection.cycle_back();
+                    }
+                    InputAction::FaceDown => {
                         settings_selection = settings_selection.cycle();
                     }
                     InputAction::Drill => {
@@ -324,7 +342,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
-                            | ui::render::SettingsChoice::StarRate => {}
+                            | ui::render::SettingsChoice::StarRate
+                            | ui::render::SettingsChoice::WhiteRate => {}
                         }
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -333,6 +352,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::RockRate
                                 | ui::render::SettingsChoice::AirRate
                                 | ui::render::SettingsChoice::StarRate
+                                | ui::render::SettingsChoice::WhiteRate
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -348,6 +368,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::StarRate => {
                                 settings.star_spawn_rate_percent =
                                     adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
+                            }
+                            ui::render::SettingsChoice::WhiteRate => {
+                                settings.white_spawn_rate_percent =
+                                    adjust_rate_percent(settings.white_spawn_rate_percent, increase, WHITE_SPAWN_RATE_PERCENT_MIN);
                             }
                             _ => {}
                         }
@@ -382,13 +406,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                         game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                         game.set_shake_duration_ms(settings.shake_duration_ms);
-                        // Xブロック/AIRの配分率設定も、新規ゲーム開始時に安全地帯明け
-                        // (行2)以降の全体へ反映する(TERM独自拡張)。
+                        // Xブロック/AIR/スター/白の配分率設定も、新規ゲーム開始時に安全地帯
+                        // 明け(行2)以降の全体へ反映する(TERM独自拡張)。
                         game.reroll_spawn_rates_from(
                             2,
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
+                            settings.white_spawn_rate_percent,
                         );
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();

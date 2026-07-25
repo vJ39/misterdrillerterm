@@ -27,6 +27,11 @@ pub enum Cell {
     /// 消える。`melting`は0(まだ画面外/入った直後)〜`STAR_MELT_TICKS`(消滅)の
     /// カウンタで、掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
     Star { melting: u8 },
+    /// 白ブロック(TERM独自拡張。ユーザー指摘: 「白ブロック(結合しないブロック)」)。
+    /// 色ブロックや岩ブロックと違い、隣接する白ブロック同士でも一切連結しない
+    /// (酸素カプセル・ダイヤ・スターと同様、常に単独セル扱い)。掘削は1回で破壊され、
+    /// 得点は色ブロックの直接掘削と同じ。
+    White,
 }
 
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
@@ -54,6 +59,9 @@ pub struct BandTable {
     pub diamond: f32,
     /// スターブロックの出現率(TERM独自拡張。深度に関わらず`STAR_SPAWN_PROB`で一定)。
     pub star: f32,
+    /// 白ブロック(結合しないブロック)の出現率(TERM独自拡張。深度に関わらず
+    /// `WHITE_SPAWN_PROB`で一定)。
+    pub white: f32,
 }
 
 /// 行インデックス(=深度[m]、spec.md 2章)から出現確率テーブルを引く(spec.md 3.1)。
@@ -68,30 +76,35 @@ pub fn band_table(row: usize) -> BandTable {
             oxygen: 0.03,
             diamond: 0.02,
             star: crate::constants::STAR_SPAWN_PROB,
+            white: crate::constants::WHITE_SPAWN_PROB,
         },
         200..=399 => BandTable {
             rock: 0.08,
             oxygen: 0.04,
             diamond: 0.03,
             star: crate::constants::STAR_SPAWN_PROB,
+            white: crate::constants::WHITE_SPAWN_PROB,
         },
         400..=599 => BandTable {
             rock: 0.12,
             oxygen: 0.04,
             diamond: 0.04,
             star: crate::constants::STAR_SPAWN_PROB,
+            white: crate::constants::WHITE_SPAWN_PROB,
         },
         600..=799 => BandTable {
             rock: 0.16,
             oxygen: 0.04,
             diamond: 0.05,
             star: crate::constants::STAR_SPAWN_PROB,
+            white: crate::constants::WHITE_SPAWN_PROB,
         },
         _ => BandTable {
             rock: 0.20,
             oxygen: 0.04,
             diamond: 0.06,
             star: crate::constants::STAR_SPAWN_PROB,
+            white: crate::constants::WHITE_SPAWN_PROB,
         },
     }
 }
@@ -243,12 +256,15 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
     )
 }
 
-/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター出現率を設定値(%、100=通常のまま)で
+/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/白出現率を設定値(%、100=通常のまま)で
 /// 調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量を
-/// いじれるようにしたい」「スターブロック比率0〜」)。ダイヤの出現率は調整対象外。
+/// いじれるようにしたい」「スターブロック比率0〜」「白ブロック(結合しないブロック)
+/// 比率0〜」)。ダイヤの出現率は調整対象外。
+#[allow(clippy::too_many_arguments)]
 fn overlay_rock_oxygen_diamond_with_rates(
     rng: &mut ChaCha8Rng,
     base_color: ColorKind,
@@ -256,11 +272,13 @@ fn overlay_rock_oxygen_diamond_with_rates(
     rock_rate_percent: u32,
     air_rate_percent: u32,
     star_rate_percent: u32,
+    white_rate_percent: u32,
 ) -> Cell {
     let mut t = band_table(row);
     t.rock = (t.rock * rock_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.oxygen = (t.oxygen * air_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.star = (t.star * star_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    t.white = (t.white * white_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
 
     let r: f32 = rng.random_range(0.0..1.0);
     if r < t.rock {
@@ -271,6 +289,8 @@ fn overlay_rock_oxygen_diamond_with_rates(
         Cell::Diamond
     } else if r < t.rock + t.oxygen + t.diamond + t.star {
         Cell::Star { melting: 0 }
+    } else if r < t.rock + t.oxygen + t.diamond + t.star + t.white {
+        Cell::White
     } else {
         Cell::Color(base_color)
     }
@@ -321,6 +341,58 @@ impl Board {
         self.rows[row][col] = cell;
     }
 
+    /// 指定行範囲内で、4個以上連結した色ブロック・岩ブロックの塊を即座に消滅させる
+    /// (TERM独自拡張)。ショートカットC(付近ブロックの色統一)のように、重力ティックの
+    /// 外から盤面を直接書き換えて新たに4連結以上の塊が生まれた場合、既存の自動消滅判定
+    /// (`apply_gravity_tick`の着地チェック)は実際に落下するまで働かないため、この関数を
+    /// 書き換え直後に呼んで即座に判定する(ユーザー指摘: 「すでに4個以上の結合ブロックに、
+    /// 同色のブロックが隣接したら結合が拡大するが、この変化においてもブロックは消えないと
+    /// だめ」)。連結範囲は行範囲をまたいでも正しく辿るため、`start_row`〜`end_row`は
+    /// 「走査を開始する行の範囲」であって「消滅対象を打ち切る境界」ではない。
+    /// 戻り値は(消滅した色ブロック数, 消滅した岩ブロック数)。
+    pub fn vanish_four_or_more_connected_groups_in_range(&mut self, start_row: usize, end_row: usize) -> (usize, usize) {
+        let mut visited: HashSet<(usize, usize)> = HashSet::new();
+        let mut vanished_colors = 0;
+        let mut vanished_rocks = 0;
+        let end_row = end_row.min(self.depth_rows().saturating_sub(1));
+
+        for row in start_row..=end_row {
+            for col in 0..FIELD_WIDTH {
+                let pos = (row, col);
+                if visited.contains(&pos) {
+                    continue;
+                }
+                match self.cell(row, col) {
+                    Cell::Color(color) => {
+                        let group = connected_same_color(self, pos, color);
+                        visited.extend(group.iter().copied());
+                        if group.len() >= 4 {
+                            for &(r, c) in &group {
+                                self.set(r, c, Cell::Empty);
+                            }
+                            vanished_colors += group.len();
+                        }
+                    }
+                    Cell::Rock { .. } => {
+                        let group = connected_rock_group(self, pos);
+                        visited.extend(group.iter().copied());
+                        if group.len() >= 4 {
+                            for &(r, c) in &group {
+                                self.set(r, c, Cell::Empty);
+                            }
+                            vanished_rocks += group.len();
+                        }
+                    }
+                    _ => {
+                        visited.insert(pos);
+                    }
+                }
+            }
+        }
+
+        (vanished_colors, vanished_rocks)
+    }
+
     /// `from_row`以降の、まだ何も上書きされていない色ブロック(`Cell::Color`)について、
     /// 岩(X)/AIRの出現を指定の配分率(%、100=通常のまま)で再抽選する(TERM独自拡張。
     /// ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれるようにしたい。
@@ -328,12 +400,14 @@ impl Board {
     /// 確定しているマスは、元の色情報を保持していないため対象外(掘削で新たに生まれる
     /// 色ブロックには次回以降の抽選から反映される)。再現性は求めないため、
     /// 呼び出しごとに新しい乱数系列を使う。
+    #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
         from_row: usize,
         rock_rate_percent: u32,
         air_rate_percent: u32,
         star_rate_percent: u32,
+        white_rate_percent: u32,
     ) {
         use rand::RngExt;
         let seed: u64 = rand::rng().random();
@@ -349,6 +423,7 @@ impl Board {
                         rock_rate_percent,
                         air_rate_percent,
                         star_rate_percent,
+                        white_rate_percent,
                     );
                 }
             }
@@ -544,8 +619,9 @@ pub(crate) fn is_supported(board: &Board, pos: (usize, usize), player_pos: (usiz
 /// 色ブロックは同色4方向連結グループ、岩ブロックは連結グループ(hits問わず)を、
 /// それぞれ「1つの塊」として1つのVecにまとめる。同色・岩ブロックが上下左右に
 /// 隣接している限り必ず同じ塊に含まれるため、支持判定・移動を後続の処理でセル単位に
-/// バラして行うことはなく、「ちぎれて落ちる」ことが起きない。酸素カプセル・ダイヤは
-/// 連結対象外(spec.md 2章)なので、常にサイズ1の塊として扱う。
+/// バラして行うことはなく、「ちぎれて落ちる」ことが起きない。酸素カプセル・ダイヤ・
+/// スター・白ブロックは連結対象外(spec.md 2章、白ブロックはTERM独自拡張)なので、
+/// 常にサイズ1の塊として扱う。
 fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
     let depth_rows = board.depth_rows();
     let mut visited: HashSet<(usize, usize)> = HashSet::new();
@@ -571,7 +647,7 @@ fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
                     visited.extend(group.iter().copied());
                     groups.push(group);
                 }
-                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } => {
+                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } | Cell::White => {
                     visited.insert(pos);
                     groups.push(vec![pos]);
                 }
@@ -888,7 +964,7 @@ mod tests {
         }
         board.rows[3][0] = Cell::Rock { hits: 3 }; // 既に上書き済み、再抽選対象外
 
-        board.reroll_overlays_from_row(1, 300, 300, 300); // 岩/AIR/スターの確率を大きく引き上げる
+        board.reroll_overlays_from_row(1, 300, 300, 300, 300); // 岩/AIR/スター/白の確率を大きく引き上げる
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -915,9 +991,9 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100, 100);
+        low.reroll_overlays_from_row(0, 20, 100, 100, 100);
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100, 100);
+        high.reroll_overlays_from_row(0, 300, 100, 100, 100);
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
@@ -937,10 +1013,105 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 0);
+        board.reroll_overlays_from_row(0, 100, 100, 0, 100);
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_white_rate_zero_produces_no_white_cells() {
+        // ユーザー指摘: 「白ブロック(結合しないブロック)比率0〜」。0%を指定すれば、
+        // 白ブロックが一切生成されないことを確認する。
+        let mut board = empty_board(500);
+        for row in 0..500 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 100, 100, 100, 0);
+
+        let white_count = board.rows.iter().flatten().filter(|&&c| c == Cell::White).count();
+        assert_eq!(white_count, 0, "白配分率0%なら白ブロックは一切出現しないはず");
+    }
+
+    #[test]
+    fn white_blocks_never_merge_even_when_adjacent() {
+        // ユーザー指摘: 「白ブロック(結合しないブロック)」。隣接していても連結せず、
+        // それぞれ単独の塊として扱われる(酸素/ダイヤ/スターと同様)。
+        let mut board = empty_board(2);
+        board.rows[0][0] = Cell::White;
+        board.rows[0][1] = Cell::White;
+        board.rows[0][2] = Cell::White;
+
+        let groups = collect_fall_groups(&board);
+        let white_groups: Vec<&Vec<(usize, usize)>> =
+            groups.iter().filter(|g| g.iter().any(|&(r, c)| board.cell(r, c) == Cell::White)).collect();
+
+        assert_eq!(white_groups.len(), 3, "隣接していても白ブロックはそれぞれ単独の塊のはず");
+        for group in white_groups {
+            assert_eq!(group.len(), 1);
+        }
+    }
+
+    // --- ショートカットC相当: 重力ティック外での直接書き換え後の即時自動消滅 ---
+
+    #[test]
+    fn vanish_four_or_more_connected_groups_in_range_clears_a_newly_expanded_group() {
+        // ユーザー指摘: 「すでに4個以上の結合ブロックに、同色のブロックが隣接したら
+        // 結合が拡大するが、この変化においてもブロックは消えないとだめ」。重力ティックを
+        // 経由しない直接書き換え(ショートカットC等)で新たに4連結以上になった場合でも、
+        // この関数を呼べばその場で消滅させられる。
+        let mut board = empty_board(1);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        board.rows[0][1] = Cell::Color(ColorKind::Red);
+        board.rows[0][2] = Cell::Color(ColorKind::Red);
+        // 4個目は書き換え直後を想定し、既存の3連結に新たに隣接したものとする。
+        board.rows[0][3] = Cell::Color(ColorKind::Red);
+
+        let (vanished_colors, vanished_rocks) = board.vanish_four_or_more_connected_groups_in_range(0, 0);
+
+        assert_eq!(vanished_colors, 4);
+        assert_eq!(vanished_rocks, 0);
+        for col in 0..4 {
+            assert_eq!(board.cell(0, col), Cell::Empty);
+        }
+    }
+
+    #[test]
+    fn vanish_four_or_more_connected_groups_in_range_leaves_groups_of_three_or_fewer() {
+        let mut board = empty_board(1);
+        board.rows[0][0] = Cell::Color(ColorKind::Blue);
+        board.rows[0][1] = Cell::Color(ColorKind::Blue);
+        board.rows[0][2] = Cell::Color(ColorKind::Blue);
+
+        let (vanished_colors, vanished_rocks) = board.vanish_four_or_more_connected_groups_in_range(0, 0);
+
+        assert_eq!(vanished_colors, 0);
+        assert_eq!(vanished_rocks, 0);
+        for col in 0..3 {
+            assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Blue));
+        }
+    }
+
+    #[test]
+    fn vanish_four_or_more_connected_groups_in_range_finds_full_group_beyond_the_scan_range() {
+        // スキャン開始行の範囲は「消滅対象を打ち切る境界」ではなく「走査を始める範囲」
+        // なので、範囲外に伸びた連結部分もまとめて消える。
+        let mut board = empty_board(4);
+        board.rows[0][0] = Cell::Color(ColorKind::Green);
+        board.rows[1][0] = Cell::Color(ColorKind::Green);
+        board.rows[2][0] = Cell::Color(ColorKind::Green);
+        board.rows[3][0] = Cell::Color(ColorKind::Green);
+
+        // start_row=end_row=0のみを走査対象にしても、BFSは連結全体を辿る。
+        let (vanished_colors, _) = board.vanish_four_or_more_connected_groups_in_range(0, 0);
+
+        assert_eq!(vanished_colors, 4);
+        for row in 0..4 {
+            assert_eq!(board.cell(row, 0), Cell::Empty);
+        }
     }
 
     #[test]
