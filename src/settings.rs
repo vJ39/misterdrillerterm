@@ -1,4 +1,4 @@
-//! ユーザー設定(サウンドON/OFF)の永続化(TERM独自拡張)。
+//! ユーザー設定(MUSIC/SE ON・OFF・デバッグ速度ショートカットの調整値)の永続化(TERM独自拡張)。
 //!
 //! `dirs`クレートでOSごとのユーザーデータディレクトリを解決し、
 //! `misterdrillerterm/settings.json`としてJSON形式で保存する。保存先が
@@ -8,18 +8,36 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use crate::constants::{FALL_TICK_MS, SHAKE_DURATION_MS};
+
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
-/// 永続化するユーザー設定一式。現状はサウンドON/OFFのみ。
+/// 永続化するユーザー設定一式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
-    pub sound_enabled: bool,
+    /// MUSIC(BGM)のON/OFF。TERM独自拡張。ユーザー指摘により、一括のサウンドON/OFFから
+    /// MUSIC/SEの個別トグルへ分離した。
+    pub music_enabled: bool,
+    /// SE(効果音)のON/OFF。
+    pub se_enabled: bool,
+    /// デバッグショートカット([ ] キー)で調整するブロック落下速度(tick間隔, ms)。
+    pub block_fall_tick_ms: u64,
+    /// デバッグショートカット(- = キー)で調整するプレイヤー自由落下速度(tick間隔, ms)。
+    pub player_fall_tick_ms: u64,
+    /// デバッグショートカット(, . キー)で調整する揺れ時間(落下開始までの時間, ms)。
+    pub shake_duration_ms: u64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { sound_enabled: true }
+        Settings {
+            music_enabled: true,
+            se_enabled: true,
+            block_fall_tick_ms: FALL_TICK_MS,
+            player_fall_tick_ms: FALL_TICK_MS,
+            shake_duration_ms: SHAKE_DURATION_MS,
+        }
     }
 }
 
@@ -28,8 +46,9 @@ fn settings_path() -> Option<PathBuf> {
 }
 
 impl Settings {
-    /// 保存済み設定を読み込む。保存先が無い/ファイルが無い/内容が壊れている場合は
-    /// 既定値(サウンドON)を返す。
+    /// 保存済み設定を読み込む。保存先が無い/ファイルが無い場合は既定値を返す。
+    /// 個々のフィールドはファイルの内容に関わらず独立にパースし、壊れている
+    /// フィールドがあってもそのフィールドだけ既定値にフォールバックする。
     pub fn load() -> Self {
         let Some(path) = settings_path() else {
             return Self::default();
@@ -38,15 +57,18 @@ impl Settings {
     }
 
     /// `path`から設定を読み込む(実体、テストからは実ユーザーディレクトリを介さず
-    /// 一時ディレクトリ上のパスで直接呼べる)。ファイルが無い/内容が壊れている場合は
-    /// 既定値(サウンドON)を返す。
+    /// 一時ディレクトリ上のパスで直接呼べる)。ファイルが無い場合は既定値を返す。
     fn load_from(path: &std::path::Path) -> Self {
+        let default = Self::default();
         let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
+            return default;
         };
-        match parse_sound_enabled(&text) {
-            Some(sound_enabled) => Settings { sound_enabled },
-            None => Self::default(),
+        Settings {
+            music_enabled: parse_bool_field(&text, "music_enabled").unwrap_or(default.music_enabled),
+            se_enabled: parse_bool_field(&text, "se_enabled").unwrap_or(default.se_enabled),
+            block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms").unwrap_or(default.block_fall_tick_ms),
+            player_fall_tick_ms: parse_u64_field(&text, "player_fall_tick_ms").unwrap_or(default.player_fall_tick_ms),
+            shake_duration_ms: parse_u64_field(&text, "shake_duration_ms").unwrap_or(default.shake_duration_ms),
         }
     }
 
@@ -67,21 +89,20 @@ impl Settings {
         {
             return;
         }
-        let json = format!("{{\n  \"sound_enabled\": {}\n}}\n", self.sound_enabled);
+        let json = format!(
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {}\n}}\n",
+            self.music_enabled, self.se_enabled, self.block_fall_tick_ms, self.player_fall_tick_ms, self.shake_duration_ms
+        );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
         }
     }
 }
 
-/// 手書きの最小限JSONパーサ(`{"sound_enabled": true|false}`の1フィールドのみに対応)。
+/// 手書きの最小限JSONパーサ: `"key": true|false`の形の真偽値フィールドを1つ読む。
 /// この用途に見合わない`serde`等の依存追加を避けるため、あえて手書きにしている。
-fn parse_sound_enabled(text: &str) -> Option<bool> {
-    const KEY: &str = "\"sound_enabled\"";
-    let key_pos = text.find(KEY)?;
-    let after_key = &text[key_pos + KEY.len()..];
-    let colon_pos = after_key.find(':')?;
-    let after_colon = after_key[colon_pos + 1..].trim_start();
+fn parse_bool_field(text: &str, key: &str) -> Option<bool> {
+    let after_colon = value_after_key(text, key)?;
     if after_colon.starts_with("true") {
         Some(true)
     } else if after_colon.starts_with("false") {
@@ -91,29 +112,62 @@ fn parse_sound_enabled(text: &str) -> Option<bool> {
     }
 }
 
+/// 手書きの最小限JSONパーサ: `"key": 123`の形の非負整数フィールドを1つ読む。
+fn parse_u64_field(text: &str, key: &str) -> Option<u64> {
+    let after_colon = value_after_key(text, key)?;
+    let digits_end = after_colon.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_colon.len());
+    after_colon[..digits_end].parse().ok()
+}
+
+/// `"key": <値>`の`<値>`より前の空白を読み飛ばした位置から始まる部分文字列を返す。
+fn value_after_key<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let quoted_key = format!("\"{key}\"");
+    let key_pos = text.find(&quoted_key)?;
+    let after_key = &text[key_pos + quoted_key.len()..];
+    let colon_pos = after_key.find(':')?;
+    Some(after_key[colon_pos + 1..].trim_start())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_has_sound_enabled() {
-        assert!(Settings::default().sound_enabled);
+    fn default_settings_has_music_and_se_enabled_and_default_fall_speeds() {
+        let settings = Settings::default();
+        assert!(settings.music_enabled);
+        assert!(settings.se_enabled);
+        assert_eq!(settings.block_fall_tick_ms, FALL_TICK_MS);
+        assert_eq!(settings.player_fall_tick_ms, FALL_TICK_MS);
     }
 
     #[test]
-    fn parse_sound_enabled_reads_true() {
-        assert_eq!(parse_sound_enabled("{\"sound_enabled\": true}"), Some(true));
+    fn parse_bool_field_reads_true() {
+        assert_eq!(parse_bool_field("{\"music_enabled\": true}", "music_enabled"), Some(true));
     }
 
     #[test]
-    fn parse_sound_enabled_reads_false_with_pretty_formatting() {
-        assert_eq!(parse_sound_enabled("{\n  \"sound_enabled\": false\n}\n"), Some(false));
+    fn parse_bool_field_reads_false_with_pretty_formatting() {
+        assert_eq!(
+            parse_bool_field("{\n  \"se_enabled\": false\n}\n", "se_enabled"),
+            Some(false)
+        );
     }
 
     #[test]
-    fn parse_sound_enabled_returns_none_for_malformed_or_missing_key() {
-        assert_eq!(parse_sound_enabled("not json"), None);
-        assert_eq!(parse_sound_enabled("{}"), None);
+    fn parse_bool_field_returns_none_for_malformed_or_missing_key() {
+        assert_eq!(parse_bool_field("not json", "music_enabled"), None);
+        assert_eq!(parse_bool_field("{}", "music_enabled"), None);
+    }
+
+    #[test]
+    fn parse_u64_field_reads_value() {
+        assert_eq!(parse_u64_field("{\"block_fall_tick_ms\": 275}", "block_fall_tick_ms"), Some(275));
+    }
+
+    #[test]
+    fn parse_u64_field_returns_none_for_missing_key() {
+        assert_eq!(parse_u64_field("{}", "block_fall_tick_ms"), None);
     }
 
     /// テスト専用: OSの実ユーザーデータディレクトリ(`settings_path()`)を一切
@@ -130,11 +184,25 @@ mod tests {
         let path = temp_settings_path("roundtrip");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
-        Settings { sound_enabled: false }.save_to(&path);
-        assert_eq!(Settings::load_from(&path), Settings { sound_enabled: false });
+        let a = Settings {
+            music_enabled: false,
+            se_enabled: true,
+            block_fall_tick_ms: 200,
+            player_fall_tick_ms: 100,
+            shake_duration_ms: 300,
+        };
+        a.save_to(&path);
+        assert_eq!(Settings::load_from(&path), a);
 
-        Settings { sound_enabled: true }.save_to(&path);
-        assert_eq!(Settings::load_from(&path), Settings { sound_enabled: true });
+        let b = Settings {
+            music_enabled: true,
+            se_enabled: false,
+            block_fall_tick_ms: 50,
+            player_fall_tick_ms: 400,
+            shake_duration_ms: 600,
+        };
+        b.save_to(&path);
+        assert_eq!(Settings::load_from(&path), b);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -145,7 +213,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         assert!(!path.parent().unwrap().exists());
 
-        Settings { sound_enabled: false }.save_to(&path);
+        Settings::default().save_to(&path);
 
         assert!(path.exists());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -167,6 +235,22 @@ mod tests {
         std::fs::write(&path, "not valid json at all").unwrap();
 
         assert_eq!(Settings::load_from(&path), Settings::default());
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_partially_corrupted_file_keeps_valid_fields_and_defaults_the_rest() {
+        // music_enabledだけ壊れていても、block_fall_tick_msは正しく読み取れる。
+        let path = temp_settings_path("partial");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"music_enabled\": maybe, \"block_fall_tick_ms\": 300}").unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.music_enabled, Settings::default().music_enabled);
+        assert_eq!(loaded.block_fall_tick_ms, 300);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

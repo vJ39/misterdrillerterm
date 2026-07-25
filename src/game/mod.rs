@@ -11,11 +11,14 @@ pub mod player;
 use std::time::Duration;
 
 use crate::constants::{
-    CRUSH_FLASH_MS, FALL_TICK_MS, FIELD_DEPTH_M, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT,
-    MOVE_ANIM_DURATION_MS, OXYGEN_WARNING_THRESHOLD,
+    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
+    DEBUG_UNIFY_COLORS_RANGE_ROWS, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_MS,
+    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS, OXYGEN_WARNING_THRESHOLD,
+    SHAKE_DURATION_MS,
 };
-use board::{Board, GravityState};
-use physics::{DrillOutcome, LateralOutcome};
+use board::{tick_star_melting, Board, Cell, ColorKind, GravityState};
+use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
 /// キー入力から得られるゲーム側のアクション(spec.md 1章)。
@@ -37,9 +40,30 @@ pub enum InputAction {
     /// タイトル画面へ戻る(タイトル画面自体で押された場合のみアプリを終了する。
     /// この解釈はGameの外側=main.rsの画面遷移が担う)
     Quit,
-    /// サウンド(SE+BGM)のON/OFF切り替え(TERM独自拡張)。タイトル画面・一時停止画面
-    /// でのみ意味を持つ。Gameの内部状態には影響しないため、この解釈もGameの外側=main.rsが担う
-    ToggleSound,
+    /// MUSIC(BGM)のON/OFF切り替え(TERM独自拡張)。一時停止画面でのみ意味を持つ。
+    /// Gameの内部状態には影響しないため、この解釈もGameの外側=main.rsが担う
+    ToggleMusic,
+    /// SE(効果音)のON/OFF切り替え(TERM独自拡張)。一時停止画面でのみ意味を持つ。
+    ToggleSe,
+    /// デバッグ: プレイヤー付近のブロックを2色に統一する(TERM独自拡張、動作確認用ショートカット)
+    DebugUnifyNearbyColors,
+    /// デバッグ: ライフを1増やす(TERM独自拡張、動作確認用ショートカット)
+    DebugAddLife,
+    /// デバッグ: プレイヤーより浅い(画面上で上にある)ブロックを全削除する
+    /// (TERM独自拡張、動作確認用ショートカット)
+    DebugClearAbovePlayer,
+    /// デバッグ: ブロックの落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
+    DebugBlockFallSlower,
+    /// デバッグ: ブロックの落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
+    DebugBlockFallFaster,
+    /// デバッグ: プレイヤー自身の自由落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
+    DebugPlayerFallSlower,
+    /// デバッグ: プレイヤー自身の自由落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
+    DebugPlayerFallFaster,
+    /// デバッグ: 揺れ時間(落下開始までの時間)を長くする(TERM独自拡張、動作確認用ショートカット)
+    DebugShakeDurationLonger,
+    /// デバッグ: 揺れ時間(落下開始までの時間)を短くする(TERM独自拡張、動作確認用ショートカット)
+    DebugShakeDurationShorter,
 }
 
 /// ゲーム全体の進行状態。
@@ -49,6 +73,14 @@ pub enum GameStatus {
     Paused,
     GameOver,
     Cleared,
+}
+
+/// GameOverダイアログの選択肢(TERM独自拡張。ユーザー指摘: 「全部死んだら、タイトルに
+/// 戻るか、その場から復活して再開するか、ダイアログ表示してカーソルで選べるように」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameOverChoice {
+    BackToTitle,
+    Revive,
 }
 
 /// 1回のupdate/入力処理で発生したイベント。UIの効果音再生・演出判断に使う。
@@ -85,7 +117,26 @@ pub struct Game {
     pub status: GameStatus,
     gravity_state: GravityState,
     fall_tick_accum: Duration,
-    input_cooldown_remaining: Duration,
+    /// プレイヤー自身の自由落下用のtick蓄積(TERM独自拡張)。ブロックの重力(`fall_tick_accum`)
+    /// とは独立した速度で判定できるよう、デバッグショートカットで別々に調整可能にするため分離した。
+    player_fall_tick_accum: Duration,
+    /// ブロックの重力落下tick間隔(ms)。既定は`FALL_TICK_MS`だが、デバッグショートカット
+    /// (`debug_adjust_block_fall_speed`)で動作確認用に実行時調整できる(TERM独自拡張)。
+    block_fall_tick_ms: u64,
+    /// 支えを失ってから実際に落下し始めるまでの揺れ時間(ms)。既定は`SHAKE_DURATION_MS`
+    /// だが、デバッグショートカット(`debug_adjust_shake_duration`)で実行時調整できる
+    /// (TERM独自拡張)。揺れティック数への変換は`block_fall_tick_ms`を使い都度計算する。
+    shake_duration_ms: u64,
+    /// プレイヤー自身の自由落下tick間隔(ms)。既定は`FALL_TICK_MS`だが、デバッグショートカット
+    /// (`debug_adjust_player_fall_speed`)で動作確認用に実行時調整できる(TERM独自拡張)。
+    player_fall_tick_ms: u64,
+    /// 移動系入力(MoveLeft/MoveRight)専用のクールダウン。掘削(Drill)とは別に管理する
+    /// (TERM独自拡張。ユーザー指摘: 「カーソルとスペース、両方押してるときにどちらかが
+    /// 効かない」。1つの共有クールダウンだと、同一フレームで移動キーと掘削キーが両方
+    /// 来た場合に片方がブロックされてしまうため分離した)。
+    move_cooldown_remaining: Duration,
+    /// 掘削系入力(Drill)専用のクールダウン。移動(MoveLeft/MoveRight)とは別に管理する。
+    drill_cooldown_remaining: Duration,
     oxygen_warning_accum: Duration,
     /// ライフ消費で再開した直後、残り何ティックの間 押し潰し判定を無効化するか
     /// (spec.md 5章末尾、TERM独自拡張)。
@@ -101,6 +152,8 @@ pub struct Game {
     /// 直前の論理位置変化からの経過時間(秒)。`MOVE_ANIM_DURATION_MS`に達すると
     /// 補間が完了したものとして扱う。
     render_anim_elapsed: f32,
+    /// GameOverダイアログでの現在の選択項目(TERM独自拡張)。GameOver状態でのみ意味を持つ。
+    game_over_selection: GameOverChoice,
 }
 
 impl Game {
@@ -120,7 +173,12 @@ impl Game {
             status: GameStatus::Playing,
             gravity_state: GravityState::new(),
             fall_tick_accum: Duration::ZERO,
-            input_cooldown_remaining: Duration::ZERO,
+            player_fall_tick_accum: Duration::ZERO,
+            block_fall_tick_ms: FALL_TICK_MS,
+            player_fall_tick_ms: FALL_TICK_MS,
+            shake_duration_ms: SHAKE_DURATION_MS,
+            move_cooldown_remaining: Duration::ZERO,
+            drill_cooldown_remaining: Duration::ZERO,
             oxygen_warning_accum: Duration::ZERO,
             invulnerability_ticks_remaining: 0,
             last_level_reported,
@@ -129,6 +187,7 @@ impl Game {
             // 開始時点では補間の必要が無いため、既に完了した扱いにしておく
             // (さもないと初期表示が(0,0)相当からアニメーションしてしまう)。
             render_anim_elapsed: move_anim_duration_secs(),
+            game_over_selection: GameOverChoice::BackToTitle,
         }
     }
 
@@ -139,6 +198,37 @@ impl Game {
             GameStatus::Paused => GameStatus::Playing,
             other => other,
         };
+    }
+
+    /// GameOverダイアログの現在の選択項目(TERM独自拡張)。
+    pub fn game_over_selection(&self) -> GameOverChoice {
+        self.game_over_selection
+    }
+
+    /// GameOverダイアログの選択をトグルする(2択なので↑↓どちらでも反転させる。
+    /// TERM独自拡張)。GameOver状態でのみ意味を持つ。
+    pub fn toggle_game_over_selection(&mut self) {
+        if self.status != GameStatus::GameOver {
+            return;
+        }
+        self.game_over_selection = match self.game_over_selection {
+            GameOverChoice::BackToTitle => GameOverChoice::Revive,
+            GameOverChoice::Revive => GameOverChoice::BackToTitle,
+        };
+    }
+
+    /// GameOverダイアログで「その場から復活」を選んだ場合の処理(TERM独自拡張。ユーザー
+    /// 指摘: 「全部死んだら、タイトルに戻るか、その場から復活して再開するか」)。
+    /// ライフを既定値に戻し酸素を全回復してPlayingへ戻す。深度・スコア・盤面は
+    /// そのまま維持する。復活直後は既存のライフ喪失時と同様に無敵時間を与える。
+    pub fn revive(&mut self) {
+        if self.status != GameStatus::GameOver {
+            return;
+        }
+        self.player.lives = LIVES_DEFAULT;
+        self.player.oxygen = crate::constants::OXYGEN_MAX;
+        self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
+        self.status = GameStatus::Playing;
     }
 
     /// ← キー: facingをLeftにし、掘削を伴わない地形追従の移動を試みる(spec.md 1章)。
@@ -155,7 +245,14 @@ impl Game {
     /// 生じないが、移動先が酸素カプセルだった場合のみ取得イベントを発火する
     /// (TERM独自拡張、spec.md 1章)。
     fn try_lateral_move(&mut self, dir: Direction) -> Vec<GameEvent> {
-        if !self.consume_input_cooldown() {
+        if !self.consume_move_cooldown() {
+            return Vec::new();
+        }
+        if !self.player_is_grounded() {
+            // ユーザー指摘: 「キャラは落ちる速度おそくなっても、落ちずに横移動する
+            // ことはできないものとする」「必ず落ちてから横移動が前提」。デバッグ
+            // ショートカットでプレイヤーの自由落下tickを遅くしていても、直下が
+            // 空いている(=次の自由落下tickで必ず1マス落ちる)間は横移動を受け付けない。
             return Vec::new();
         }
 
@@ -196,12 +293,12 @@ impl Game {
     /// Space キー: facing方向のセルを移動を伴わずに掘削する(spec.md 1章)。
     pub fn try_drill(&mut self) -> Vec<GameEvent> {
         let mut events = Vec::new();
-        if !self.consume_input_cooldown() {
+        if !self.consume_drill_cooldown() {
             return events;
         }
 
         let before = self.player.position();
-        let outcome = physics::drill_facing(&mut self.board, &mut self.player);
+        let outcome = physics::drill_facing(&mut self.board, &mut self.player, &self.gravity_state);
         self.push_drill_outcome_events(outcome, &mut events);
         self.note_possible_move(before);
 
@@ -211,16 +308,31 @@ impl Game {
         events
     }
 
-    /// 入力クールダウン(spec.md 9.9)が明けているかを確認し、明けていればリセットする。
-    /// Playing状態でない場合、またはクールダウン中は`false`を返す。
-    fn consume_input_cooldown(&mut self) -> bool {
+    /// 移動系入力(MoveLeft/MoveRight)のクールダウン(spec.md 9.9)が明けているかを確認し、
+    /// 明けていればリセットする。Playing状態でない場合、またはクールダウン中は`false`を返す。
+    /// 掘削(Drill)とは独立したクールダウンなので、同一フレームで両方の入力が来ても
+    /// 互いをブロックしない(TERM独自拡張。ユーザー指摘対応)。
+    fn consume_move_cooldown(&mut self) -> bool {
         if self.status != GameStatus::Playing {
             return false;
         }
-        if self.input_cooldown_remaining > Duration::ZERO {
+        if self.move_cooldown_remaining > Duration::ZERO {
             return false;
         }
-        self.input_cooldown_remaining = Duration::from_millis(INPUT_COOLDOWN_MS);
+        self.move_cooldown_remaining = Duration::from_millis(INPUT_COOLDOWN_MS);
+        true
+    }
+
+    /// 掘削系入力(Drill)のクールダウンが明けているかを確認し、明けていればリセットする。
+    /// 移動(MoveLeft/MoveRight)とは独立したクールダウン(TERM独自拡張)。
+    fn consume_drill_cooldown(&mut self) -> bool {
+        if self.status != GameStatus::Playing {
+            return false;
+        }
+        if self.drill_cooldown_remaining > Duration::ZERO {
+            return false;
+        }
+        self.drill_cooldown_remaining = Duration::from_millis(INPUT_COOLDOWN_MS);
         true
     }
 
@@ -242,8 +354,13 @@ impl Game {
                 events.push(GameEvent::DrillImpact);
                 events.push(GameEvent::BlockDestroyed { blocks });
             }
-            DrillOutcome::CollectedOxygen => events.push(GameEvent::OxygenCollected),
+            DrillOutcome::OxygenUntouchedByDrill => {}
             DrillOutcome::CollectedDiamond => events.push(GameEvent::DiamondCollected),
+            DrillOutcome::StarDestroyed => {
+                events.push(GameEvent::DrillImpact);
+                events.push(GameEvent::BlockDestroyed { blocks: 1 });
+            }
+            DrillOutcome::CrushedByUnstableOverhead => self.apply_miss(events, true),
         }
     }
 
@@ -266,15 +383,36 @@ impl Game {
     fn apply_miss(&mut self, events: &mut Vec<GameEvent>, is_crush: bool) {
         if is_crush {
             self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
+            // 死んだ場所の左右列を含めて3列分、プレイヤーより上のブロックを全て
+            // クリアする(TERM独自拡張。ユーザー指摘: 「キャラがブロックつぶされて
+            // 死んだら、死んだ場所の左右列を含めて3列分の、キャラから上部ブロック
+            // すべてクリアすること」)。再開直後(ライフが残っての復帰・GameOver
+            // ダイアログでの「その場から復活」のどちらでも)に同じ場所でまた
+            // 押し潰されるのを防ぐための安全対策。
+            self.clear_three_columns_above_player();
         }
 
         let game_over = self.player.lose_life();
         if game_over {
             self.status = GameStatus::GameOver;
+            self.game_over_selection = GameOverChoice::BackToTitle;
             events.push(GameEvent::GameOverMiss);
         } else {
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
             events.push(GameEvent::LifeLost);
+        }
+    }
+
+    /// プレイヤーの現在列を中心に左右1列ずつ(=3列分)、プレイヤーより浅い
+    /// (画面上で上にある)行を全てEmptyにする(TERM独自拡張)。
+    fn clear_three_columns_above_player(&mut self) {
+        let col = self.player.col;
+        let col_start = col.saturating_sub(1);
+        let col_end = (col + 1).min(FIELD_WIDTH - 1);
+        for row in 0..self.player.row {
+            for c in col_start..=col_end {
+                self.board.set(row, c, Cell::Empty);
+            }
         }
     }
 
@@ -308,8 +446,11 @@ impl Game {
 
         self.player.elapsed_seconds += delta.as_secs_f32();
 
-        if self.input_cooldown_remaining > Duration::ZERO {
-            self.input_cooldown_remaining = self.input_cooldown_remaining.saturating_sub(delta);
+        if self.move_cooldown_remaining > Duration::ZERO {
+            self.move_cooldown_remaining = self.move_cooldown_remaining.saturating_sub(delta);
+        }
+        if self.drill_cooldown_remaining > Duration::ZERO {
+            self.drill_cooldown_remaining = self.drill_cooldown_remaining.saturating_sub(delta);
         }
 
         physics::apply_oxygen_decay(&mut self.player, delta.as_secs_f32());
@@ -332,17 +473,26 @@ impl Game {
         }
 
         self.fall_tick_accum += delta;
-        let tick = Duration::from_millis(FALL_TICK_MS);
+        let tick = Duration::from_millis(self.block_fall_tick_ms);
         while self.fall_tick_accum >= tick {
             self.fall_tick_accum -= tick;
 
             let invulnerable = self.invulnerability_ticks_remaining > 0;
-            let result =
-                physics::process_gravity_tick(&mut self.board, &mut self.player, &mut self.gravity_state, invulnerable);
+            let shake_ticks = (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
+            let result = physics::process_gravity_tick(
+                &mut self.board,
+                &mut self.player,
+                &mut self.gravity_state,
+                invulnerable,
+                shake_ticks,
+            );
             if invulnerable {
                 self.invulnerability_ticks_remaining -= 1;
             }
 
+            if result.oxygen_collected > 0 {
+                events.push(GameEvent::OxygenCollected);
+            }
             if result.auto_vanished_blocks > 0 {
                 events.push(GameEvent::BlockDestroyed {
                     blocks: result.auto_vanished_blocks,
@@ -360,15 +510,32 @@ impl Game {
                 self.apply_miss(&mut events, true);
             }
 
-            if self.status != GameStatus::Playing {
-                break;
+            let melted = tick_star_melting(&mut self.board, self.player.row);
+            if melted > 0 {
+                events.push(GameEvent::BlockDestroyed { blocks: melted });
             }
 
-            // プレイヤー自身の自由落下(spec.md 1章、TERM独自拡張)。入力の有無や掘削とは
-            // 無関係に、支えを失っていれば(直下がEmptyなら)このティックで1マス落下する。
+            if self.status != GameStatus::Playing {
+                return events;
+            }
+        }
+
+        // プレイヤー自身の自由落下(spec.md 1章、TERM独自拡張)。ブロックの重力とは
+        // 独立したtick間隔(`player_fall_tick_ms`)で判定する(デバッグショートカットで
+        // 両者を別々に速度調整できるようにするため、あえて別ループに分離している)。
+        // 入力の有無や掘削とは無関係に、支えを失っていれば(直下がEmptyなら)落下する。
+        // 直下が酸素カプセルの場合は掘削不要で「歩くだけで取得」する(spec.md公式マニュアル)。
+        self.player_fall_tick_accum += delta;
+        let player_tick = Duration::from_millis(self.player_fall_tick_ms);
+        while self.player_fall_tick_accum >= player_tick {
+            self.player_fall_tick_accum -= player_tick;
+
             let before_fall = self.player.position();
-            physics::apply_player_free_fall(&self.board, &mut self.player);
+            let fall_outcome = physics::apply_player_free_fall(&mut self.board, &mut self.player);
             self.note_possible_move(before_fall);
+            if fall_outcome == FreeFallOutcome::FellAndCollectedOxygen {
+                events.push(GameEvent::OxygenCollected);
+            }
             if self.player.row != before_fall.0 {
                 self.check_level_and_clear(&mut events);
                 if self.status != GameStatus::Playing {
@@ -378,6 +545,19 @@ impl Game {
         }
 
         events
+    }
+
+    /// プレイヤーが現在支持されている(直下が塞がっている、または最深行に到達している)
+    /// かどうか。支持されていなければ次の自由落下tickで必ず1マス落ちる状態であり、
+    /// その間は横移動を受け付けない(TERM独自拡張。ユーザー指摘: 「必ず落ちてから
+    /// 横移動が前提」)。直下が酸素カプセルの場合も自由落下でそのまま通過するため、
+    /// 支持されているとはみなさない。
+    fn player_is_grounded(&self) -> bool {
+        let below = self.player.row + 1;
+        if below >= self.board.depth_rows() {
+            return true;
+        }
+        !matches!(self.board.cell(below, self.player.col), Cell::Empty | Cell::Oxygen)
     }
 
     /// プレイヤーの位置が`before`から変化していれば、移動の見た目補間アニメーションを
@@ -405,6 +585,120 @@ impl Game {
     pub fn crush_flash_active(&self) -> bool {
         self.crush_flash_remaining > Duration::ZERO
     }
+
+    // -----------------------------------------------------------------------
+    // デバッグショートカット(TERM独自拡張。動作確認を効率化するための機能で、
+    // 初代の仕様やスコアには一切対応しない)
+    // -----------------------------------------------------------------------
+
+    /// 現在のブロック落下tick間隔(ms)。設定の永続化(main.rs/Settings)用に公開する。
+    pub fn block_fall_tick_ms(&self) -> u64 {
+        self.block_fall_tick_ms
+    }
+
+    /// 現在のプレイヤー自由落下tick間隔(ms)。設定の永続化(main.rs/Settings)用に公開する。
+    pub fn player_fall_tick_ms(&self) -> u64 {
+        self.player_fall_tick_ms
+    }
+
+    /// ブロック落下tick間隔を直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。
+    /// 範囲外の値は`DEBUG_FALL_TICK_MS_MIN`〜`MAX`にクランプする。
+    pub fn set_block_fall_tick_ms(&mut self, ms: u64) {
+        self.block_fall_tick_ms = ms.clamp(DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_MS_MAX);
+    }
+
+    /// プレイヤー自由落下tick間隔を直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。
+    pub fn set_player_fall_tick_ms(&mut self, ms: u64) {
+        self.player_fall_tick_ms = ms.clamp(DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_MS_MAX);
+    }
+
+    /// 現在の揺れ時間(ms)。設定の永続化(main.rs/Settings)用に公開する。
+    pub fn shake_duration_ms(&self) -> u64 {
+        self.shake_duration_ms
+    }
+
+    /// 揺れ時間を直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。
+    pub fn set_shake_duration_ms(&mut self, ms: u64) {
+        self.shake_duration_ms = ms.clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
+    }
+
+    /// デバッグ: 揺れ時間(ブロックが支えを失ってから実際に落下し始めるまでの時間)を
+    /// `DEBUG_SHAKE_DURATION_STEP_MS`ぶん増減する。`longer`がtrueなら長く(遅く反応)、
+    /// falseなら短く(速く反応、0まで)する。
+    pub fn debug_adjust_shake_duration(&mut self, longer: bool) {
+        self.shake_duration_ms = if longer {
+            (self.shake_duration_ms + DEBUG_SHAKE_DURATION_STEP_MS).min(DEBUG_SHAKE_DURATION_MS_MAX)
+        } else {
+            self.shake_duration_ms.saturating_sub(DEBUG_SHAKE_DURATION_STEP_MS)
+        };
+    }
+
+    /// デバッグ: ブロック落下速度を`DEBUG_FALL_TICK_STEP_MS`ぶん増減する。
+    /// `faster`がtrueならtick間隔を短くして速く、falseなら長くして遅くする。
+    pub fn debug_adjust_block_fall_speed(&mut self, faster: bool) {
+        self.block_fall_tick_ms = adjust_fall_tick_ms(self.block_fall_tick_ms, faster);
+    }
+
+    /// デバッグ: プレイヤー自由落下速度を`DEBUG_FALL_TICK_STEP_MS`ぶん増減する。
+    pub fn debug_adjust_player_fall_speed(&mut self, faster: bool) {
+        self.player_fall_tick_ms = adjust_fall_tick_ms(self.player_fall_tick_ms, faster);
+    }
+
+    /// デバッグ: ライフを1増やす(`LIVES_MAX`でクランプ)。Playing中のみ有効。
+    pub fn debug_add_life(&mut self) {
+        if self.status == GameStatus::Playing {
+            self.player.lives = (self.player.lives + 1).min(LIVES_MAX);
+        }
+    }
+
+    /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中のみ有効。
+    pub fn debug_clear_above_player(&mut self) {
+        if self.status != GameStatus::Playing {
+            return;
+        }
+        for row in 0..self.player.row {
+            for col in 0..FIELD_WIDTH {
+                self.board.set(row, col, Cell::Empty);
+            }
+        }
+    }
+
+    /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
+    /// ランダムに選んだ2色だけへ揃える。同色4連結以上の自動消滅ロジックを意図的に
+    /// 誘発させ、動作確認をしやすくするためのショートカット。Playing中のみ有効。
+    pub fn debug_unify_nearby_colors(&mut self) {
+        if self.status != GameStatus::Playing {
+            return;
+        }
+        use rand::RngExt;
+        let mut rng = rand::rng();
+
+        let all = ColorKind::ALL;
+        let first = all[rng.random_range(0..all.len())];
+        let second_offset = 1 + rng.random_range(0..all.len() - 1);
+        let second = all[(all.iter().position(|&c| c == first).unwrap() + second_offset) % all.len()];
+
+        let start_row = self.player.row.saturating_sub(DEBUG_UNIFY_COLORS_RANGE_ROWS);
+        let end_row = (self.player.row + DEBUG_UNIFY_COLORS_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
+        for row in start_row..=end_row {
+            for col in 0..FIELD_WIDTH {
+                if matches!(self.board.cell(row, col), Cell::Color(_)) {
+                    let chosen = if rng.random_bool(0.5) { first } else { second };
+                    self.board.set(row, col, Cell::Color(chosen));
+                }
+            }
+        }
+    }
+}
+
+/// `ms`を`step`ぶん増減させ、`DEBUG_FALL_TICK_MS_MIN`〜`MAX`にクランプする
+/// (`faster`がtrueならtick間隔を短く=速く、falseなら長く=遅くする)。
+fn adjust_fall_tick_ms(ms: u64, faster: bool) -> u64 {
+    if faster {
+        ms.saturating_sub(DEBUG_FALL_TICK_STEP_MS).max(DEBUG_FALL_TICK_MS_MIN)
+    } else {
+        (ms + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
+    }
 }
 
 /// 移動補間アニメーションの長さ(秒)。
@@ -417,6 +711,19 @@ mod tests {
     use super::*;
     use board::{Cell, ColorKind};
     use crate::constants::{ROCK_HITS_TO_BREAK, SHAKE_TICKS};
+
+    /// テスト用ヘルパー: 盤面全体を`Cell::Empty`にクリアする。`Game::new`はランダム
+    /// 生成された盤面を持つため、テストが制御していない場所(意図した数行の外側)にも
+    /// 未支持のグループが残っていると、支えの連鎖判定によって盤面全体で予期しない
+    /// 自動消滅・スコア加算が起きてしまう。重力・自動消滅系のテストは必ずこれで
+    /// クリアしてから対象セルだけを配置すること。
+    fn clear_board(game: &mut Game) {
+        for row in game.board.rows.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = Cell::Empty;
+            }
+        }
+    }
 
     #[test]
     fn reaching_goal_depth_via_drill_clears_the_game() {
@@ -457,9 +764,67 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, GameEvent::GameOverMiss)));
     }
 
+    // --- GameOverダイアログ(TERM独自拡張) ---
+
+    #[test]
+    fn game_over_selection_defaults_to_back_to_title_and_toggles() {
+        let mut game = Game::new_with_lives(2, 1);
+        game.player.oxygen = 1.0;
+        game.update(Duration::from_secs(1));
+        assert_eq!(game.status, GameStatus::GameOver);
+        assert_eq!(game.game_over_selection(), GameOverChoice::BackToTitle);
+
+        game.toggle_game_over_selection();
+        assert_eq!(game.game_over_selection(), GameOverChoice::Revive);
+
+        game.toggle_game_over_selection();
+        assert_eq!(game.game_over_selection(), GameOverChoice::BackToTitle);
+    }
+
+    #[test]
+    fn toggle_game_over_selection_does_nothing_while_playing() {
+        let mut game = Game::new(1);
+        assert_eq!(game.status, GameStatus::Playing);
+
+        game.toggle_game_over_selection();
+
+        assert_eq!(game.game_over_selection(), GameOverChoice::BackToTitle);
+    }
+
+    #[test]
+    fn revive_restores_lives_and_oxygen_and_resumes_playing_at_the_same_spot() {
+        let mut game = Game::new_with_lives(2, 1);
+        game.player.oxygen = 1.0;
+        game.update(Duration::from_secs(1));
+        assert_eq!(game.status, GameStatus::GameOver);
+        let depth_before = game.player.depth_m();
+        let score_before = game.player.score;
+
+        game.revive();
+
+        assert_eq!(game.status, GameStatus::Playing);
+        assert_eq!(game.player.lives, LIVES_DEFAULT);
+        assert_eq!(game.player.oxygen, crate::constants::OXYGEN_MAX);
+        assert_eq!(game.player.depth_m(), depth_before, "深度は維持される");
+        assert_eq!(game.player.score, score_before, "スコアは維持される");
+    }
+
+    #[test]
+    fn revive_does_nothing_while_playing() {
+        let mut game = Game::new(1);
+        game.player.lives = 1;
+
+        game.revive();
+
+        assert_eq!(game.player.lives, 1, "GameOver状態でなければ何もしない");
+    }
+
     #[test]
     fn input_cooldown_blocks_rapid_repeated_moves() {
         let mut game = Game::new(3);
+        // 開始直後の上2行は常にEmpty(spec.md)なので、直下に足場を置いて
+        // 「必ず落ちてから横移動が前提」の新ルールでも横移動できる状態にする。
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Rock { hits: 0 };
         let col_before = game.player.col;
 
         game.try_move_right();
@@ -527,7 +892,8 @@ mod tests {
         assert_eq!(game.player.facing, Direction::Right);
         assert!(first_events.is_empty());
 
-        game.input_cooldown_remaining = Duration::ZERO; // クールダウンを明ける(本テストの本題ではない)
+        game.move_cooldown_remaining = Duration::ZERO;
+            game.drill_cooldown_remaining = Duration::ZERO; // クールダウンを明ける(本テストの本題ではない)
         let second_events = game.try_move_right(); // 2回目: 同じ方向への再入力で登る
 
         assert_eq!(game.player.row, 0); // 1段登った
@@ -554,7 +920,8 @@ mod tests {
         assert_eq!(game.player.facing, Direction::Left);
         assert!(first_events.is_empty());
 
-        game.input_cooldown_remaining = Duration::ZERO; // クールダウンを明ける(本テストの本題ではない)
+        game.move_cooldown_remaining = Duration::ZERO;
+            game.drill_cooldown_remaining = Duration::ZERO; // クールダウンを明ける(本テストの本題ではない)
         let second_events = game.try_move_left(); // 2回目: 同じ方向への再入力で登る
 
         assert_eq!(game.player.row, 0); // 1段登った
@@ -570,6 +937,8 @@ mod tests {
         // task2(ユーザー指摘): AIRカプセルは掘削不要で、Gameの公開API(try_move_right)を
         // 通した隣接移動だけでも自動的に取得でき、SE再生用のGameEventも発火する。
         let mut game = Game::new(8);
+        // 開始直後の上2行は常にEmptyなので、直下に足場を置いて横移動できる状態にする。
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Rock { hits: 0 };
         let target_col = game.player.col + 1;
         game.board.rows[game.player.row][target_col] = Cell::Oxygen;
         game.player.oxygen = 40.0;
@@ -621,7 +990,8 @@ mod tests {
             assert_eq!(game.player.row, target_row - 1, "岩が壊れるまでは降下しない");
             assert!(events.iter().any(|e| matches!(e, GameEvent::RockHitIntact)));
             // 次のヒットのためクールダウンを明ける(spec.md 9.9のクールダウンは本テストの本題ではない)
-            game.input_cooldown_remaining = Duration::ZERO;
+            game.move_cooldown_remaining = Duration::ZERO;
+            game.drill_cooldown_remaining = Duration::ZERO;
         }
 
         let events = game.try_drill(); // 5回目: 破壊
@@ -635,10 +1005,10 @@ mod tests {
     }
 
     #[test]
-    fn drilling_a_rock_to_its_fifth_hit_vanishes_the_whole_connected_rock_group() {
-        // task4(ユーザー指摘): 岩ブロックも色ブロックと同様に4方向連結の対象になる。
-        // 5回目のヒットで破壊に至ると、そのセルだけでなく連結している岩ブロック全部が
-        // 消滅する(spec.md 4.9)。酸素ペナルティは実際に掘削した1回分(-20%)のみ。
+    fn drilling_a_rock_to_its_fifth_hit_vanishes_only_that_block() {
+        // ユーザー指摘: 「Xブロックは結合してても全体が消えるのではなく1ブロックしか
+        // 消せないものとする」。5回目のヒットで破壊されるのはそのセルのみで、
+        // 連結している隣の岩ブロックは影響を受けない。酸素ペナルティは-20%。
         let mut game = Game::new(40);
         game.player.facing = Direction::Down;
         let target_row = game.player.row + 1;
@@ -646,31 +1016,31 @@ mod tests {
         game.board.rows[target_row][col] = Cell::Rock {
             hits: ROCK_HITS_TO_BREAK - 1,
         }; // あと1発で破壊
-        game.board.rows[target_row][col + 1] = Cell::Rock { hits: 0 }; // 隣接、連結対象
+        game.board.rows[target_row][col + 1] = Cell::Rock { hits: 0 }; // 連結していても巻き込まれない
         let oxygen_before = game.player.oxygen;
 
-        let events = game.try_drill(); // 5回目: 破壊、連結岩ブロックも巻き込む
+        let events = game.try_drill(); // 5回目: そのセルだけ破壊
 
         assert_eq!(game.board.cell(target_row, col), Cell::Empty);
-        assert_eq!(game.board.cell(target_row, col + 1), Cell::Empty, "連結していた岩ブロックも消滅する");
+        assert_eq!(
+            game.board.cell(target_row, col + 1),
+            Cell::Rock { hits: 0 },
+            "連結していた岩ブロックは影響を受けない"
+        );
         assert_eq!(game.player.oxygen, oxygen_before - 20.0, "酸素ペナルティは1回分のみ");
         assert_eq!(game.player.score, 0, "岩ブロックの消滅は得点対象外");
         assert!(events
             .iter()
-            .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 2 })));
+            .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 1 })));
     }
 
     #[test]
-    fn falling_rock_blocks_connecting_to_four_or_more_auto_vanish_via_update_without_score() {
-        // task4: 岩ブロックも色ブロックと同様に、支えを失えば(揺れを経て)落下し、
-        // 支持されている岩ブロックに接触して連結、4個以上になれば掘削されずに自動消滅する。
-        // ただし得点は発生しない(spec.md 2章・4.9・7章)。
+    fn falling_rock_blocks_connecting_to_four_or_more_auto_vanish_via_update() {
+        // ユーザー指摘: 「4個以上結合したらちゃんと消えないといけない」。岩ブロックも
+        // 支えを失えば(揺れを経て)落下し、支持されている岩ブロックに接触して連結、
+        // 4個以上になれば自動消滅する(得点は対象外)。
         let mut game = Game::new(41);
-        for row in 997..1000 {
-            for col in 0..crate::constants::FIELD_WIDTH {
-                game.board.rows[row][col] = Cell::Empty;
-            }
-        }
+        clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 11; // 落下グループから十分離す
 
@@ -682,10 +1052,13 @@ mod tests {
 
         let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
 
-        assert_eq!(game.player.score, score_before, "岩ブロックの自動消滅で得点は増えない");
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 })));
+        assert_eq!(game.player.score, score_before, "岩ブロックの自動消滅はスコア対象外");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 })),
+            "4個以上連結した岩ブロックの自動消滅でBlockDestroyedイベントが発生する"
+        );
         assert_eq!(game.board.cell(999, 0), Cell::Empty);
         assert_eq!(game.board.cell(999, 1), Cell::Empty);
         assert_eq!(game.board.cell(999, 2), Cell::Empty);
@@ -698,11 +1071,7 @@ mod tests {
         // 接触して連結、4個以上になった時点で掘削されずに自動消滅する
         // (1個30点)。Game::updateを通した重力ティックの結果として検証する。
         let mut game = Game::new(11);
-        for row in 997..1000 {
-            for col in 0..crate::constants::FIELD_WIDTH {
-                game.board.rows[row][col] = Cell::Empty;
-            }
-        }
+        clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 11; // 落下グループから十分離す
 
@@ -782,13 +1151,43 @@ mod tests {
     }
 
     #[test]
+    fn crush_death_clears_three_columns_above_the_player() {
+        // 押し潰しミス発生時、死亡地点の左右列を含めて3列分、プレイヤーより上の
+        // ブロックが全てクリアされる(TERM独自拡張。ユーザー指摘: 「キャラがブロック
+        // つぶされて死んだら、死んだ場所の左右列を含めて3列分の、キャラから上部
+        // ブロックすべてクリアすること」。再開直後の連続死亡を防ぐ安全対策)。
+        let mut game = Game::new_with_lives(34, 2); // ライフ2、押し潰されても即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        for row in 990..999 {
+            game.board.rows[row][4] = Cell::Color(ColorKind::Blue);
+            game.board.rows[row][5] = Cell::Color(ColorKind::Blue);
+            game.board.rows[row][6] = Cell::Color(ColorKind::Blue);
+        }
+        // 対象外の列(3, 7)は影響を受けないことを確認するために配置しておく。
+        // 最深行に置いて確実に支持された状態にする(そうしないと重力落下で
+        // 位置がズレてテストの前提が崩れる)。
+        game.board.rows[999][3] = Cell::Color(ColorKind::Green);
+        game.board.rows[999][7] = Cell::Color(ColorKind::Green);
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+
+        assert_eq!(game.player.lives, 1, "押し潰されてライフを1つ失っているはず");
+        for row in 0..999 {
+            assert_eq!(game.board.cell(row, 4), Cell::Empty, "row={row} col=4はクリアされているはず");
+            assert_eq!(game.board.cell(row, 5), Cell::Empty, "row={row} col=5はクリアされているはず");
+            assert_eq!(game.board.cell(row, 6), Cell::Empty, "row={row} col=6はクリアされているはず");
+        }
+        assert_eq!(game.board.cell(999, 3), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+        assert_eq!(game.board.cell(999, 7), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+    }
+
+    #[test]
     fn crush_flash_decays_to_inactive_after_crush_flash_duration() {
         let mut game = Game::new(31);
-        for row in 997..1000 {
-            for col in 0..crate::constants::FIELD_WIDTH {
-                game.board.rows[row][col] = Cell::Empty;
-            }
-        }
+        clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 5;
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
@@ -815,6 +1214,8 @@ mod tests {
     #[test]
     fn lateral_move_starts_interpolation_from_the_previous_position_then_settles() {
         let mut game = Game::new(33);
+        // 開始直後の上2行は常にEmptyなので、直下に足場を置いて横移動できる状態にする。
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Rock { hits: 0 };
         let before = game.player.position();
 
         let events = game.try_move_right();

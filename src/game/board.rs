@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::constants::{FIELD_WIDTH, ROCK_HITS_TO_BREAK, SHAKE_TICKS};
+use crate::constants::{FIELD_WIDTH, ROCK_HITS_TO_BREAK, STAR_MELT_TICKS};
 
 /// フィールド1マスの内容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +22,11 @@ pub enum Cell {
     Oxygen,
     /// ダイヤブロック。TERM独自拡張(初代の確定事実には存在しない要素)。
     Diamond,
+    /// スターブロック(TERM独自拡張。ユーザー指摘: 「画面内にきたら、溶けて自然と
+    /// 消えるスターブロックも欲しい」)。プレイヤーの可視範囲内に入ると自然に溶けて
+    /// 消える。`melting`は0(まだ画面外/入った直後)〜`STAR_MELT_TICKS`(消滅)の
+    /// カウンタで、掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
+    Star { melting: u8 },
 }
 
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
@@ -47,6 +52,8 @@ pub struct BandTable {
     pub rock: f32,
     pub oxygen: f32,
     pub diamond: f32,
+    /// スターブロックの出現率(TERM独自拡張。深度に関わらず`STAR_SPAWN_PROB`で一定)。
+    pub star: f32,
 }
 
 /// 行インデックス(=深度[m]、spec.md 2章)から出現確率テーブルを引く(spec.md 3.1)。
@@ -60,26 +67,31 @@ pub fn band_table(row: usize) -> BandTable {
             rock: 0.05,
             oxygen: 0.03,
             diamond: 0.02,
+            star: crate::constants::STAR_SPAWN_PROB,
         },
         200..=399 => BandTable {
             rock: 0.08,
             oxygen: 0.04,
             diamond: 0.03,
+            star: crate::constants::STAR_SPAWN_PROB,
         },
         400..=599 => BandTable {
             rock: 0.12,
             oxygen: 0.04,
             diamond: 0.04,
+            star: crate::constants::STAR_SPAWN_PROB,
         },
         600..=799 => BandTable {
             rock: 0.16,
             oxygen: 0.04,
             diamond: 0.05,
+            star: crate::constants::STAR_SPAWN_PROB,
         },
         _ => BandTable {
             rock: 0.20,
             oxygen: 0.04,
             diamond: 0.06,
+            star: crate::constants::STAR_SPAWN_PROB,
         },
     }
 }
@@ -232,6 +244,8 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         Cell::Oxygen
     } else if r < t.rock + t.oxygen + t.diamond {
         Cell::Diamond
+    } else if r < t.rock + t.oxygen + t.diamond + t.star {
+        Cell::Star { melting: 0 }
     } else {
         Cell::Color(base_color)
     }
@@ -369,11 +383,11 @@ pub fn hit_rock(board: &mut Board, target: (usize, usize)) -> Option<RockHitResu
     };
     let hits = hits + 1;
     if hits >= ROCK_HITS_TO_BREAK {
-        let group = connected_rock_group(board, target);
-        for &(r, c) in &group {
-            board.set(r, c, Cell::Empty);
-        }
-        Some(RockHitResult::Destroyed { blocks: group.len() })
+        // 岩ブロックは色ブロックと異なり、連結していても消えるのはヒットした
+        // 1ブロックのみ(TERM独自拡張。ユーザー指摘: 「Xブロックは結合してても
+        // 全体が消えるのではなく1ブロックしか消せないものとする」)。
+        board.set(target.0, target.1, Cell::Empty);
+        Some(RockHitResult::Destroyed { blocks: 1 })
     } else {
         board.set(target.0, target.1, Cell::Rock { hits });
         Some(RockHitResult::StillIntact)
@@ -399,14 +413,12 @@ impl GravityState {
         Self::default()
     }
 
-    /// 指定セルが現在「震えている」状態(未支持と判定されたが、まだ`SHAKE_TICKS`ぶんの
+    /// 指定セルが現在「震えている」状態(未支持と判定されたが、まだ揺れティック数ぶんの
     /// 猶予が明けておらず実際には落下していない)かどうか(spec.md 4.3)。
     ///
-    /// 物理演算自体は副作用の無い純粋関数のままだが、この状態は`GravityState`が保持して
-    /// いるため、描画側(次フェーズ以降のシェイク演出)はこのメソッド経由で参照できる。
-    /// シェイク演出自体は今回のイテレーションのスコープ外(spec.md 9.11)のため、本体側の
-    /// 呼び出し元はまだ無い(単体テストでのみ使用)。
-    #[allow(dead_code, reason = "次フェーズの描画層(シェイク演出)向けに公開しておくデータフラグ")]
+    /// 上向き掘削時の「不安定なブロックは掘れず押し潰される」判定(physics::drill_facing)
+    /// で使う。支持されていない(=`is_supported`がfalse)だけでは「揺れ始めた直後でまだ
+    /// 見た目には静止している」ケースを区別できないため、この状態も合わせて見る。
     pub fn is_shaking(&self, pos: (usize, usize)) -> bool {
         self.unsupported_ticks.contains_key(&pos)
     }
@@ -425,6 +437,11 @@ pub struct FallTickOutcome {
     /// 落下・着地した結果、4連結以上により自動消滅した岩ブロック数
     /// (spec.md 4.9。色ブロックと異なり得点対象外だが、破壊音等のイベント発火には使う)。
     pub auto_vanished_rock_blocks: usize,
+    /// 落下してきた酸素カプセルがプレイヤー位置に重なり、取得された回数
+    /// (TERM独自拡張。「歩くだけで取得できる」仕様と同様、上から落ちてきたAIRに
+    /// 触れた場合も押し潰されず酸素回復扱いにする。ユーザー指摘「上から降ってきた
+    /// AIRで回復してないバグ」の修正)。呼び出し側が酸素回復・スコア加算を行う。
+    pub oxygen_collected: usize,
 }
 
 /// あるセル`pos`が「支持されている」か(spec.md 4.2)。
@@ -433,7 +450,10 @@ pub struct FallTickOutcome {
 /// - 直下のセルが空(Empty)でない、かつプレイヤーが直下にいない場合は真
 ///
 /// プレイヤーの現在位置は常に「空洞」として扱う(プレイヤーが支えの代わりになることはない)。
-fn is_supported(board: &Board, pos: (usize, usize), player_pos: (usize, usize)) -> bool {
+/// 単独セル(酸素・ダイヤ)の判定にはそのまま使えるが、連結グループの判定には
+/// `is_group_supported`を使うこと(このセル単独の直下だけを見ると、連結している
+/// 仲間セルの存在を支えと誤認したり、逆に仲間越しの本当の支えを見落としたりする)。
+pub(crate) fn is_supported(board: &Board, pos: (usize, usize), player_pos: (usize, usize)) -> bool {
     let (row, col) = pos;
     let depth_rows = board.depth_rows();
     if row + 1 >= depth_rows {
@@ -443,91 +463,277 @@ fn is_supported(board: &Board, pos: (usize, usize), player_pos: (usize, usize)) 
     board.cell(below.0, below.1) != Cell::Empty && below != player_pos
 }
 
-/// 論理ティック1回ぶんの重力落下処理(spec.md 4章・5章)を実行する。
+/// 盤面全体を「重力の単位」ごとに分割する(spec.md 4.1・4.7、ユーザー指摘対応)。
 ///
-/// - 支持判定(4.2)はティック開始時点のスナップショットを基準に、全セル同時に行う(4.4)。
-/// - 支持を失ったセルは即座には落下せず、まず`SHAKE_TICKS`ぶん揺れてから落下を開始する
-///   (4.3)。揺れが明けている未支持セルだけがこのティックで1マス下へ移動する。
-/// - 移動先がプレイヤー位置と重なった場合、その瞬間に押し潰し(crushed)を確定し、
-///   押し潰した側のブロックはその場で消滅する(spec.md 5章)
-/// - 移動した結果、直下が非Empty(=着地)になった色ブロックについてのみ、4方向連結の
-///   同色グループを判定し、4個以上なら自動消滅させる(4.5)。岩・酸素・ダイヤは
-///   このグループ判定の対象外で、着地したらそのまま固定される(4.1)
-pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity: &mut GravityState) -> FallTickOutcome {
-    let snapshot = board.clone();
+/// 色ブロックは同色4方向連結グループ、岩ブロックは連結グループ(hits問わず)を、
+/// それぞれ「1つの塊」として1つのVecにまとめる。同色・岩ブロックが上下左右に
+/// 隣接している限り必ず同じ塊に含まれるため、支持判定・移動を後続の処理でセル単位に
+/// バラして行うことはなく、「ちぎれて落ちる」ことが起きない。酸素カプセル・ダイヤは
+/// 連結対象外(spec.md 2章)なので、常にサイズ1の塊として扱う。
+fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
     let depth_rows = board.depth_rows();
-    let mut moves: Vec<((usize, usize), (usize, usize))> = Vec::new();
-    let mut next_unsupported_ticks: HashMap<(usize, usize), u8> = HashMap::new();
+    let mut visited: HashSet<(usize, usize)> = HashSet::new();
+    let mut groups = Vec::new();
 
     for row in 0..depth_rows {
         for col in 0..FIELD_WIDTH {
             let pos = (row, col);
-            if snapshot.cell(row, col) == Cell::Empty {
+            if visited.contains(&pos) {
                 continue;
             }
-            if is_supported(&snapshot, pos, player_pos) {
-                continue; // 支持されている = 揺れ状態も解除(next_unsupported_ticksに載せない)
+            match board.cell(row, col) {
+                Cell::Empty => {
+                    visited.insert(pos);
+                }
+                Cell::Color(color) => {
+                    let group = connected_same_color(board, pos, color);
+                    visited.extend(group.iter().copied());
+                    groups.push(group);
+                }
+                Cell::Rock { .. } => {
+                    let group = connected_rock_group(board, pos);
+                    visited.extend(group.iter().copied());
+                    groups.push(group);
+                }
+                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } => {
+                    visited.insert(pos);
+                    groups.push(vec![pos]);
+                }
             }
+        }
+    }
 
-            let ticks_unsupported = gravity.unsupported_ticks.get(&pos).copied().unwrap_or(0) + 1;
-            if ticks_unsupported as u32 > SHAKE_TICKS as u32 {
-                // 揺れが明けた(またはSHAKE_TICKS=0で即座に) -> このティックで1マス落下する
-                moves.push((pos, (row + 1, col)));
-            } else {
-                // まだ揺れている最中 -> 移動しない
-                next_unsupported_ticks.insert(pos, ticks_unsupported);
+    groups
+}
+
+/// `group`(1つの塊。連結グループまたは単独セル)が全体として支持されているか。
+///
+/// グループ内のどれか1つのセルでも「直下がグループ外の非Emptyセル」または
+/// 「コース最深行」であれば、塊全体が支持されているとみなす。直下がグループ内の
+/// 仲間セルである場合は、そのセル自身は支えにならない(仲間越しに、さらにその下の
+/// 本当の支えを探す必要がある)。
+pub(crate) fn is_group_supported(board: &Board, group: &[(usize, usize)], player_pos: (usize, usize)) -> bool {
+    let depth_rows = board.depth_rows();
+    let group_set: HashSet<(usize, usize)> = group.iter().copied().collect();
+
+    group.iter().any(|&(r, c)| {
+        if r + 1 >= depth_rows {
+            return true;
+        }
+        let below = (r + 1, c);
+        if group_set.contains(&below) {
+            return false; // 仲間は支えにならない。他のセルの判定に委ねる
+        }
+        board.cell(below.0, below.1) != Cell::Empty && below != player_pos
+    })
+}
+
+/// `group`が「真に安定した支え」を持つかどうか(`is_group_supported`の連鎖判定版)。
+///
+/// `is_group_supported`と同様に直下の非Emptyセルを支えの根拠として探すが、
+/// その根拠となるセルが属する塊(`cell_to_group`で引く)が`supported`上で
+/// 既に未支持と判定されている場合、その支えは「このティックで一緒に落ちてしまう
+/// 不安定な支え」であり、真の支えとしては数えない。呼び出し側が収束するまで
+/// 繰り返し呼ぶことで、支えの連鎖(支えの支えの支え…)を正しく伝播させる
+/// (ユーザー指摘対応: 「右1列でひっかかっても2:1でちぎれて分離されることがある」)。
+fn has_stable_support(
+    board: &Board,
+    group: &[(usize, usize)],
+    cell_to_group: &HashMap<(usize, usize), usize>,
+    supported: &[bool],
+    player_pos: (usize, usize),
+) -> bool {
+    let depth_rows = board.depth_rows();
+    let group_set: HashSet<(usize, usize)> = group.iter().copied().collect();
+
+    group.iter().any(|&(r, c)| {
+        if r + 1 >= depth_rows {
+            return true; // 最深行は常に安定した支え
+        }
+        let below = (r + 1, c);
+        if group_set.contains(&below) {
+            return false; // 仲間は支えにならない。他のセルの判定に委ねる
+        }
+        if below == player_pos || board.cell(below.0, below.1) == Cell::Empty {
+            return false;
+        }
+        match cell_to_group.get(&below) {
+            Some(&group_index) => supported[group_index],
+            None => true, // グループ管理外(通常は起きない)は安全側でtrue扱い
+        }
+    })
+}
+
+/// 論理ティック1回ぶんの重力落下処理(spec.md 4章・5章)を実行する。
+///
+/// - まず盤面全体を`collect_fall_groups`で「塊」(連結グループ・単独セル)に分割する。
+///   同色・岩ブロックが上下左右に隣接していれば必ず同じ塊としてまとめて扱われ、
+///   支持判定・移動もその塊単位で行うため、一部のセルだけがちぎれて落ちることはない
+///   (ユーザー指摘対応)。
+/// - 支持判定(4.2)はティック開始時点のスナップショットを基準に、全ての塊同時に行う(4.4)。
+/// - 支持を失った塊は即座には落下せず、まず`shake_ticks`ぶん揺れてから落下を開始する
+///   (4.3)。揺れが明けている未支持の塊だけがこのティックで1マス下へ移動する。
+///   `shake_ticks`は呼び出し側(Game)が揺れ時間設定(ms、デバッグショートカットで実行時
+///   調整可能・TERM独自拡張)とブロック落下tick間隔から都度換算して渡す
+/// - 移動先がプレイヤー位置と重なった場合、その瞬間に押し潰し(crushed)を確定し、
+///   押し潰した側の塊はその場で消滅する(spec.md 5章)。酸素カプセルだけは例外で、
+///   押し潰しにはせず取得(酸素回復)扱いにする(TERM独自拡張)
+/// - 移動した結果、直下が非Empty(=着地)になった色ブロック・岩ブロックの塊についてのみ、
+///   4個以上なら自動消滅させる(4.5・4.9)
+pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity: &mut GravityState, shake_ticks: u8) -> FallTickOutcome {
+    let snapshot = board.clone();
+    let groups = collect_fall_groups(&snapshot);
+
+    // 各セルがどの塊(groupsのインデックス)に属するかの逆引きマップ。
+    let mut cell_to_group: HashMap<(usize, usize), usize> = HashMap::new();
+    for (i, group) in groups.iter().enumerate() {
+        for &pos in group {
+            cell_to_group.insert(pos, i);
+        }
+    }
+
+    // まず素朴な支持判定(直下が非Emptyかどうか)で初期化する。
+    let mut supported: Vec<bool> = groups.iter().map(|g| is_group_supported(&snapshot, g, player_pos)).collect();
+
+    // 連鎖的な再判定(ユーザー指摘対応: 「右1列でひっかかっても2:1でちぎれて分離
+    // されることがある」)。支えの根拠となっているセルが属する塊自体が、このティックで
+    // 未支持(=これから落下する)と判定されているなら、その支えは実際には不安定であり、
+    // 支えられている側の塊も連動して未支持にする。1段の連鎖では済まない場合があるため
+    // (支えの支えの支え…)、変化が無くなるまで繰り返す。
+    loop {
+        let mut changed = false;
+        for i in 0..groups.len() {
+            if !supported[i] {
+                continue;
             }
+            if !has_stable_support(&snapshot, &groups[i], &cell_to_group, &supported, player_pos) {
+                supported[i] = false;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut next_unsupported_ticks: HashMap<(usize, usize), u8> = HashMap::new();
+    let mut falling_groups: Vec<Vec<(usize, usize)>> = Vec::new();
+
+    for (i, group) in groups.into_iter().enumerate() {
+        if supported[i] {
+            continue; // 支持されている = 揺れ状態も解除(next_unsupported_ticksに載せない)
+        }
+
+        // 塊の代表座標(先頭要素。`collect_fall_groups`の探索順序上、同じ塊なら常に
+        // 「最小の(row, col)」で安定する)で揺れティック数を管理する。
+        let representative = group[0];
+        let ticks_unsupported = gravity.unsupported_ticks.get(&representative).copied().unwrap_or(0) + 1;
+        if ticks_unsupported as u32 > shake_ticks as u32 {
+            // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する
+            falling_groups.push(group);
+        } else {
+            // まだ揺れている最中 -> 移動しない
+            next_unsupported_ticks.insert(representative, ticks_unsupported);
         }
     }
 
     gravity.unsupported_ticks = next_unsupported_ticks;
 
     let mut outcome = FallTickOutcome::default();
-    if moves.is_empty() {
+    if falling_groups.is_empty() {
         return outcome;
     }
-    outcome.cells_moved = moves.len();
 
-    for &(from, to) in &moves {
-        let cell = snapshot.cell(from.0, from.1);
-        board.set(from.0, from.1, Cell::Empty);
-        if to == player_pos {
-            // 押し潰した側のブロックはその場で消滅する(spec.md 5章。得点は発生しない)。
-            board.set(to.0, to.1, Cell::Empty);
-            // 酸素カプセル(AIR)だけは例外で、落下して当たっても押し潰し判定にしない
-            // (TERM独自拡張・ユーザー指摘反映)。取得扱い(酸素回復)にはせず消滅のみとする。
-            if cell != Cell::Oxygen {
-                outcome.crushed = true;
-            }
-        } else {
-            board.set(to.0, to.1, cell);
+    // 浅い深度(行番号が小さい)側の塊から処理する。これにより下段の塊が先に動いて
+    // 隙間を作り、その結果上段の塊も同ティックで連動して動いてしまう事故を防ぐ
+    // (spec.md 4章手順6のグループ版)。
+    falling_groups.sort_by_key(|g| g.iter().map(|&(r, _)| r).min().unwrap_or(0));
+
+    // 先に全ての塊の旧位置をまとめてEmptyにしてから、新位置への書き込みへ進む。
+    // 複数の塊が縦に連なって同時に落下する場合(例: 塊Aの新位置が塊Bの旧位置と
+    // 一致するケース)、塊ごとに「旧位置クリア→新位置書き込み」を順番に行うと、
+    // 後から処理する塊のクリアが先に書き込んだ別の塊を消してしまう事故が起きる
+    // (ユーザー指摘「右1列でひっかかっても2:1でちぎれて分離される」の連鎖判定を
+    // 追加した際に顕在化したバグ)。spec.md 4章手順5の「先に旧位置を全てEmptyに」
+    // という配慮を、単一の塊内だけでなく全ての塊を跨いで徹底する。
+    for group in &falling_groups {
+        for &(r, c) in group {
+            board.set(r, c, Cell::Empty);
         }
     }
 
+    for group in &falling_groups {
+        outcome.cells_moved += group.len();
+
+        // 各セルの内容(色ブロックのColorKind・岩ブロックのhits)は`snapshot`から
+        // セルごとに個別取得する。グループ代表セル1つの内容を全セルへ使い回すと、
+        // 岩ブロックのようにセルごとに異なる付随データ(hits)を持つ塊で、着地後に
+        // 全セルが代表セルのhitsで上書きされてしまうバグになる
+        // (発見: 岩ブロック非自動消滅化のテストで顕在化)。
+        let mut crushed_in_group = false;
+        for &(r, c) in group {
+            let cell = snapshot.cell(r, c);
+            let to = (r + 1, c);
+            if to == player_pos {
+                // 落下してきたセルはその場で消滅する(spec.md 5章)。
+                if cell == Cell::Oxygen {
+                    // 酸素カプセル(AIR)だけは例外で、掘削・自由落下時の「歩くだけで取得」と
+                    // 同様に押し潰し判定にせず取得(酸素回復)扱いにする(TERM独自拡張。
+                    // ユーザー指摘「上から降ってきたAIRで回復してないバグ」の修正)。
+                    outcome.oxygen_collected += 1;
+                } else {
+                    // 押し潰した側のセルが消滅する(得点は発生しない)。
+                    crushed_in_group = true;
+                }
+            } else {
+                board.set(to.0, to.1, cell);
+            }
+        }
+
+        if crushed_in_group {
+            outcome.crushed = true;
+            // 押し潰し確定=即ミスなので、以降の塊の処理を続ける実益はない。
+            break;
+        }
+    }
+
+    if outcome.crushed {
+        return outcome;
+    }
+
     // 着地(=移動先で直下が支持状態になった)色ブロック・岩ブロックについて連結・自動消滅を
-    // 判定する(spec.md 4.5・4.9)。岩ブロックも色ブロックと同様に4連結以上で自動消滅するが、
-    // 得点は発生しない(2章・7章)。
-    for &(_, to) in &moves {
-        if !is_supported(board, to, player_pos) {
+    // 判定する(spec.md 4.5・4.9)。岩ブロックも4連結以上になれば自動消滅するが得点は
+    // 発生しない。ただし「掘削(hit_rock)で1回ヒットした際に消えるのはそのセル1個だけ」
+    // という別ルール(ユーザー指摘: 「Xブロックは結合してても全体が消えるのではなく
+    // 1ブロックしか消せない」)とは独立していて、こちらは「支えを失って落下し、着地して
+    // 4個以上連結した場合」にのみ働く自動消滅(ユーザー指摘: 「4個以上結合したら
+    // ちゃんと消えないといけない」)。
+    for group in &falling_groups {
+        let moved_group: Vec<(usize, usize)> = group.iter().map(|&(r, c)| (r + 1, c)).collect();
+        let Some(&to) = moved_group.first() else { continue };
+        if board.cell(to.0, to.1) == Cell::Empty {
+            continue; // 押し潰しでこの塊自体が消滅済み
+        }
+        if !is_group_supported(board, &moved_group, player_pos) {
             continue; // まだ落下中(次ティック以降に改めて着地判定する)
         }
         match board.cell(to.0, to.1) {
             Cell::Color(color) => {
-                let group = connected_same_color(board, to, color);
-                if group.len() >= 4 {
-                    for &(r, c) in &group {
-                        board.set(r, c, Cell::Empty);
+                let vanish_group = connected_same_color(board, to, color);
+                if vanish_group.len() >= 4 {
+                    for &(vr, vc) in &vanish_group {
+                        board.set(vr, vc, Cell::Empty);
                     }
-                    outcome.auto_vanished_blocks += group.len();
+                    outcome.auto_vanished_blocks += vanish_group.len();
                 }
             }
             Cell::Rock { .. } => {
-                let group = connected_rock_group(board, to);
-                if group.len() >= 4 {
-                    for &(r, c) in &group {
-                        board.set(r, c, Cell::Empty);
+                let vanish_group = connected_rock_group(board, to);
+                if vanish_group.len() >= 4 {
+                    for &(vr, vc) in &vanish_group {
+                        board.set(vr, vc, Cell::Empty);
                     }
-                    outcome.auto_vanished_rock_blocks += group.len();
+                    outcome.auto_vanished_rock_blocks += vanish_group.len();
                 }
             }
             _ => {}
@@ -537,9 +743,36 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
     outcome
 }
 
+/// プレイヤーの画面内(行±`STAR_VISIBLE_RANGE_ROWS`)にあるスターブロックを1ティック分
+/// 溶かし、`STAR_MELT_TICKS`に達したものは消す(TERM独自拡張。ユーザー指摘:
+/// 「画面内にきたら、溶けて自然と消えるスターブロックも欲しい」)。画面外のスター
+/// ブロックは溶解が進行しない。戻り値は消滅したスターブロックの個数。
+pub fn tick_star_melting(board: &mut Board, player_row: usize) -> usize {
+    let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
+    let row_start = player_row.saturating_sub(range);
+    let row_end = (player_row + range).min(board.depth_rows().saturating_sub(1));
+    let mut melted = 0;
+
+    for r in row_start..=row_end {
+        for c in 0..FIELD_WIDTH {
+            if let Cell::Star { melting } = board.cell(r, c) {
+                if melting + 1 >= STAR_MELT_TICKS {
+                    board.set(r, c, Cell::Empty);
+                    melted += 1;
+                } else {
+                    board.set(r, c, Cell::Star { melting: melting + 1 });
+                }
+            }
+        }
+    }
+
+    melted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::SHAKE_TICKS;
 
     fn empty_board(rows: usize) -> Board {
         Board {
@@ -830,21 +1063,22 @@ mod tests {
     }
 
     #[test]
-    fn rock_break_on_fifth_hit_vanishes_the_whole_connected_rock_group() {
-        // ユーザー指摘(task4): 岩ブロックも色ブロックと同様に4方向連結の対象になる。
-        // ヒットしたのは(0,0)だけでも、連結している岩ブロック全部が消滅する(spec.md 4.9)。
+    fn rock_break_on_fifth_hit_vanishes_only_the_hit_block() {
+        // ユーザー指摘: 「Xブロックは結合してても全体が消えるのではなく1ブロックしか
+        // 消せないものとする」。連結している他の岩ブロックは、hitsに関わらず影響を
+        // 受けずそのまま残る(色ブロックとは違うルール)。
         let mut board = empty_board(2);
         board.rows[0][0] = Cell::Rock { hits: ROCK_HITS_TO_BREAK - 1 }; // あと1発で破壊
-        board.rows[0][1] = Cell::Rock { hits: 0 }; // hitsが違っても岩ブロックなら連結対象
-        board.rows[1][0] = Cell::Rock { hits: 2 };
+        board.rows[0][1] = Cell::Rock { hits: 0 }; // 連結していても巻き込まれない
+        board.rows[1][0] = Cell::Rock { hits: 2 }; // 同上
         board.rows[0][2] = Cell::Color(ColorKind::Red); // 別種、巻き込まれない
 
         let result = hit_rock(&mut board, (0, 0)).unwrap();
 
-        assert_eq!(result, RockHitResult::Destroyed { blocks: 3 });
+        assert_eq!(result, RockHitResult::Destroyed { blocks: 1 });
         assert_eq!(board.cell(0, 0), Cell::Empty);
-        assert_eq!(board.cell(0, 1), Cell::Empty);
-        assert_eq!(board.cell(1, 0), Cell::Empty);
+        assert_eq!(board.cell(0, 1), Cell::Rock { hits: 0 }, "連結していた岩は影響を受けない");
+        assert_eq!(board.cell(1, 0), Cell::Rock { hits: 2 }, "連結していた岩は影響を受けない");
         assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Red)); // 色ブロックは無関係
     }
 
@@ -873,14 +1107,14 @@ mod tests {
         // SHAKE_TICKS ぶんは揺れるだけで移動しない。この間`is_shaking`はtrueを返し、
         // 描画側がシェイク演出に使えるデータとして残る(spec.md 4.3)。
         for _ in 0..SHAKE_TICKS {
-            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity);
+            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
             assert_eq!(outcome.cells_moved, 0);
             assert!(gravity.is_shaking((0, 0)));
         }
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
 
         // SHAKE_TICKS+1ティック目で実際に1マス落下する
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
         assert_eq!(outcome.cells_moved, 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
@@ -894,7 +1128,7 @@ mod tests {
         board.rows[1][0] = Cell::Color(ColorKind::Blue); // 支えあり
         let mut gravity = GravityState::new();
 
-        apply_gravity_tick(&mut board, (99, 99), &mut gravity);
+        apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
 
         assert!(!gravity.is_shaking((0, 0)));
     }
@@ -903,29 +1137,172 @@ mod tests {
     /// ティックを1回実行する(4.3のテストで繰り返し使う定型パターン)。
     fn shake_out_then_tick(board: &mut Board, player_pos: (usize, usize), gravity: &mut GravityState) -> FallTickOutcome {
         for _ in 0..SHAKE_TICKS {
-            apply_gravity_tick(board, player_pos, gravity);
+            apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS);
         }
-        apply_gravity_tick(board, player_pos, gravity)
+        apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS)
+    }
+
+    // --- 支えの連鎖判定(ユーザー指摘対応) ---
+
+    #[test]
+    fn group_supported_only_by_a_currently_unsupported_group_falls_together_in_the_same_tick() {
+        // 上段(Blue,col0)は下段(Red,col0)に直接乗っている。下段自体もその下(row2)が
+        // 空洞で未支持。支えの根拠(下段)がこのティックで一緒に落下対象になっている
+        // 場合、その支えは「不安定」であり、上段も連鎖的に未支持と判定され、両方とも
+        // ちぎれずに同じティックで1マス落下する(ユーザー指摘:「右1列でひっかかっても
+        // 2:1でちぎれて分離されることがある」の直接的な回帰防止テスト)。
+        let mut board = empty_board(4);
+        board.rows[0][0] = Cell::Color(ColorKind::Blue);
+        board.rows[1][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 2, "上段・下段とも同じティックで一緒に落下するはず");
+        assert_eq!(board.cell(0, 0), Cell::Empty);
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Blue));
+        assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
     }
 
     #[test]
-    fn stacked_blocks_with_gap_fall_one_at_a_time_per_tick() {
-        // 3段重なったブロックの下に1マスの隙間がある場合、最下段だけが先に落ちる(4.4)。
+    fn group_supported_by_a_truly_stable_group_does_not_fall() {
+        // 対比: 下段(Red,col0)が最深行にあり本当に安定している場合、上段(Blue)も
+        // 支持され、どちらも落ちない。
+        let mut board = empty_board(2);
+        board.rows[0][0] = Cell::Color(ColorKind::Blue);
+        board.rows[1][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 0);
+        assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Blue));
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
+    }
+
+    #[test]
+    fn support_chain_of_three_unsupported_groups_all_fall_together() {
+        // 3段連鎖: 上(Green)→中(Blue)→下(Red)の順に乗っており、下段の直下(row3)が
+        // 空洞。3つとも支えを辿ると最終的に不安定なので、全部同じティックで
+        // 1マス落下する(支えの連鎖が1段では止まらないケースの確認)。
+        let mut board = empty_board(4);
+        board.rows[0][0] = Cell::Color(ColorKind::Green);
+        board.rows[1][0] = Cell::Color(ColorKind::Blue);
+        board.rows[2][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 3);
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Green));
+        assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Blue));
+        assert_eq!(board.cell(3, 0), Cell::Color(ColorKind::Red));
+    }
+
+    #[test]
+    fn isolated_single_color_block_falls_when_unsupported() {
+        // 孤立した(周囲に同色が無い)単独ブロックでも、支えを失えば普通に落下する
+        // (4個以上でないと自動消滅しないだけで、落下自体はグループサイズを問わない)。
+        // ユーザー報告「キャラの右上の赤ブロックが落ちないのはおかしい」の再現確認。
+        let mut board = empty_board(3);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 1, "孤立していても支えが無ければ落ちるはず");
+        assert_eq!(board.cell(0, 0), Cell::Empty);
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
+    }
+
+    #[test]
+    fn isolated_block_falls_even_when_flanked_by_stable_different_color_groups() {
+        // 孤立した赤ブロックの左右に、最深行まで届いていて安定している別色(青)の
+        // グループがあっても、赤ブロック自身の直下がEmptyなら独立して落下するはず。
+        // ユーザー報告「キャラの右上の赤ブロックが落ちないのはおかしい」の再現確認
+        // (周囲が別グループで安定しているケース)。
+        let mut board = empty_board(2);
+        board.rows[0][0] = Cell::Color(ColorKind::Blue);
+        board.rows[0][1] = Cell::Color(ColorKind::Red);
+        board.rows[0][2] = Cell::Color(ColorKind::Blue);
+        board.rows[1][0] = Cell::Color(ColorKind::Blue); // 最深行、左側の支え
+        board.rows[1][2] = Cell::Color(ColorKind::Blue); // 最深行、右側の支え
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 1, "赤ブロックだけが落ちるはず");
+        assert_eq!(board.cell(0, 1), Cell::Empty);
+        assert_eq!(board.cell(1, 1), Cell::Color(ColorKind::Red));
+        // 青グループは安定したまま動かない
+        assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Blue));
+        assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Blue));
+    }
+
+    #[test]
+    fn stacked_same_color_blocks_form_one_group_and_fall_together() {
+        // 縦に連結した同色ブロックは1つの塊として扱われ、支えを失うと全体が
+        // ちぎれずに一緒に1マス落下する(ユーザー指摘対応: 「落下中に同じ色の
+        // ブロックの結合がきれて、ちぎれて落ちることはない。ちゃんと同じ色ブロックが
+        // 上下左右に隣接したら必ず結合する」)。
         let mut board = empty_board(5);
         board.rows[0][0] = Cell::Color(ColorKind::Red);
         board.rows[1][0] = Cell::Color(ColorKind::Red);
         board.rows[2][0] = Cell::Color(ColorKind::Red);
-        // row3 col0 is Empty(隙間)、row4 col0 is Empty(床は無いので最下行はrow4)
         let mut gravity = GravityState::new();
 
-        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity); // 最下段のみ落下
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity); // 3セル全体が一緒に落下
 
-        assert_eq!(outcome.cells_moved, 1);
-        assert_eq!(board.cell(2, 0), Cell::Empty);
-        assert_eq!(board.cell(3, 0), Cell::Color(ColorKind::Red));
-        // 中段・上段はまだ落ちていない
-        assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(outcome.cells_moved, 3);
+        assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(3, 0), Cell::Color(ColorKind::Red), "3つ目もちぎれずに一緒に1マス落下しているはず");
+    }
+
+    #[test]
+    fn horizontal_group_of_three_supported_only_under_rightmost_cell_falls_together_without_tearing() {
+        // 横3列(col0,1,2)の同色グループ。col2の直下(row1)だけがEmptyで、その
+        // さらに1つ下(row2,col2)に支え(岩)がある。col0・col1の直下(row1)は
+        // Emptyのまま。グループ全体で見ればcol2経由でまだ支持されていないので、
+        // 3つとも一緒に1マス落下するはず(ユーザー指摘: 「右1列でひっかかっても
+        // 2:1でちぎれて分離されることがある」の再現・回帰防止)。
+        // 支え(岩)は最深行に置き、支え自身が未支持で一緒に落ちてしまわないようにする。
+        let mut board = empty_board(3);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        board.rows[0][1] = Cell::Color(ColorKind::Red);
+        board.rows[0][2] = Cell::Color(ColorKind::Red);
+        board.rows[2][2] = Cell::Rock { hits: 0 }; // col2は2マス下(最深行)にしか支えが無い(1マス下row1は空洞)
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 3, "3つとも一緒に1マス落下するはず(ちぎれない)");
+        assert_eq!(board.cell(0, 0), Cell::Empty);
+        assert_eq!(board.cell(0, 1), Cell::Empty);
+        assert_eq!(board.cell(0, 2), Cell::Empty);
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(1, 1), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(1, 2), Cell::Color(ColorKind::Red));
+    }
+
+    #[test]
+    fn horizontal_group_of_three_supported_directly_under_rightmost_cell_does_not_fall() {
+        // 上のテストとの対比: col2の直下(row1、最深行)に直接支え(岩)がある場合は、
+        // グループ全体が支持されているので誰も落ちない。
+        let mut board = empty_board(2);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        board.rows[0][1] = Cell::Color(ColorKind::Red);
+        board.rows[0][2] = Cell::Color(ColorKind::Red);
+        board.rows[1][2] = Cell::Rock { hits: 0 };
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
+
+        assert_eq!(outcome.cells_moved, 0);
+        assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(0, 1), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Red));
     }
 
     // --- 重力: 押し潰し判定(5章) ---
@@ -1029,9 +1406,9 @@ mod tests {
 
     #[test]
     fn landing_rock_group_of_four_or_more_auto_vanishes_without_score() {
-        // spec.md 4.9(task4): 岩ブロックも色ブロックと同様に、着地して4連結以上になれば
-        // 掘削されずに自動消滅する。ただし得点は発生しない(auto_vanished_blocksとは
-        // 別カウンタ`auto_vanished_rock_blocks`に計上される)。
+        // ユーザー指摘: 「4個以上結合したらちゃんと消えないといけない」。岩ブロックも
+        // 色ブロックと同様、着地して4連結以上になれば自動消滅する(ただし得点は無し)。
+        // これは「掘削(hit_rock)で消えるのは1ブロックのみ」という別ルールとは独立している。
         let mut board = empty_board(2);
         board.rows[0][0] = Cell::Rock { hits: 0 };
         board.rows[0][1] = Cell::Rock { hits: 1 };
@@ -1074,13 +1451,13 @@ mod tests {
         let mut gravity = GravityState::new();
 
         for _ in 0..SHAKE_TICKS {
-            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity);
+            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
             assert_eq!(outcome.cells_moved, 0);
             assert!(gravity.is_shaking((0, 0)));
         }
         assert!(matches!(board.cell(0, 0), Cell::Rock { hits: 2 }), "揺れている間はまだ落下しない");
 
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
         assert_eq!(outcome.cells_moved, 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert!(matches!(board.cell(1, 0), Cell::Rock { hits: 2 }), "落下してもhitsは保持される");
@@ -1088,12 +1465,11 @@ mod tests {
     }
 
     #[test]
-    fn falling_rock_group_merges_with_supported_rock_group_below_and_auto_vanishes_ignoring_hit_counts() {
-        // task25: Xブロックも色ブロックと同様に「支えを失う→震える→落下→支持されている
-        // 岩ブロックに接触して連結→4個以上で自動消滅」する(4.9)。この連結・自動消滅は
-        // 個々のhits値に関わらず成立し、かつ掘削の5回耐久ルール(2章)とは独立に働く
-        // ことを示す: hits=4(あと1発で破壊)の岩ブロックが、5回目のヒットを一度も
-        // 受けないまま、連結消滅ルールだけで消える。
+    fn falling_rock_group_merges_with_supported_rock_group_below_and_auto_vanishes() {
+        // ユーザー指摘: 「4個以上結合したらちゃんと消えないといけない」。支えを失った
+        // 岩が震え→落下→支持されている岩ブロックに接触して連結し、合計4個以上に
+        // なった時点で自動消滅する(得点は無し。「掘削(hit_rock)で消えるのは1ブロック
+        // のみ」とは独立したルール)。
         let mut board = empty_board(3);
         board.rows[2][0] = Cell::Rock { hits: 1 };
         board.rows[2][1] = Cell::Rock { hits: 3 };
@@ -1105,7 +1481,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.auto_vanished_rock_blocks, 4, "hitsがバラバラでも岩ブロックとして連結・消滅する");
+        assert_eq!(outcome.auto_vanished_rock_blocks, 4);
         assert_eq!(outcome.auto_vanished_blocks, 0, "岩ブロックの自動消滅はスコア対象外");
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(board.cell(1, 1), Cell::Empty);
@@ -1124,7 +1500,7 @@ mod tests {
         board.rows[2][3] = Cell::Color(ColorKind::Red);
         let mut gravity = GravityState::new();
 
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
 
         assert_eq!(outcome.auto_vanished_blocks, 0);
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
@@ -1157,8 +1533,8 @@ mod tests {
         board.rows[1][0] = Cell::Oxygen;
         let mut gravity = GravityState::new();
 
-        apply_gravity_tick(&mut board, (99, 99), &mut gravity); // 揺れ
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity); // 支持判定
+        apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 揺れ
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 支持判定
 
         assert_eq!(outcome.cells_moved, 0, "酸素カプセルは非Emptyなので上のRedは支持され落下しない");
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
@@ -1212,6 +1588,31 @@ mod tests {
             }
         }
         total_len as f64 / total_runs as f64
+    }
+
+    #[test]
+    fn no_group_remains_unsupported_forever_on_random_boards() {
+        // ユーザー報告「孤立した赤ブロックが落ちてこない」の統計的な回帰検証。
+        // ランダム生成した盤面を十分な回数ティックさせ、最終的に全ての塊が
+        // 「支持されている(=これ以上は落ちるはずがない)」状態に収束することを
+        // 確認する。収束せず未支持のまま残る塊があれば、揺れ/連鎖判定のどこかで
+        // 永続的に浮いたままになるバグがあることを意味する。
+        for seed in 0..20u64 {
+            let mut board = Board::generate(seed, 60);
+            let mut gravity = GravityState::new();
+            let player_pos = (usize::MAX, usize::MAX); // 影響しない盤外位置
+
+            for _ in 0..(SHAKE_TICKS as usize + 1) * 60 {
+                apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            }
+
+            for group in collect_fall_groups(&board) {
+                assert!(
+                    is_group_supported(&board, &group, player_pos),
+                    "seed={seed}: 十分な時間が経っても未支持のまま残っている塊がある: {group:?}"
+                );
+            }
+        }
     }
 
     #[test]

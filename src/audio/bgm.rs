@@ -98,10 +98,10 @@ const HARMONY_CHORDS: [[f32; 3]; 4] = [
 /// スレッドを終了する。呼び出し側はミキサーを共有するだけで、スレッドの結合(join)は
 /// 必須ではない(アプリ終了時にプロセスごと終わるため)。
 ///
-/// `sound_enabled`がfalseの間はノートの再生自体をスキップする(無音)。ループの進行位置は
+/// `music_enabled`がfalseの間はノートの再生自体をスキップする(無音)。ループの進行位置は
 /// 止めずに数え続けるため、再度ONにした際は途切れた小節の途中から自然に復帰する
-/// (TERM独自拡張、spec.md 10章)。
-pub fn spawn_bgm_thread(mixer: Mixer, stop_flag: Arc<AtomicBool>, sound_enabled: Arc<AtomicBool>) {
+/// (TERM独自拡張、spec.md 10章。MUSIC/SE個別トグルのMUSIC側)。
+pub fn spawn_bgm_thread(mixer: Mixer, stop_flag: Arc<AtomicBool>, music_enabled: Arc<AtomicBool>) {
     thread::spawn(move || {
         let melody_player = Player::connect_new(&mixer);
         melody_player.set_volume(MELODY_VOLUME);
@@ -118,7 +118,7 @@ pub fn spawn_bgm_thread(mixer: Mixer, stop_flag: Arc<AtomicBool>, sound_enabled:
                     if stop_flag.load(Ordering::Relaxed) {
                         break 'outer;
                     }
-                    if sound_enabled.load(Ordering::Relaxed) {
+                    if music_enabled.load(Ordering::Relaxed) {
                         // ハーモニー/パッドは小節の頭で1回だけ、小節いっぱいの長さで鳴らす。
                         if step_idx == 0 {
                             harmony_player.append(sine_chord(

@@ -5,7 +5,8 @@
 
 use crate::constants::OXYGEN_DECAY_PER_SEC;
 use crate::game::board::{
-    apply_gravity_tick, drill_color_block, hit_rock, Board, Cell, GravityState, RockHitResult,
+    apply_gravity_tick, connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
+    is_supported, Board, Cell, GravityState, RockHitResult,
 };
 use crate::game::player::{Direction, Player};
 
@@ -23,16 +24,33 @@ pub enum DrillOutcome {
     RockDestroyed { blocks: usize },
     /// 色ブロックを直接掘削し、連結している同色グループごと消滅した(サイズ問わず、spec.md 4.6)
     ColorDestroyed { blocks: usize },
-    /// 酸素カプセルを取得した(酸素+50・スコア加算はこの呼び出し内で適用済み)
-    CollectedOxygen,
+    /// facing方向が酸素カプセルだったため、掘削としては何も起きなかった(TERM独自拡張)。
+    /// AIRは「掘る」対象ではなく、横移動・自由落下で「触れる」ことでのみ取得できる
+    /// (ユーザー指摘: 「AIRは掘っても取得できない、そもそも掘る操作じゃなくてタッチして
+    /// 取得するイメージ」)。掘削では消滅も進入もしない
+    OxygenUntouchedByDrill,
     /// ダイヤブロックを取得した(スコア+500はこの呼び出し内で適用済み)
     CollectedDiamond,
+    /// facingがUpで、頭上のブロックがまだ支持されていない(または揺れている)不安定な
+    /// 状態だったため、掘削できずに押し潰された(TERM独自拡張。ユーザー指摘:
+    /// 「落下中のブロックは掘れない(つぶされる)。結合して止まってるブロックが上に
+    /// あるときは掘れる」)。呼び出し側(Game)がこれを見てミス判定を行う。
+    CrushedByUnstableOverhead,
+    /// スターブロックを掘削で破壊した(スコア+10はこの呼び出し内で適用済み、TERM独自
+    /// 拡張)。放置しても画面内に入れば自然に溶けて消えるが、掘削でも即座に壊せる。
+    StarDestroyed,
 }
 
 /// 掘削の結果、対象セルが(既にEmptyだった場合も含め)空になったかどうか。
 /// 空になった場合のみ、そのマスへプレイヤーが進入できる(spec.md 1章)。
 fn drill_cleared_the_cell(outcome: DrillOutcome) -> bool {
-    !matches!(outcome, DrillOutcome::OutOfBounds | DrillOutcome::RockHitIntact)
+    !matches!(
+        outcome,
+        DrillOutcome::OutOfBounds
+            | DrillOutcome::RockHitIntact
+            | DrillOutcome::CrushedByUnstableOverhead
+            | DrillOutcome::OxygenUntouchedByDrill
+    )
 }
 
 /// 指定セルに対して掘削を1回実行し、盤面・プレイヤーのスコア/酸素へ反映する
@@ -54,15 +72,16 @@ fn drill_cell(board: &mut Board, player: &mut Player, target: (usize, usize)) ->
                 DrillOutcome::RockDestroyed { blocks }
             }
         },
-        Cell::Oxygen => {
-            board.set(target.0, target.1, Cell::Empty);
-            player.collect_oxygen_capsule();
-            DrillOutcome::CollectedOxygen
-        }
+        Cell::Oxygen => DrillOutcome::OxygenUntouchedByDrill,
         Cell::Diamond => {
             board.set(target.0, target.1, Cell::Empty);
             player.collect_diamond();
             DrillOutcome::CollectedDiamond
+        }
+        Cell::Star { .. } => {
+            board.set(target.0, target.1, Cell::Empty);
+            player.award_drill_score(1);
+            DrillOutcome::StarDestroyed
         }
     }
 }
@@ -170,14 +189,46 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
     LateralOutcome::Blocked
 }
 
+/// facingがUpの掘削対象セル`target`が「不安定」(まだ支持されていない、または揺れている)
+/// かどうかを判定する(TERM独自拡張)。色ブロック・岩ブロックは連結している塊全体で、
+/// 酸素カプセル・ダイヤは単独セルで判定する(spec.md 4章「同色ブロックが隣接したら
+/// 必ず結合する」と同じ考え方を、上向き掘削の安定判定にも適用する)。
+fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, usize), player_pos: (usize, usize)) -> bool {
+    match board.cell(target.0, target.1) {
+        Cell::Empty => false,
+        Cell::Color(color) => {
+            let group = connected_same_color(board, target, color);
+            !is_group_supported(board, &group, player_pos) || group.iter().any(|&p| gravity.is_shaking(p))
+        }
+        Cell::Rock { .. } => {
+            let group = connected_rock_group(board, target);
+            !is_group_supported(board, &group, player_pos) || group.iter().any(|&p| gravity.is_shaking(p))
+        }
+        // AIR(酸素カプセル)は押し潰しの脅威にはならない(ユーザー指摘: 「AIRだったら、
+        // 掘れはしないけどちゃんと取れてほしい。AIRに対しては掘っても無効化しておけば
+        // いいだけ」)。不安定でも上向き掘削はdrill_cellのOxygenUntouchedByDrillへ
+        // そのまま流れ、押し潰しにはならない。取得は歩み寄り・自由落下・重力ティックでの
+        // 自動取得を通じて行われる。
+        Cell::Oxygen => false,
+        Cell::Diamond | Cell::Star { .. } => {
+            !is_supported(board, target, player_pos) || gravity.is_shaking(target)
+        }
+    }
+}
+
 /// Space(Drill)入力を1回処理する(spec.md 1章)。
 ///
 /// facing方向の1マス先を、**移動を伴わずに**掘削する。facingがDownの場合のみ、
 /// 掘削の結果そのマスが空いていれば続けて1マス下降する。
 ///
+/// facingがUpの場合のみ追加のチェックがある: 頭上のブロックがまだ支持されて
+/// いない(または揺れている)不安定な状態なら、掘削せずにその場で押し潰される
+/// (TERM独自拡張。ユーザー指摘: 「落下中のブロックは掘れない(つぶされる)。
+/// 結合して止まってるブロックが上にあるときは掘れる」)。
+///
 /// 掘削キーを挟んだ場合は、Left/Rightの2ステップ段差登り(move_lateral)における
 /// 「ぶつかって停止中」の状態をリセットする(spec.md 1章、TERM独自拡張)。
-pub fn drill_facing(board: &mut Board, player: &mut Player) -> DrillOutcome {
+pub fn drill_facing(board: &mut Board, player: &mut Player, gravity: &GravityState) -> DrillOutcome {
     player.bumped_direction = None;
 
     let (dr, dc) = player.facing.delta();
@@ -188,6 +239,11 @@ pub fn drill_facing(board: &mut Board, player: &mut Player) -> DrillOutcome {
     }
 
     let target = (nr as usize, nc as usize);
+
+    if player.facing == Direction::Up && is_overhead_unstable(board, gravity, target, player.position()) {
+        return DrillOutcome::CrushedByUnstableOverhead;
+    }
+
     let outcome = drill_cell(board, player, target);
 
     if player.facing == Direction::Down && drill_cleared_the_cell(outcome) {
@@ -217,29 +273,56 @@ pub struct GravityTickResult {
     /// 行うべき)かどうか。無敵時間中の押し潰しはブロックの消滅のみ発生しライフは失わない
     /// (spec.md 5章末尾、TERM独自拡張)。
     pub life_lost_to_crush: bool,
+    /// 落下してきた酸素カプセルがプレイヤーに触れて取得された回数(TERM独自拡張)。
+    /// 呼び出し側(Game)がこの回数ぶん`Player::collect_oxygen_capsule`を呼ぶ。
+    pub oxygen_collected: usize,
 }
 
-/// 重力落下の論理ティックを1回実行し、自動消滅のスコア加算・押し潰し判定を行う
-/// (spec.md 4章・5章)。
+/// 重力落下の論理ティックを1回実行し、自動消滅のスコア加算・押し潰し判定・
+/// 落下してきた酸素カプセルの取得を行う(spec.md 4章・5章)。
+///
+/// `shake_ticks`: 支えを失ってから実際に落下し始めるまでの揺れティック数
+/// (呼び出し側が揺れ時間設定(ms)とブロック落下tick間隔から都度換算して渡す。
+/// デバッグショートカットで実行時調整可能・TERM独自拡張)。
 pub fn process_gravity_tick(
     board: &mut Board,
     player: &mut Player,
     gravity: &mut GravityState,
     invulnerable: bool,
+    shake_ticks: u8,
 ) -> GravityTickResult {
-    let outcome = apply_gravity_tick(board, player.position(), gravity);
+    let outcome = apply_gravity_tick(board, player.position(), gravity, shake_ticks);
 
     if outcome.auto_vanished_blocks > 0 {
         player.award_auto_vanish_score(outcome.auto_vanished_blocks);
     }
     // 岩ブロックの自動消滅(spec.md 4.9)は得点対象外なのでスコア加算はしない。
 
+    for _ in 0..outcome.oxygen_collected {
+        player.collect_oxygen_capsule();
+    }
+
     GravityTickResult {
         cells_moved: outcome.cells_moved,
         auto_vanished_blocks: outcome.auto_vanished_blocks,
         auto_vanished_rock_blocks: outcome.auto_vanished_rock_blocks,
         life_lost_to_crush: outcome.crushed && !invulnerable,
+        oxygen_collected: outcome.oxygen_collected,
     }
+}
+
+/// `apply_player_free_fall`の結果(TERM独自拡張)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreeFallOutcome {
+    /// 落下しなかった(支持されている、または既に最深行)
+    DidNotFall,
+    /// 空きマスへ1マス落下した
+    Fell,
+    /// 酸素カプセルのマスへ1マス落下すると同時に取得した。
+    /// 「歩くだけで取得できる」(spec.md公式マニュアル "just walk into it")仕様により、
+    /// 掘削しなくても自由落下だけでAIRの上に乗ればその場で取得される
+    /// (ユーザー指摘反映: 「AIRがキャラの下にあるとき掘らないと行けないのはバグ」)。
+    FellAndCollectedOxygen,
 }
 
 /// プレイヤー自身の自由落下(spec.md 1章・4章、TERM独自拡張)。
@@ -247,20 +330,26 @@ pub fn process_gravity_tick(
 /// 色ブロック等と同じ`FALL_TICK_MS`ごとの論理ティックで、入力の有無や掘削とは無関係に
 /// 毎回判定する。直下のマスがフィールド内かつEmptyであれば1マス落下する
 /// (揺れは挟まず即座に落ちる。プレイヤーは常に自分の意思で移動するため、支えを失った
-/// ブロックのような`SHAKE_TICKS`ぶんの猶予は無い)。直下が非Empty、または既に最深行に
+/// ブロックのような`SHAKE_TICKS`ぶんの猶予は無い)。直下が酸素カプセルの場合も同様に
+/// 通過でき、その場で取得する(掘削は不要)。それ以外の非Empty、または既に最深行に
 /// 到達している場合は何も起きない。
-///
-/// 戻り値: このティックで実際に1マス落下したかどうか(呼び出し側のクリア判定用)。
-pub fn apply_player_free_fall(board: &Board, player: &mut Player) -> bool {
+pub fn apply_player_free_fall(board: &mut Board, player: &mut Player) -> FreeFallOutcome {
     let below = player.row + 1;
     if below >= board.depth_rows() {
-        return false;
+        return FreeFallOutcome::DidNotFall;
     }
-    if board.cell(below, player.col) == Cell::Empty {
-        player.row = below;
-        true
-    } else {
-        false
+    match board.cell(below, player.col) {
+        Cell::Empty => {
+            player.row = below;
+            FreeFallOutcome::Fell
+        }
+        Cell::Oxygen => {
+            board.set(below, player.col, Cell::Empty);
+            player.row = below;
+            player.collect_oxygen_capsule();
+            FreeFallOutcome::FellAndCollectedOxygen
+        }
+        _ => FreeFallOutcome::DidNotFall,
     }
 }
 
@@ -284,9 +373,9 @@ mod tests {
         invulnerable: bool,
     ) -> GravityTickResult {
         for _ in 0..SHAKE_TICKS {
-            process_gravity_tick(board, player, gravity, invulnerable);
+            process_gravity_tick(board, player, gravity, invulnerable, SHAKE_TICKS);
         }
-        process_gravity_tick(board, player, gravity, invulnerable)
+        process_gravity_tick(board, player, gravity, invulnerable, SHAKE_TICKS)
     }
 
     // --- MoveLeft/MoveRight: 掘削なしの地形追従移動(facing変更・フィールド端・移動/1段登り/停止) ---
@@ -501,7 +590,7 @@ mod tests {
         let mut player = Player::new();
         player.bumped_direction = Some(Direction::Right);
 
-        drill_facing(&mut board, &mut player);
+        drill_facing(&mut board, &mut player, &GravityState::new());
 
         assert_eq!(player.bumped_direction, None);
     }
@@ -514,7 +603,7 @@ mod tests {
         let target_col = player.col - 1;
         board.rows[player.row][target_col] = Cell::Color(ColorKind::Blue);
 
-        let outcome = drill_facing(&mut board, &mut player);
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
 
         assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
         assert_eq!(player.col, target_col + 1); // 動いていない(元の位置のまま)
@@ -527,7 +616,7 @@ mod tests {
         player.facing = Direction::Down;
         board.rows[player.row + 1][player.col] = Cell::Color(ColorKind::Green);
 
-        let outcome = drill_facing(&mut board, &mut player);
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
 
         assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
         assert_eq!(player.row, 1);
@@ -540,7 +629,7 @@ mod tests {
         player.facing = Direction::Down;
         board.rows[player.row + 1][player.col] = Cell::Rock { hits: 0 };
 
-        let outcome = drill_facing(&mut board, &mut player);
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
 
         assert_eq!(outcome, DrillOutcome::RockHitIntact);
         assert_eq!(player.row, 0); // 降下しない
@@ -553,7 +642,7 @@ mod tests {
         player.row = 1;
         player.facing = Direction::Up;
 
-        let outcome = drill_facing(&mut board, &mut player);
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
 
         assert_eq!(outcome, DrillOutcome::NoEffect);
         assert_eq!(player.row, 1); // Upは移動しない(spec.md 1章)
@@ -617,8 +706,10 @@ mod tests {
     }
 
     #[test]
-    fn process_gravity_tick_rock_auto_vanish_awards_no_score() {
-        // task25: 岩ブロックの自動消滅(4.9)はGame層を通しても得点を発生させない。
+    fn process_gravity_tick_rock_auto_vanishes_without_awarding_score() {
+        // ユーザー指摘: 「4個以上結合したらちゃんと消えないといけない」。岩ブロックも
+        // 連結・落下・着地すれば自動消滅する(Game層(process_gravity_tick)を通しても
+        // 同様)が、得点は加算されない。
         let mut board = empty_board(3);
         board.rows[2][0] = Cell::Rock { hits: 1 };
         board.rows[2][1] = Cell::Rock { hits: 3 };
@@ -633,7 +724,7 @@ mod tests {
 
         assert_eq!(result.auto_vanished_rock_blocks, 4);
         assert_eq!(result.auto_vanished_blocks, 0);
-        assert_eq!(player.score, 0, "岩ブロックの自動消滅は得点対象外");
+        assert_eq!(player.score, 0, "岩ブロックの自動消滅はスコア対象外");
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(board.cell(2, 0), Cell::Empty);
     }
@@ -684,20 +775,20 @@ mod tests {
         player.facing = Direction::Left; // (1,0)を移動せずに掘削する
         let mut gravity = GravityState::new();
 
-        let drill_outcome = drill_facing(&mut board, &mut player);
+        let drill_outcome = drill_facing(&mut board, &mut player, &gravity);
         assert_eq!(drill_outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
         assert_eq!(board.cell(1, 0), Cell::Empty, "支えの掘削は完了している");
         assert_eq!(player.col, 1, "Left方向のDrillはその場から動かない");
 
         // 支えを失った直後、SHAKE_TICKSぶんはまだ落下しない。
         for _ in 0..SHAKE_TICKS {
-            let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false);
+            let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
             assert_eq!(tick.cells_moved, 0);
         }
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red), "揺れている間はまだ落下しない");
 
         // 揺れが明けた次のティックで初めて1マス落下する。
-        let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false);
+        let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
         assert_eq!(tick.cells_moved, 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
@@ -707,13 +798,13 @@ mod tests {
 
     #[test]
     fn apply_player_free_fall_drops_one_row_when_below_is_empty() {
-        let board = empty_board(5);
+        let mut board = empty_board(5);
         let mut player = Player::new();
         player.row = 2;
 
-        let fell = apply_player_free_fall(&board, &mut player);
+        let outcome = apply_player_free_fall(&mut board, &mut player);
 
-        assert!(fell);
+        assert_eq!(outcome, FreeFallOutcome::Fell);
         assert_eq!(player.row, 3);
     }
 
@@ -724,21 +815,40 @@ mod tests {
         player.row = 2;
         board.rows[3][player.col] = Cell::Color(ColorKind::Red);
 
-        let fell = apply_player_free_fall(&board, &mut player);
+        let outcome = apply_player_free_fall(&mut board, &mut player);
 
-        assert!(!fell);
+        assert_eq!(outcome, FreeFallOutcome::DidNotFall);
         assert_eq!(player.row, 2);
     }
 
     #[test]
     fn apply_player_free_fall_does_nothing_at_the_deepest_row() {
-        let board = empty_board(3);
+        let mut board = empty_board(3);
         let mut player = Player::new();
         player.row = 2; // 最深行(depth_rows=3 -> row0..2)
 
-        let fell = apply_player_free_fall(&board, &mut player);
+        let outcome = apply_player_free_fall(&mut board, &mut player);
 
-        assert!(!fell);
+        assert_eq!(outcome, FreeFallOutcome::DidNotFall);
         assert_eq!(player.row, 2);
+    }
+
+    #[test]
+    fn apply_player_free_fall_onto_oxygen_capsule_collects_it_and_restores_oxygen() {
+        // ユーザー指摘「AIRがキャラの下にあるとき掘らないと行けないのはバグ」の修正確認。
+        // 公式マニュアル "just walk into it" のとおり、掘削しなくても自由落下だけで
+        // 酸素カプセルの上に乗れば取得できる。
+        let mut board = empty_board(5);
+        let mut player = Player::new();
+        board.rows[3][player.col] = Cell::Oxygen;
+        player.row = 2;
+        player.oxygen = 10.0;
+
+        let outcome = apply_player_free_fall(&mut board, &mut player);
+
+        assert_eq!(outcome, FreeFallOutcome::FellAndCollectedOxygen);
+        assert_eq!(player.row, 3);
+        assert_eq!(board.cell(3, player.col), Cell::Empty, "取得済みの酸素カプセルは消滅する");
+        assert_eq!(player.oxygen, 10.0 + crate::constants::OXYGEN_CAPSULE_RESTORE);
     }
 }

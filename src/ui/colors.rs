@@ -105,6 +105,28 @@ pub const OXYGEN_FG: Color = Color::Rgb(255, 255, 255);
 pub const DIAMOND_BG: Color = Color::Rgb(200, 225, 235);
 pub const DIAMOND_FG: Color = Color::Rgb(255, 255, 255);
 
+/// スターブロックの背景色(無傷時)。
+pub const STAR_BG: Color = Color::Rgb(230, 200, 40);
+/// スターブロックの前景色。
+pub const STAR_FG: Color = Color::Rgb(255, 250, 210);
+
+/// スターブロックの背景色を溶解の進行度(`melting / STAR_MELT_TICKS`)から、
+/// フィールド背景色(`FIELD_EMPTY_BG`)へ向けて補間する。
+pub fn star_bg(melting: u8, melt_ticks: u8) -> Color {
+    let t = if melt_ticks == 0 {
+        0.0
+    } else {
+        (melting as f32 / melt_ticks as f32).clamp(0.0, 1.0)
+    };
+    let Color::Rgb(ar, ag, ab) = STAR_BG else {
+        unreachable!("STAR_BGは常にColor::Rgb")
+    };
+    let Color::Rgb(br, bg, bb) = FIELD_EMPTY_BG else {
+        unreachable!("FIELD_EMPTY_BGは常にColor::Rgb")
+    };
+    Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+}
+
 /// プレイヤーの前景色。
 pub const PLAYER_FG: Color = Color::Rgb(255, 170, 40);
 

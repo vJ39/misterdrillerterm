@@ -10,10 +10,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::constants::{FIELD_WIDTH, OXYGEN_MAX};
+use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_TICKS};
 use crate::game::board::{Board, Cell as BoardCell, ColorKind};
 use crate::game::player::Direction;
-use crate::game::{Game, GameStatus};
+use crate::game::{Game, GameOverChoice, GameStatus};
 use crate::ui::colors;
 
 use super::intro;
@@ -158,7 +158,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 // エントリポイント
 // ---------------------------------------------------------------------------
 
-pub fn draw(frame: &mut Frame, game: &Game, sound_enabled: bool) {
+pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: bool) {
     let area = frame.area();
 
     // 9.6実装上の注意: まずフレーム全体を明示的な背景色で塗りつぶしてから、その上に
@@ -181,25 +181,29 @@ pub fn draw(frame: &mut Frame, game: &Game, sound_enabled: bool) {
             frame,
             plan.game_frame,
             "PAUSED",
-            &format!(
-                "Pキーで再開 / Qキーでタイトルへ / Sキーでサウンド{}",
-                sound_label(sound_enabled)
-            ),
+            &[
+                "Pキーで再開 / Qキーでタイトルへ",
+                &format!(
+                    "Mキーで音楽{} / Eキーで効果音{}",
+                    on_off_label(music_enabled),
+                    on_off_label(se_enabled)
+                ),
+            ],
         ),
         // 押し潰されてのミスは、GameOverオーバーレイを出す前に一呼吸「潰れた」演出
         // (draw_field内のdraw_player)を見せる(spec.md 5章・9章TERM独自拡張)。
         GameStatus::GameOver if !game.crush_flash_active() => {
-            draw_overlay(frame, plan.game_frame, "GAME OVER", "Qキーでタイトルへ")
+            draw_game_over_overlay(frame, plan.game_frame, game.game_over_selection())
         }
         GameStatus::GameOver => {}
-        GameStatus::Cleared => draw_overlay(frame, plan.game_frame, "CLEAR !", "Qキーでタイトルへ"),
+        GameStatus::Cleared => draw_overlay(frame, plan.game_frame, "CLEAR !", &["Qキーでタイトルへ"]),
         GameStatus::Playing => {}
     }
 }
 
-/// サウンドON/OFF状態を短い日本語ラベルにする(TERM独自拡張、10章)。
-fn sound_label(sound_enabled: bool) -> &'static str {
-    if sound_enabled { "ON" } else { "OFF" }
+/// ON/OFF状態を短い日本語ラベルにする(TERM独自拡張、10章)。
+fn on_off_label(enabled: bool) -> &'static str {
+    if enabled { "ON" } else { "OFF" }
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +212,7 @@ fn sound_label(sound_enabled: bool) -> &'static str {
 
 /// タイトル画面を描画する(ゲーム名+スタート案内のみのシンプルな画面)。
 /// このタイトル画面上でのみ、Qキーがアプリ終了として扱われる(main.rsの画面遷移)。
-pub fn draw_title(frame: &mut Frame, sound_enabled: bool) {
+pub fn draw_title(frame: &mut Frame) {
     let area = frame.area();
 
     frame
@@ -231,15 +235,115 @@ pub fn draw_title(frame: &mut Frame, sound_enabled: bool) {
         Line::from(""),
         Line::from(Span::styled("何かキーを押してスタート", title_style)),
         Line::from(Span::styled("(Qキーで終了)", title_style)),
-        Line::from(Span::styled(
-            format!("Sキーでサウンド切替(現在: {})", sound_label(sound_enabled)),
-            title_style,
-        )),
+        Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", title_style)),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))
     .alignment(Alignment::Center);
     frame.render_widget(paragraph, title_area);
+}
+
+// ---------------------------------------------------------------------------
+// ヘルプ画面(TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)
+// ---------------------------------------------------------------------------
+
+/// 操作キー・デバッグショートカット一覧を表示するヘルプ画面。
+pub fn draw_help(frame: &mut Frame) {
+    let area = frame.area();
+
+    frame
+        .buffer_mut()
+        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
+
+    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+    let help_area = centered_rect(90, 90, frame_rect);
+    frame.render_widget(Clear, help_area);
+
+    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let line = |text: &str| Line::from(Span::styled(text.to_string(), text_style));
+    let heading = |text: &str| Line::from(Span::styled(text.to_string(), heading_style));
+
+    let paragraph = Paragraph::new(vec![
+        heading("== 操作 =="),
+        line("←/→: 移動(掘削を伴う)      ↑/↓: 向きを変える(掘削なし)"),
+        line("Space: 掘削(向いている方向) P: 一時停止"),
+        line("Q: タイトルへ戻る/終了"),
+        line(""),
+        heading("== 一時停止中のみ =="),
+        line("M: MUSIC ON/OFF   E: SE ON/OFF"),
+        line(""),
+        heading("== デバッグショートカット =="),
+        line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
+        line("X: 自分より上のブロックを全削除"),
+        line("[ / ]: ブロック落下速度 遅く/速く"),
+        line("- / =: 自分の落下速度 遅く/速く"),
+        line(", / .: 揺れ時間 長く/短く"),
+        line(""),
+        line("Qキーでタイトルへ戻る"),
+    ])
+    .block(block)
+    .style(Style::default().bg(colors::LETTERBOX_BG))
+    .alignment(Alignment::Left);
+    frame.render_widget(paragraph, help_area);
+}
+
+// ---------------------------------------------------------------------------
+// 設定画面(TERM独自拡張。ユーザー指摘: 「サウンドON/OFFではなくMUSIC/SEを
+// それぞれトグルできるように。設定画面つくって、カーソルで選んでスペースで
+// トグルできるように」)
+// ---------------------------------------------------------------------------
+
+/// 設定画面での選択項目。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsChoice {
+    Music,
+    Se,
+}
+
+/// 設定画面を描画する。MUSIC/SEの各項目とON/OFF状態、現在選択中の項目を
+/// カーソル(反転表示)で示す。
+pub fn draw_settings(frame: &mut Frame, selection: SettingsChoice, music_enabled: bool, se_enabled: bool) {
+    let area = frame.area();
+
+    frame
+        .buffer_mut()
+        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
+
+    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+    let settings_area = centered_rect(60, 40, frame_rect);
+    frame.render_widget(Clear, settings_area);
+
+    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default().fg(colors::LETTERBOX_BG).bg(colors::PANEL_TEXT);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let item_line = |label: &str, enabled: bool, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected_style } else { text_style };
+        Line::from(Span::styled(format!("{prefix}{label}: {}", on_off_label(enabled)), style))
+    };
+
+    let paragraph = Paragraph::new(vec![
+        Line::from(Span::styled("SETTINGS", text_style)),
+        Line::from(""),
+        item_line("MUSIC", music_enabled, selection == SettingsChoice::Music),
+        item_line("SE", se_enabled, selection == SettingsChoice::Se),
+        Line::from(""),
+        Line::from(Span::styled("↑↓で選択 / Spaceでトグル / Qでタイトルへ", text_style)),
+    ])
+    .block(block)
+    .style(Style::default().bg(colors::LETTERBOX_BG))
+    .alignment(Alignment::Center);
+    frame.render_widget(paragraph, settings_area);
 }
 
 /// 起動時のスプラッシュ画面(AAピクセルアート)。`Game`を経由しない独立した画面
@@ -397,6 +501,14 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
         BoardCell::Rock { hits } => draw_rock_block(buf, x, y, board, row, col, hits),
         BoardCell::Oxygen => draw_fixed_unit(buf, x, y, [['○', '○'], ['○', '○']], colors::OXYGEN_FG, colors::OXYGEN_BG),
         BoardCell::Diamond => draw_fixed_unit(buf, x, y, [['◆', '◆'], ['◆', '◆']], colors::DIAMOND_FG, colors::DIAMOND_BG),
+        BoardCell::Star { melting } => draw_fixed_unit(
+            buf,
+            x,
+            y,
+            [['☆', '☆'], ['☆', '☆']],
+            colors::STAR_FG,
+            colors::star_bg(melting, STAR_MELT_TICKS),
+        ),
     }
 }
 
@@ -548,6 +660,7 @@ fn natural_cell_bg(board: &Board, row: usize, col: usize, cell: BoardCell) -> Co
         BoardCell::Rock { hits } => colors::rock_bg(hits),
         BoardCell::Oxygen => colors::OXYGEN_BG,
         BoardCell::Diamond => colors::DIAMOND_BG,
+        BoardCell::Star { melting } => colors::star_bg(melting, STAR_MELT_TICKS),
     }
 }
 
@@ -683,7 +796,7 @@ fn format_with_commas(value: u64) -> String {
 // オーバーレイ(ポーズ/ゲームオーバー/クリア)
 // ---------------------------------------------------------------------------
 
-fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hint: &str) {
+fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hints: &[&str]) {
     let overlay_area = centered_rect(40, 20, area);
     frame.render_widget(Clear, overlay_area);
 
@@ -693,9 +806,42 @@ fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hint: &str) {
         .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
+    let mut lines = vec![Line::from(Span::styled(title, text_style))];
+    lines.extend(hints.iter().map(|hint| Line::from(Span::styled(*hint, text_style))));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, overlay_area);
+}
+
+/// GameOverダイアログ(TERM独自拡張)。「タイトルへ戻る」「その場から復活」の2択を
+/// 表示し、現在選択中の項目を反転表示(カーソル代わり)する。
+fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoice) {
+    let overlay_area = centered_rect(40, 25, area);
+    frame.render_widget(Clear, overlay_area);
+
+    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default().fg(colors::LETTERBOX_BG).bg(colors::PANEL_TEXT);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let choice_line = |label: &str, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected_style } else { text_style };
+        Line::from(Span::styled(format!("{prefix}{label}"), style))
+    };
+
     let paragraph = Paragraph::new(vec![
-        Line::from(Span::styled(title, text_style)),
-        Line::from(Span::styled(hint, text_style)),
+        Line::from(Span::styled("GAME OVER", text_style)),
+        Line::from(""),
+        choice_line("タイトルへ戻る", selection == GameOverChoice::BackToTitle),
+        choice_line("その場から復活", selection == GameOverChoice::Revive),
+        Line::from(""),
+        Line::from(Span::styled("↑↓で選択 / Spaceで決定", text_style)),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))

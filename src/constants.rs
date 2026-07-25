@@ -55,9 +55,11 @@ pub const FALL_TICK_MS: u64 = 150;
 /// 公式の「ブロックは落ちる直前に震える」演出を再現するため300〜500msの目安幅を取る。
 pub const SHAKE_DURATION_MS: u64 = 450;
 
-/// `SHAKE_DURATION_MS`を`FALL_TICK_MS`単位に換算した揺れティック数(spec.md 4.3)。
-/// 未支持と判定されてから、この数のティックが経過するまでは実際には落下せず
-/// 「震えている(shaking)」状態のまま待機する。
+/// `SHAKE_DURATION_MS`を`FALL_TICK_MS`単位に換算した、既定レートでの揺れティック数
+/// (spec.md 4.3)。実行時はGame::update()が`shake_duration_ms`(デバッグショートカットで
+/// 調整可能)と`block_fall_tick_ms`から都度この換算を行うため、本体コードはこの定数を
+/// 直接使わない。テストコードが既定レートでの揺れティック数を表す簡潔な値として使う。
+#[cfg(test)]
 pub const SHAKE_TICKS: u8 = (SHAKE_DURATION_MS / FALL_TICK_MS) as u8;
 
 /// ライフ消費で再開した直後の無敵ティック数(TERM独自拡張、spec.md 5章)
@@ -74,3 +76,36 @@ pub const CRUSH_FLASH_MS: u64 = 400;
 /// 即座に確定するが、描画側だけ前回位置からこの時間をかけて滑らかに追従する
 /// (TERM独自拡張、9章)
 pub const MOVE_ANIM_DURATION_MS: u64 = 100;
+
+/// デバッグショートカット: 落下速度(ブロック用・キャラ用それぞれ独立)を1回の
+/// +/- 入力でどれだけ増減させるか(ms)。TERM独自拡張・動作確認用。
+pub const DEBUG_FALL_TICK_STEP_MS: u64 = 25;
+/// デバッグショートカットで調整できる落下速度(tick間隔)の下限(ms)。
+pub const DEBUG_FALL_TICK_MS_MIN: u64 = 25;
+/// デバッグショートカットで調整できる落下速度(tick間隔)の上限(ms)。
+pub const DEBUG_FALL_TICK_MS_MAX: u64 = 600;
+
+/// デバッグショートカット「付近のブロックを2色に揃える」の対象範囲
+/// (プレイヤーの行を中心に上下何行を対象にするか)。TERM独自拡張・動作確認用。
+/// ユーザー指摘: 「ショートカット:Cの機能は、3画面分反映してほしい」を受け、
+/// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数、14)の3画面分
+/// (上下合計42行=半径21行)をカバーする値にしている。
+pub const DEBUG_UNIFY_COLORS_RANGE_ROWS: usize = 21;
+
+/// デバッグショートカット: 揺れ時間(`SHAKE_DURATION_MS`相当)を1回の,/.入力で
+/// どれだけ増減させるか(ms)。TERM独自拡張・動作確認用・設定ファイルに永続化する。
+pub const DEBUG_SHAKE_DURATION_STEP_MS: u64 = 50;
+/// デバッグショートカットで調整できる揺れ時間の下限(ms)。0なら揺れ無しで即座に落下する。
+pub const DEBUG_SHAKE_DURATION_MS_MIN: u64 = 0;
+/// デバッグショートカットで調整できる揺れ時間の上限(ms)。
+pub const DEBUG_SHAKE_DURATION_MS_MAX: u64 = 2000;
+
+/// スターブロックの出現率(全深度帯共通、TERM独自拡張。ユーザー指摘: 「画面内に
+/// きたら、溶けて自然と消えるスターブロックも欲しい」)。
+pub const STAR_SPAWN_PROB: f32 = 0.015;
+/// スターブロックが画面内に入ってから溶けて消えるまでのティック数(`FALL_TICK_MS`
+/// と同じ間隔で数える。TERM独自拡張)。
+pub const STAR_MELT_TICKS: u8 = 6;
+/// 「画面内」とみなす、プレイヤー位置からの行範囲(上下±この値、TERM独自拡張)。
+/// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数)に合わせている。
+pub const STAR_VISIBLE_RANGE_ROWS: usize = 14;

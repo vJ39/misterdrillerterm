@@ -9,24 +9,9 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use crate::game::InputAction;
 
-/// `poll_ms`だけ待って入力の有無を確認し、対象キーであれば`InputAction`に変換する。
-/// 対象外のキー・イベントの場合はNoneを返す(呼び出し側は何もしなければよい)。
-pub fn poll_input(poll_ms: u64) -> std::io::Result<Option<InputAction>> {
-    if !event::poll(Duration::from_millis(poll_ms))? {
-        return Ok(None);
-    }
-
-    let Event::Key(key) = event::read()? else {
-        return Ok(None);
-    };
-
-    // 一部端末/OSはキー入力のPress/Releaseの両方をイベントとして送ってくる。
-    // Releaseまで拾うと1回の押下で2回入力処理してしまうため、Pressのみ受理する。
-    if key.kind != KeyEventKind::Press {
-        return Ok(None);
-    }
-
-    let action = match key.code {
+/// キーコードを`InputAction`へ変換する(対象外のキーは`None`)。`poll_input_batch`の実装本体。
+fn action_from_key_code(code: KeyCode) -> Option<InputAction> {
+    Some(match code {
         KeyCode::Left => InputAction::MoveLeft,
         KeyCode::Right => InputAction::MoveRight,
         KeyCode::Up => InputAction::FaceUp,
@@ -34,17 +19,55 @@ pub fn poll_input(poll_ms: u64) -> std::io::Result<Option<InputAction>> {
         KeyCode::Char(' ') => InputAction::Drill,
         KeyCode::Char('p') | KeyCode::Char('P') => InputAction::TogglePause,
         KeyCode::Char('q') | KeyCode::Char('Q') => InputAction::Quit,
-        KeyCode::Char('s') | KeyCode::Char('S') => InputAction::ToggleSound,
-        _ => return Ok(None),
-    };
+        // 一時停止中のみ意味を持つ、MUSIC/SE個別トグル(TERM独自拡張。ユーザー指摘:
+        // 「サウンドON/OFFではなくMUSIC/SEをそれぞれトグルできるように」)。
+        KeyCode::Char('m') | KeyCode::Char('M') => InputAction::ToggleMusic,
+        KeyCode::Char('e') | KeyCode::Char('E') => InputAction::ToggleSe,
+        // デバッグショートカット(TERM独自拡張、動作確認用)。
+        KeyCode::Char('c') | KeyCode::Char('C') => InputAction::DebugUnifyNearbyColors,
+        KeyCode::Char('l') | KeyCode::Char('L') => InputAction::DebugAddLife,
+        KeyCode::Char('x') | KeyCode::Char('X') => InputAction::DebugClearAbovePlayer,
+        KeyCode::Char('[') => InputAction::DebugBlockFallSlower,
+        KeyCode::Char(']') => InputAction::DebugBlockFallFaster,
+        KeyCode::Char('-') => InputAction::DebugPlayerFallSlower,
+        KeyCode::Char('=') => InputAction::DebugPlayerFallFaster,
+        KeyCode::Char(',') => InputAction::DebugShakeDurationLonger,
+        KeyCode::Char('.') => InputAction::DebugShakeDurationShorter,
+        _ => return None,
+    })
+}
 
-    Ok(Some(action))
+/// `poll_ms`だけ待って入力を確認し、その時点でキューされている全キーイベントを
+/// `InputAction`へ変換してまとめて返す(TERM独自拡張)。矢印キー(向き変更・移動)と
+/// スペースキー(掘削)をほぼ同時に押した場合でも、同一フレーム内に届いた各キーの
+/// イベントを取りこぼさず両方とも処理できるようにするための、複数キー対応版。
+pub fn poll_input_batch(poll_ms: u64) -> std::io::Result<Vec<InputAction>> {
+    let mut actions = Vec::new();
+
+    if !event::poll(Duration::from_millis(poll_ms))? {
+        return Ok(actions);
+    }
+
+    loop {
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && let Some(action) = action_from_key_code(key.code)
+        {
+            actions.push(action);
+        }
+
+        if !event::poll(Duration::ZERO)? {
+            break;
+        }
+    }
+
+    Ok(actions)
 }
 
 /// スプラッシュ/タイトル画面の「何かキーを押して進む」用。`poll_input`が対応する
 /// キー(矢印・スペース・p/q/s)以外の入力(Enter等)も含め、Pressイベント全般を
-/// 「進む」とみなす。Qキーのみ区別して返す(タイトル画面ではアプリ終了、
-/// スプラッシュ画面でもQは終了として扱うため)。
+/// 「進む」とみなす。Qキー・Sキーのみ区別して返す(タイトル画面ではQがアプリ終了、
+/// スプラッシュ画面でもQは終了として扱うため。Sキーは設定画面を開く)。
 pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
     if !event::poll(Duration::from_millis(poll_ms))? {
         return Ok(None);
@@ -60,7 +83,8 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
 
     Ok(Some(match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => AnyKeyAction::Quit,
-        KeyCode::Char('s') | KeyCode::Char('S') => AnyKeyAction::ToggleSound,
+        KeyCode::Char('s') | KeyCode::Char('S') => AnyKeyAction::OpenSettings,
+        KeyCode::Char('h') | KeyCode::Char('H') => AnyKeyAction::OpenHelp,
         _ => AnyKeyAction::Advance,
     }))
 }
@@ -68,10 +92,14 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
 /// `poll_any_key`の戻り値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnyKeyAction {
-    /// Q以外の任意のキー(Enter含む)。「進む」トリガーとして扱う。
+    /// Q・S・H以外の任意のキー(Enter含む)。「進む」トリガーとして扱う。
     Advance,
     /// Qキー。呼び出し側でアプリ/スプラッシュの終了として扱う。
     Quit,
-    /// Sキー。タイトル画面でのサウンド切り替えとして扱う(進むトリガーにはしない)。
-    ToggleSound,
+    /// Sキー。タイトル画面での設定画面オープンとして扱う(TERM独自拡張。
+    /// ユーザー指摘: 「設定画面つくって、カーソルで選んでスペースでトグル」)。
+    OpenSettings,
+    /// Hキー。タイトル画面でのショートカット一覧ヘルプ画面オープンとして扱う
+    /// (TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)。
+    OpenHelp,
 }
