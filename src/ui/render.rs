@@ -446,11 +446,38 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             // 通常はここでEmpty背景が描かれるだけになる)。プレイヤー自身のスプライトは
             // このループの外側で、見た目補間アニメーション込みで別途重ねて描画する
             // (spec.md 9.5・9章TERM独自拡張)。
-            draw_logical_cell(buf, x, y, &game.board, board_row, col, cell);
+            //
+            // 支えを失って揺れている(落下開始前の猶予期間中の)ブロックは、左右に
+            // 小刻みなジッターを加えて描画する(TERM独自拡張。ユーザー指摘: 「落下開始
+            // までのアニメーションぐらぐらしてほしい(各種ブロック)」)。
+            let draw_x = if game.is_cell_shaking(board_row, col) {
+                let jitter = shake_jitter_x(game.player.elapsed_seconds, board_row, col);
+                (x as i32 + jitter).clamp(inner.x as i32, (inner.x + inner.width).saturating_sub(CELL_W) as i32) as u16
+            } else {
+                x
+            };
+            draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
         }
     }
 
     draw_player(buf, inner, top_row, game);
+}
+
+/// 揺れ中のブロックにかける、左右の小刻みなジッター(文字数単位、TERM独自拡張)。
+/// セルの座標から求めた位相をずらすことで、隣接セルが機械的に完全同期して見えるのを
+/// 避けつつ、同じ塊はおおむね一体で震える(ユーザー指摘: 「落下開始までのアニメーション
+/// ぐらぐらしてほしい(各種ブロック)」)。
+fn shake_jitter_x(elapsed_secs: f32, row: usize, col: usize) -> i32 {
+    const FREQ: f32 = 18.0;
+    let phase = (row as f32 * 0.7 + col as f32 * 1.3) % std::f32::consts::TAU;
+    let s = (elapsed_secs * FREQ + phase).sin();
+    if s > 0.3 {
+        1
+    } else if s < -0.3 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// プレイヤーのスプライトを、直前の論理位置から現在位置へ補間した画面座標へ描画する
@@ -485,7 +512,7 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
     } else {
         BoardCell::Empty
     };
-    let bg = natural_cell_bg(&game.board, cur_row, cur_col, cur_cell);
+    let bg = natural_cell_bg(cur_cell);
 
     if game.crush_flash_active() {
         draw_crushed_sprite(buf, x, y, bg);
@@ -566,7 +593,7 @@ fn conn_mask_rock(board: &Board, row: usize, col: usize) -> ConnMask {
 
 fn draw_color_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize, kind: ColorKind) {
     let mask = conn_mask(board, row, col, kind);
-    let bg = colors::shaded_color(kind, colors::shade(mask.up, mask.down));
+    let bg = colors::fill_color(kind);
     let border_fg = colors::highlight_color(kind);
 
     // 角(上下行×左右列の4隅)
@@ -651,13 +678,10 @@ fn draw_rock_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, 
 // --- 9.5 プレイヤースプライト ---
 
 /// プレイヤーが立っているマス本来の背景色(9.5「そのマスの本来の背景色をそのまま使う」)。
-fn natural_cell_bg(board: &Board, row: usize, col: usize, cell: BoardCell) -> Color {
+fn natural_cell_bg(cell: BoardCell) -> Color {
     match cell {
         BoardCell::Empty => colors::FIELD_EMPTY_BG,
-        BoardCell::Color(kind) => {
-            let mask = conn_mask(board, row, col, kind);
-            colors::shaded_color(kind, colors::shade(mask.up, mask.down))
-        }
+        BoardCell::Color(kind) => colors::fill_color(kind),
         BoardCell::Rock { hits } => colors::rock_bg(hits),
         BoardCell::Oxygen => colors::OXYGEN_BG,
         BoardCell::Diamond => colors::DIAMOND_BG,
@@ -858,6 +882,26 @@ mod tests {
         Board {
             rows: vec![[BoardCell::Empty; FIELD_WIDTH]; rows],
         }
+    }
+
+    // --- 揺れ(ぐらぐら)アニメーションのジッター(TERM独自拡張) ---
+
+    #[test]
+    fn shake_jitter_x_is_always_within_one_character() {
+        for i in 0..200 {
+            let elapsed = i as f32 * 0.037;
+            for row in 0..3 {
+                for col in 0..3 {
+                    let jitter = shake_jitter_x(elapsed, row, col);
+                    assert!((-1..=1).contains(&jitter), "jitterは-1〜1の範囲のはず: {jitter}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shake_jitter_x_is_deterministic_for_the_same_inputs() {
+        assert_eq!(shake_jitter_x(1.234, 5, 7), shake_jitter_x(1.234, 5, 7));
     }
 
     // --- 9.3 接続マスク(横方向のまとまり確認、spec.md 9.3) ---

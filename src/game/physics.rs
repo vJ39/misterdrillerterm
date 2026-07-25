@@ -117,6 +117,10 @@ pub enum LateralOutcome {
 ///   (1段上が酸素カプセルの場合も同様に登りながら取得する)
 /// - 方向を変えずに同じ方向へ2回連続で入力しないと登れない。別の方向キーを挟んだ場合は
 ///   `bumped_direction`が新しい方向で上書きされ、また1回目からやり直しになる
+/// - **キャラ自身の真上(player.row-1, player.col)がブロックで塞がっている場合は、
+///   登り先(1段上・隣の列)が空いていても一切登れない**(TERM独自拡張。ユーザー指摘:
+///   「キャラの上にブロックがある場合は1段登ることはできないものとする」。頭上が
+///   塞がっている状態で斜めに登り抜けるのは不自然なため)
 ///
 /// どちらのマスも塞がっていれば、何度入力してもその場に留まる(ブロックは一切破壊されず、
 /// そのまま残る)。フィールド端(列0の左、列11の右)へ向けた入力は何も起きない
@@ -151,7 +155,7 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
         _ => {}
     }
 
-    if was_bumped_same_dir && player.row > 0 {
+    if was_bumped_same_dir && player.row > 0 && board.cell(player.row - 1, player.col) == Cell::Empty {
         match board.cell(player.row - 1, nc) {
             Cell::Empty => {
                 player.row -= 1;
@@ -462,6 +466,27 @@ mod tests {
         assert_eq!(player.col, target_col);
         // 岩ブロックはヒットを受けず、そのまま残る
         assert!(matches!(board.cell(1, target_col), Cell::Rock { hits: 0 }));
+    }
+
+    #[test]
+    fn move_lateral_does_not_climb_when_a_block_is_directly_above_the_player() {
+        // ユーザー指摘: 「キャラの上にブロックがある場合は1段登ることはできないものと
+        // する」。登り先(1段上・隣の列)が空いていても、キャラ自身の真上が塞がって
+        // いれば登れない。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Color(ColorKind::Red);
+        board.rows[player.row - 1][player.col] = Cell::Rock { hits: 0 }; // キャラの真上が塞がっている
+
+        move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目でも登れない
+
+        assert_eq!(outcome, LateralOutcome::Blocked);
+        assert_eq!(player.row, 1, "頭上が塞がっているので登れない");
+        assert_eq!(player.col, target_col - 1, "移動していない");
+        assert_eq!(board.cell(1, target_col), Cell::Color(ColorKind::Red)); // ブロックは残る
     }
 
     #[test]

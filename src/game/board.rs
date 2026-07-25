@@ -406,6 +406,11 @@ pub fn hit_rock(board: &mut Board, target: (usize, usize)) -> Option<RockHitResu
 #[derive(Debug, Clone, Default)]
 pub struct GravityState {
     unsupported_ticks: HashMap<(usize, usize), u8>,
+    /// 現在「震えている」塊に属する全セル(TERM独自拡張、描画用)。`unsupported_ticks`は
+    /// 揺れティック数を数えるため塊の代表座標だけをキーにしているが、描画側は塊の
+    /// どのセルについても「揺れているか」を知りたい(ユーザー指摘: 「落下開始までの
+    /// アニメーションぐらぐらしてほしい(各種ブロック)」)ため、塊の全メンバーを別途保持する。
+    shaking_cells: HashSet<(usize, usize)>,
 }
 
 impl GravityState {
@@ -414,13 +419,15 @@ impl GravityState {
     }
 
     /// 指定セルが現在「震えている」状態(未支持と判定されたが、まだ揺れティック数ぶんの
-    /// 猶予が明けておらず実際には落下していない)かどうか(spec.md 4.3)。
+    /// 猶予が明けておらず実際には落下していない)かどうか(spec.md 4.3)。塊(連結
+    /// グループ)に属するセルであれば、代表座標以外のどのセルについてもtrueを返す。
     ///
     /// 上向き掘削時の「不安定なブロックは掘れず押し潰される」判定(physics::drill_facing)
-    /// で使う。支持されていない(=`is_supported`がfalse)だけでは「揺れ始めた直後でまだ
-    /// 見た目には静止している」ケースを区別できないため、この状態も合わせて見る。
+    /// と、揺れ演出の描画(ui::render)の両方で使う。支持されていない
+    /// (=`is_supported`がfalse)だけでは「揺れ始めた直後でまだ見た目には静止している」
+    /// ケースを区別できないため、この状態も合わせて見る。
     pub fn is_shaking(&self, pos: (usize, usize)) -> bool {
-        self.unsupported_ticks.contains_key(&pos)
+        self.shaking_cells.contains(&pos)
     }
 
     /// 揺れ状態を全てクリアする(TERM独自拡張)。デバッグショートカット等で盤面の
@@ -430,6 +437,7 @@ impl GravityState {
     /// Cを10画面分に適用し、ちゃんと結合関係を再計算するように」)。
     pub fn reset(&mut self) {
         self.unsupported_ticks.clear();
+        self.shaking_cells.clear();
     }
 }
 
@@ -626,6 +634,7 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
     }
 
     let mut next_unsupported_ticks: HashMap<(usize, usize), u8> = HashMap::new();
+    let mut next_shaking_cells: HashSet<(usize, usize)> = HashSet::new();
     let mut falling_groups: Vec<Vec<(usize, usize)>> = Vec::new();
 
     for (i, group) in groups.into_iter().enumerate() {
@@ -641,12 +650,14 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
             // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する
             falling_groups.push(group);
         } else {
-            // まだ揺れている最中 -> 移動しない
+            // まだ揺れている最中 -> 移動しない。描画用に塊の全セルを揺れ中として記録する。
+            next_shaking_cells.extend(group.iter().copied());
             next_unsupported_ticks.insert(representative, ticks_unsupported);
         }
     }
 
     gravity.unsupported_ticks = next_unsupported_ticks;
+    gravity.shaking_cells = next_shaking_cells;
 
     let mut outcome = FallTickOutcome::default();
     if falling_groups.is_empty() {

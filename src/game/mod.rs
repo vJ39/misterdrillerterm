@@ -592,6 +592,13 @@ impl Game {
         self.crush_flash_remaining > Duration::ZERO
     }
 
+    /// 指定セルが現在「震えている」(支えを失い、落下開始までの猶予期間中)かどうか
+    /// (TERM独自拡張、描画用)。ユーザー指摘: 「落下開始までのアニメーションぐらぐら
+    /// してほしい(各種ブロック)」。
+    pub fn is_cell_shaking(&self, row: usize, col: usize) -> bool {
+        self.gravity_state.is_shaking((row, col))
+    }
+
     // -----------------------------------------------------------------------
     // デバッグショートカット(TERM独自拡張。動作確認を効率化するための機能で、
     // 初代の仕様やスコアには一切対応しない)
