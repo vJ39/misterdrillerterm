@@ -864,9 +864,13 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
         }
     }
 
-    if outcome.crushed {
-        return outcome;
-    }
+    // 押し潰しが確定していても、以降の自動消滅判定はスキップしない。押し潰しは
+    // 「特定の1つの塊がプレイヤー位置へ移動した」という個別の事象であり、同じtickで
+    // 着地した他の(無関係な)塊の4連結自動消滅とは独立している。ここで早期returnすると、
+    // 押し潰しが起きたtickに限って、本来なら着地・自動消滅するはずの塊(押し潰しとは
+    // 無関係な塊も含め全て)が消滅せずそのまま盤面に残ってしまう
+    // (発見: 「4個以上結合したのに消えない」報告の一因)。押し潰された塊自体は、
+    // 直後のEmptyチェックで自然にスキップされるため、ここで特別扱いする必要はない。
 
     // 着地(=移動先で直下が支持状態になった)色ブロック・岩ブロックについて連結・自動消滅を
     // 判定する(spec.md 4.5・4.9)。岩ブロックも4連結以上になれば自動消滅するが得点は
@@ -1776,6 +1780,33 @@ mod tests {
             Cell::Color(ColorKind::Blue),
             "無関係な塊は消滅せず、ちゃんと1マス落下しているはず"
         );
+    }
+
+    #[test]
+    fn a_crush_in_one_group_does_not_suppress_auto_vanish_for_another_group_landing_the_same_tick() {
+        // 発見: 同一tickに複数の無関係な塊が同時に落下していて、そのうち1つが
+        // プレイヤーを押し潰す場合、旧実装ではoutcome.crushed=true時点で自動消滅判定
+        // ループごと早期returnしていたため、押し潰しとは無関係な塊が同じtickで着地して
+        // 4連結以上になっても自動消滅しなかった(ユーザー報告「緑に1ブロック結合したけど
+        // 消えなかった」の一因になり得るバグ)。
+        let mut board = empty_board(3);
+        board.rows[0][0] = Cell::Color(ColorKind::Red); // プレイヤーを押し潰す塊
+        board.rows[0][5] = Cell::Color(ColorKind::Blue); // 無関係に着地・自動消滅するはずの塊
+        board.rows[0][6] = Cell::Color(ColorKind::Blue);
+        board.rows[2][5] = Cell::Color(ColorKind::Blue); // 既に支持されている静的な塊(最深行)
+        board.rows[2][6] = Cell::Color(ColorKind::Blue);
+        let player_pos = (1, 0);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity);
+
+        assert!(outcome.crushed, "プレイヤーは押し潰されるはず");
+        assert_eq!(
+            outcome.auto_vanished_blocks, 4,
+            "押し潰しと無関係な塊は、着地して4連結以上になったので自動消滅するはず"
+        );
+        assert_eq!(board.cell(2, 5), Cell::Empty);
+        assert_eq!(board.cell(2, 6), Cell::Empty);
     }
 
     // --- 重力: 着地時の自動消滅(4.5、4個以上のみ) ---
