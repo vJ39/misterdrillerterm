@@ -321,6 +321,10 @@ pub enum SettingsChoice {
     /// 出現する色ブロックの色数(1〜4)。TERM独自拡張。ユーザー指摘: 「出現する色
     /// ブロックの色数を設定で選べるようにしたい(1〜4)」
     ColorCount,
+    /// ブロック落下速度(tick間隔, ms)。TERM独自拡張。従来はデバッグショートカット
+    /// ([ ])でのみ調整可能だったが、ユーザー指摘: 「ブロックが落ちるスピードの
+    /// 設定値がないよね」を受け、設定画面からも調整できるようにした。
+    BlockFallSpeed,
 }
 
 impl SettingsChoice {
@@ -333,7 +337,8 @@ impl SettingsChoice {
             SettingsChoice::AirRate => SettingsChoice::StarRate,
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
             SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
-            SettingsChoice::ColorCount => SettingsChoice::Music,
+            SettingsChoice::ColorCount => SettingsChoice::BlockFallSpeed,
+            SettingsChoice::BlockFallSpeed => SettingsChoice::Music,
         }
     }
 
@@ -342,13 +347,14 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::ColorCount,
+            SettingsChoice::Music => SettingsChoice::BlockFallSpeed,
             SettingsChoice::Se => SettingsChoice::Music,
             SettingsChoice::RockRate => SettingsChoice::Se,
             SettingsChoice::AirRate => SettingsChoice::RockRate,
             SettingsChoice::StarRate => SettingsChoice::AirRate,
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
             SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
+            SettingsChoice::BlockFallSpeed => SettingsChoice::ColorCount,
         }
     }
 }
@@ -366,6 +372,7 @@ pub fn draw_settings(
     star_rate_percent: u32,
     diamond_rate_percent: u32,
     color_count: u8,
+    block_fall_tick_ms: u64,
 ) {
     let area = frame.area();
 
@@ -399,6 +406,11 @@ pub fn draw_settings(
         let style = if is_selected { selected_style } else { text_style };
         Line::from(Span::styled(format!("{prefix}{label}: {count}"), style))
     };
+    let ms_line = |label: &str, ms: u64, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected_style } else { text_style };
+        Line::from(Span::styled(format!("{prefix}{label}: {ms}ms"), style))
+    };
 
     let paragraph = Paragraph::new(vec![
         Line::from(Span::styled("SETTINGS", text_style)),
@@ -410,6 +422,11 @@ pub fn draw_settings(
         rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
         rate_line("ダイヤ配分", diamond_rate_percent, selection == SettingsChoice::DiamondRate),
         count_line("色数", color_count, selection == SettingsChoice::ColorCount),
+        ms_line(
+            "ブロック落下速度(小さいほど速い)",
+            block_fall_tick_ms,
+            selection == SettingsChoice::BlockFallSpeed,
+        ),
         Line::from(""),
         Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
         Line::from(Span::styled("配分・色数は←→で調整 / Qでタイトルへ", text_style)),
@@ -971,6 +988,7 @@ mod tests {
             SettingsChoice::StarRate,
             SettingsChoice::DiamondRate,
             SettingsChoice::ColorCount,
+            SettingsChoice::BlockFallSpeed,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);

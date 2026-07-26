@@ -17,8 +17,9 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
-    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
+    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -164,13 +165,25 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
-                            // 配分率・色数は←→で調整するので、Spaceは無効(トグル対象ではない)。
+                            // 配分率・色数・落下速度は←→で調整するので、Spaceは無効(トグル対象ではない)。
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
-                            | ui::render::SettingsChoice::ColorCount => {}
+                            | ui::render::SettingsChoice::ColorCount
+                            | ui::render::SettingsChoice::BlockFallSpeed => {}
                         }
+                    }
+                    // ブロック落下速度の調整(TERM独自拡張)。配分率・色数と異なり盤面の
+                    // 書き換えを伴わないため、即座にgameへ反映してよい。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if pause_overlay == PauseOverlay::Settings
+                            && settings_selection == ui::render::SettingsChoice::BlockFallSpeed =>
+                    {
+                        let increase = action == InputAction::MoveRight;
+                        settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                        settings.save();
+                        game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                     }
                     // Xブロック/AIR/スター/ダイヤの配分率・色数調整(TERM独自拡張)。プレイ中なので、
                     // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映
@@ -312,6 +325,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
+                            settings.block_fall_tick_ms,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -331,6 +345,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.star_spawn_rate_percent,
                     settings.diamond_spawn_rate_percent,
                     settings.color_count,
+                    settings.block_fall_tick_ms,
                 )
             })?;
 
@@ -363,7 +378,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
-                            | ui::render::SettingsChoice::ColorCount => {}
+                            | ui::render::SettingsChoice::ColorCount
+                            | ui::render::SettingsChoice::BlockFallSpeed => {}
                         }
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -374,6 +390,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::StarRate
                                 | ui::render::SettingsChoice::DiamondRate
                                 | ui::render::SettingsChoice::ColorCount
+                                | ui::render::SettingsChoice::BlockFallSpeed
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -399,6 +416,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::ColorCount => {
                                 settings.color_count = adjust_color_count(settings.color_count, increase);
+                            }
+                            ui::render::SettingsChoice::BlockFallSpeed => {
+                                settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
                             }
                             _ => {}
                         }
@@ -518,6 +538,17 @@ fn adjust_color_count(current: u8, increase: bool) -> u8 {
         (current + 1).min(COLOR_COUNT_MAX)
     } else {
         current.saturating_sub(1).max(COLOR_COUNT_MIN)
+    }
+}
+
+/// ブロック落下速度(tick間隔, ms)を`DEBUG_FALL_TICK_STEP_MS`ぶん増減する
+/// (TERM独自拡張。ユーザー指摘: 「ブロックが落ちるスピードの設定値がないよね」)。
+/// `increase`はms値そのものの増減方向(true=ms増加=遅くなる)を表す。
+fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
+    if increase {
+        (current + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
+    } else {
+        current.saturating_sub(DEBUG_FALL_TICK_STEP_MS).max(DEBUG_FALL_TICK_MS_MIN)
     }
 }
 
