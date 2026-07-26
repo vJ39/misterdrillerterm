@@ -59,10 +59,10 @@ pub enum InputAction {
     /// デバッグ: プレイヤーより浅い(画面上で上にある)ブロックを全削除する
     /// (TERM独自拡張、動作確認用ショートカット)
     DebugClearAbovePlayer,
-    /// デバッグ: プレイヤーに最も近いスターブロックを、実際に取得したのと同じ挙動で
-    /// 取得する(TERM独自拡張、動作確認用ショートカット。ユーザー指摘: 「スター
-    /// ブロックをとったのと同じ挙動をするショートカットキーを容易して」)
-    DebugCollectStar,
+    /// デバッグ: 画面内のXブロック・ダイヤブロックを全てスターブロックに変える
+    /// (TERM独自拡張、動作確認用ショートカット。ユーザー指摘: 「画面内をスター化
+    /// する(Xブロック,ダイヤブロック100%)」)
+    DebugStarifyVisibleScreen,
     /// デバッグ: ブロックの落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
     DebugBlockFallSlower,
     /// デバッグ: ブロックの落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
@@ -1211,36 +1211,27 @@ impl Game {
     /// デバッグ: プレイヤーに最も近いスターブロックを1つ、実際にドリルで取得した
     /// (`DrillOutcome::StarDestroyed`)のと全く同じ挙動(消滅・スコア加算・同じ
     /// イベント列)で取得する。盤面上にスターが1つも無ければ何もしない。Playing中
-    /// のみ有効(TERM独自拡張。ユーザー指摘: 「スターブロックをとったのと同じ挙動を
-    /// するショートカットキーを容易して」)。
-    pub fn debug_collect_star(&mut self) -> Vec<GameEvent> {
+    /// のみ有効(TERM独自拡張。当初「最寄りのスターを取得」として実装したが、
+    /// ユーザー指摘: 「Kは最寄りのスターを取得になってるけど、違う 画面内をスター化
+    /// する(Xブロック,ダイヤブロック100%)」を受けて仕様変更。画面内(プレイヤー位置
+    /// から上下`STAR_VISIBLE_RANGE_ROWS`行)にあるXブロック・ダイヤブロックを、
+    /// 揺れ中のセルを除き全て(100%)スターブロックへ変える)。
+    pub fn debug_starify_visible_screen(&mut self) {
         if self.status != GameStatus::Playing {
-            return Vec::new();
+            return;
         }
-        let Some(pos) = self.nearest_star_to_player() else {
-            return Vec::new();
-        };
-        self.board.set(pos.0, pos.1, Cell::Empty);
-        self.player.award_drill_score(1);
-        vec![GameEvent::DrillImpact, GameEvent::BlockDestroyed { blocks: 1 }]
-    }
-
-    /// 盤面上に存在するスターブロックのうち、プレイヤーからマンハッタン距離が
-    /// 最も近い1つの座標を返す。存在しなければ`None`。
-    fn nearest_star_to_player(&self) -> Option<(usize, usize)> {
-        let mut nearest: Option<((usize, usize), usize)> = None;
-        for row in 0..self.board.depth_rows() {
+        let start_row = self.player.row.saturating_sub(crate::constants::STAR_VISIBLE_RANGE_ROWS);
+        let end_row =
+            (self.player.row + crate::constants::STAR_VISIBLE_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
+        for row in start_row..=end_row {
             for col in 0..self.board.width() {
-                if matches!(self.board.cell(row, col), Cell::Star { .. }) {
-                    let dist = (row as isize - self.player.row as isize).unsigned_abs()
-                        + (col as isize - self.player.col as isize).unsigned_abs();
-                    if nearest.is_none_or(|(_, best)| dist < best) {
-                        nearest = Some(((row, col), dist));
-                    }
+                if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond)
+                    && !self.gravity_state.is_shaking((row, col))
+                {
+                    self.board.set(row, col, Cell::Star { visible_ms: 0 });
                 }
             }
         }
-        nearest.map(|(pos, _)| pos)
     }
 }
 
@@ -2295,72 +2286,80 @@ mod tests {
     }
 
     #[test]
-    fn debug_collect_star_removes_the_nearest_star_and_awards_score() {
-        // ユーザー指摘: 「スターブロックをとったのと同じ挙動をするショートカット
-        // キーを容易して」。
+    fn debug_starify_visible_screen_converts_rock_and_diamond_within_range_to_stars() {
+        // ユーザー指摘: 「画面内をスター化する(Xブロック,ダイヤブロック100%)」。
         let mut game = Game::new(73);
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 5;
-        game.board.rows[999][6] = Cell::Star { visible_ms: 0 };
-        let score_before = game.player.score;
+        game.board.rows[990][3] = Cell::Rock { hits: 2 };
+        game.board.rows[995][4] = Cell::Diamond;
 
-        let events = game.debug_collect_star();
+        game.debug_starify_visible_screen();
 
-        assert!(matches!(game.board.cell(999, 6), Cell::Empty));
-        assert!(game.player.score > score_before);
-        assert!(events.iter().any(|e| matches!(e, GameEvent::DrillImpact)));
-        assert!(events.iter().any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 1 })));
+        assert!(matches!(game.board.cell(990, 3), Cell::Star { .. }));
+        assert!(matches!(game.board.cell(995, 4), Cell::Star { .. }));
     }
 
     #[test]
-    fn debug_collect_star_picks_the_nearest_star_when_multiple_exist() {
+    fn debug_starify_visible_screen_does_not_convert_cells_outside_the_visible_range() {
         let mut game = Game::new(73);
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 5;
-        game.board.rows[999][6] = Cell::Star { visible_ms: 0 }; // 距離1(近い)
-        game.board.rows[990][0] = Cell::Star { visible_ms: 0 }; // 遠い
+        game.board.rows[900][3] = Cell::Rock { hits: 0 }; // STAR_VISIBLE_RANGE_ROWSより外
 
-        game.debug_collect_star();
+        game.debug_starify_visible_screen();
 
-        assert!(matches!(game.board.cell(999, 6), Cell::Empty), "近いスターが取得されるはず");
-        assert!(
-            matches!(game.board.cell(990, 0), Cell::Star { .. }),
-            "遠いスターは手つかずのまま残るはず"
-        );
+        assert!(matches!(game.board.cell(900, 3), Cell::Rock { .. }), "画面外のブロックは変化しないはず");
     }
 
     #[test]
-    fn debug_collect_star_does_nothing_when_no_star_exists() {
+    fn debug_starify_visible_screen_leaves_color_and_oxygen_cells_untouched() {
         let mut game = Game::new(73);
         clear_board(&mut game);
-        let score_before = game.player.score;
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[990][3] = Cell::Color(ColorKind::Red);
+        game.board.rows[991][3] = Cell::Oxygen;
 
-        let events = game.debug_collect_star();
+        game.debug_starify_visible_screen();
 
-        assert!(events.is_empty());
-        assert_eq!(game.player.score, score_before);
+        assert!(matches!(game.board.cell(990, 3), Cell::Color(ColorKind::Red)));
+        assert!(matches!(game.board.cell(991, 3), Cell::Oxygen));
     }
 
     #[test]
-    fn debug_collect_star_does_nothing_when_not_playing() {
+    fn debug_starify_visible_screen_does_not_convert_shaking_cells() {
+        // ユーザー指摘(#99と同じ理由): 揺れ中/落下中のブロックはスター化対象外。
+        let mut game = Game::new(31);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[498][5] = Cell::Rock { hits: 0 }; // 直下(499)が空=支えなし
+
+        game.update(Duration::from_millis(game.block_fall_tick_ms())); // 1ティックで揺れ開始(まだ落下しない)
+        assert!(game.is_cell_shaking(498, 5), "テスト前提: 揺れ中であること");
+
+        game.debug_starify_visible_screen();
+
+        assert!(matches!(game.board.cell(498, 5), Cell::Rock { .. }), "揺れ中のセルは変化しないはず");
+    }
+
+    #[test]
+    fn debug_starify_visible_screen_does_nothing_when_not_playing() {
         let mut game = Game::new_with_lives(73, 1);
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 5;
-        game.board.rows[999][6] = Cell::Star { visible_ms: 0 };
+        game.board.rows[990][3] = Cell::Rock { hits: 0 };
         game.player.oxygen = 1.0;
         game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
         assert_eq!(game.status, GameStatus::GameOver);
 
-        let events = game.debug_collect_star();
+        game.debug_starify_visible_screen();
 
-        assert!(events.is_empty());
-        assert!(
-            matches!(game.board.cell(999, 6), Cell::Star { .. }),
-            "GameOver中はスターを取得しないはず"
-        );
+        assert!(matches!(game.board.cell(990, 3), Cell::Rock { .. }), "GameOver中は変化しないはず");
     }
 
     #[test]
