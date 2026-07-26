@@ -3,6 +3,8 @@
 //! 1論理セルを横4文字×縦2ターミナル行の大型ブロックとして描画する(9.2)。
 //! 旧版のhalf-block方式(1論理セルを1文字に圧縮)は完全に廃止した。
 
+use std::collections::HashMap;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Direction as LayoutDirection, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
@@ -11,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_TICKS};
-use crate::game::board::{Board, Cell as BoardCell, ColorKind};
+use crate::game::board::{Board, Cell as BoardCell, ColorKind, Pos};
 use crate::game::player::Direction;
 use crate::game::{Game, GameOverChoice, GameStatus};
 use crate::ui::colors;
@@ -490,6 +492,13 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
 
     let buf = frame.buffer_mut();
 
+    // 直近の重力ティックで落下した(移動後の位置)→(移動前の位置)のマップ(TERM独自拡張。
+    // ユーザー指摘: 「ブロックの落ち方をコマ送りでなくピクセル単位で滑らかにしてほしい」)。
+    // 移動後の位置は、静的な通常描画では一旦Emptyとして扱い(まだ本来の場所に「到着」
+    // していない、宙にある状態を表現するため)、実際の内容はこのあと`draw_falling_blocks`が
+    // 移動前→移動後を補間した位置へ重ねて描画する。
+    let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+
     for screen_row in 0..visible_rows {
         let y = inner.y + screen_row as u16 * CELL_H;
         if y + CELL_H > inner.y + inner.height {
@@ -503,7 +512,9 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
                 break;
             }
 
-            let cell = if board_row < game.board.depth_rows() {
+            let cell = if moved_map.contains_key(&(board_row, col)) {
+                BoardCell::Empty
+            } else if board_row < game.board.depth_rows() {
                 game.board.cell(board_row, col)
             } else {
                 BoardCell::Empty
@@ -527,7 +538,52 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
         }
     }
 
+    draw_falling_blocks(buf, inner, top_row, visible_rows, game, &moved_map);
     draw_player(buf, inner, top_row, game);
+}
+
+/// 直近の重力ティックで落下したブロックを、移動前の位置から移動後の位置へ向けて
+/// 滑らかに補間した画面座標へ描画する(TERM独自拡張。ユーザー指摘: 「ブロックの落ち方を
+/// コマ送りでなくピクセル単位で滑らかにしてほしい」)。連結・接続表現(丸み縁取り等)は
+/// 移動が完了してから通常描画に委ねるため、ここでは単色の塗りつぶしのみ行う。
+fn draw_falling_blocks(
+    buf: &mut Buffer,
+    inner: Rect,
+    top_row: usize,
+    visible_rows: usize,
+    game: &Game,
+    moved_map: &HashMap<Pos, Pos>,
+) {
+    let t = game.block_fall_progress();
+    for (&(to_row, to_col), &(from_row, from_col)) in moved_map {
+        let cell = if to_row < game.board.depth_rows() {
+            game.board.cell(to_row, to_col)
+        } else {
+            BoardCell::Empty
+        };
+        if cell == BoardCell::Empty {
+            continue; // 押し潰し等で既に消滅済み
+        }
+
+        let interp_row = from_row as f32 + (to_row as f32 - from_row as f32) * t;
+        let interp_col = from_col as f32 + (to_col as f32 - from_col as f32) * t;
+        let screen_row = interp_row - top_row as f32;
+        if screen_row < 0.0 || screen_row > visible_rows as f32 {
+            continue; // 画面外
+        }
+
+        let px = inner.x as f32 + interp_col * CELL_W as f32;
+        let py = inner.y as f32 + screen_row * CELL_H as f32;
+        if px < 0.0 || py < 0.0 {
+            continue;
+        }
+        let x = px.round() as u16;
+        let y = py.round() as u16;
+        if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+            continue; // 補間の一時的なはみ出しは描画をスキップする
+        }
+        fill_block(buf, x, y, natural_cell_bg(cell));
+    }
 }
 
 /// 揺れ中のブロックにかける、左右の小刻みなジッター(文字数単位、TERM独自拡張)。

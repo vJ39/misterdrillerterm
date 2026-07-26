@@ -17,7 +17,7 @@ use crate::constants::{
     INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS, OXYGEN_WARNING_THRESHOLD,
     SHAKE_DURATION_MS,
 };
-use board::{tick_star_melting, Board, Cell, ColorKind, GravityState};
+use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
@@ -164,6 +164,14 @@ pub struct Game {
     /// 直前の論理位置変化からの経過時間(秒)。`MOVE_ANIM_DURATION_MS`に達すると
     /// 補間が完了したものとして扱う。
     render_anim_elapsed: f32,
+    /// 現在進行中の移動補間アニメーションの長さ(秒、TERM独自拡張)。横移動は
+    /// `move_anim_duration_secs()`(固定の短い時間)、自由落下は`player_fall_tick_ms`
+    /// (実際の落下速度)を使う。移動の種類によって`note_possible_move_with_duration`が設定する。
+    render_anim_duration_secs: f32,
+    /// 直近の重力ティックで実際に1マス落下した各セルの(移動後の位置, 移動前の位置)
+    /// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う)。次のティックが
+    /// 来るまでの間、描画側がこれと`block_fall_progress()`を使って補間する。
+    last_block_moves: Vec<BlockMove>,
     /// GameOverダイアログでの現在の選択項目(TERM独自拡張)。GameOver状態でのみ意味を持つ。
     game_over_selection: GameOverChoice,
 }
@@ -199,6 +207,8 @@ impl Game {
             // 開始時点では補間の必要が無いため、既に完了した扱いにしておく
             // (さもないと初期表示が(0,0)相当からアニメーションしてしまう)。
             render_anim_elapsed: move_anim_duration_secs(),
+            render_anim_duration_secs: move_anim_duration_secs(),
+            last_block_moves: Vec::new(),
             game_over_selection: GameOverChoice::BackToTitle,
         }
     }
@@ -502,6 +512,8 @@ impl Game {
                 self.invulnerability_ticks_remaining -= 1;
             }
 
+            self.last_block_moves = result.moved_cells;
+
             if result.oxygen_collected > 0 {
                 events.push(GameEvent::OxygenCollected);
             }
@@ -544,7 +556,7 @@ impl Game {
 
             let before_fall = self.player.position();
             let fall_outcome = physics::apply_player_free_fall(&mut self.board, &mut self.player);
-            self.note_possible_move(before_fall);
+            self.note_possible_move_with_duration(before_fall, self.player_fall_tick_ms as f32 / 1000.0);
             if fall_outcome == FreeFallOutcome::FellAndCollectedOxygen {
                 events.push(GameEvent::OxygenCollected);
             }
@@ -573,24 +585,48 @@ impl Game {
     }
 
     /// プレイヤーの位置が`before`から変化していれば、移動の見た目補間アニメーションを
-    /// (描画専用の状態として)開始する。ロジック上の位置(row/col)には一切影響しない
-    /// (TERM独自拡張、9章)。
+    /// (描画専用の状態として)`move_anim_duration_secs()`(固定の短い時間)で開始する。
+    /// ロジック上の位置(row/col)には一切影響しない(TERM独自拡張、9章)。
     fn note_possible_move(&mut self, before: (usize, usize)) {
+        self.note_possible_move_with_duration(before, move_anim_duration_secs());
+    }
+
+    /// `note_possible_move`の、補間時間を指定できる版(TERM独自拡張)。自由落下は
+    /// 「現在の落ちるスピードにあうように滑らかに」という指摘を受け、固定の短い時間
+    /// ではなく`player_fall_tick_ms`(実際の落下tick間隔)ぶんかけて補間することで、
+    /// 次のtickが来るまでの間ずっと滑らかに動き続けるようにする。
+    fn note_possible_move_with_duration(&mut self, before: (usize, usize), duration_secs: f32) {
         let after = self.player.position();
         if after != before {
             self.render_prev_position = before;
             self.render_anim_elapsed = 0.0;
+            self.render_anim_duration_secs = duration_secs.max(0.001);
         }
     }
 
     /// 描画側が使う、移動補間の進捗(0.0=直前位置にいる, 1.0=現在位置に到達済み)。
     pub fn move_anim_progress(&self) -> f32 {
-        (self.render_anim_elapsed / move_anim_duration_secs()).clamp(0.0, 1.0)
+        (self.render_anim_elapsed / self.render_anim_duration_secs).clamp(0.0, 1.0)
     }
 
     /// 描画側が使う、移動補間の起点(直前の論理位置)。
     pub fn render_prev_position(&self) -> (usize, usize) {
         self.render_prev_position
+    }
+
+    /// 描画側が使う、直近の重力ティックで実際に1マス落下した各セルの
+    /// (移動後の位置, 移動前の位置)一覧(TERM独自拡張)。ブロック落下のピクセル単位
+    /// 補間描画に使う。次のティックが実行されるまで、このティックの内容を保持し続ける。
+    pub fn recently_moved_blocks(&self) -> &[BlockMove] {
+        &self.last_block_moves
+    }
+
+    /// 描画側が使う、ブロック落下ティックの進捗(0.0=直前のティック直後,
+    /// 1.0=次のティックが来る直前。TERM独自拡張)。`recently_moved_blocks`と組み合わせて、
+    /// 移動前の位置から移動後の位置へ向けて滑らかに補間する。
+    pub fn block_fall_progress(&self) -> f32 {
+        let tick_secs = self.block_fall_tick_ms.max(1) as f32 / 1000.0;
+        (self.fall_tick_accum.as_secs_f32() / tick_secs).clamp(0.0, 1.0)
     }
 
     /// 押し潰しの「潰れた」演出が表示中かどうか(GameOverオーバーレイの表示可否判定にも使う)。
@@ -1202,6 +1238,65 @@ mod tests {
         for row in [997, 998, 999] {
             assert_eq!(game.board.cell(row, 0), Cell::Empty, "row={row}が消えていない");
         }
+    }
+
+    // --- ブロック落下のピクセル単位補間描画(TERM独自拡張) ---
+
+    #[test]
+    fn recently_moved_blocks_and_progress_track_the_latest_gravity_tick() {
+        // ユーザー指摘: 「ブロックの落ち方をコマ送りでなくピクセル単位で滑らかにして
+        // ほしい」。実際に1マス落下したtickの直後は、その(移動後の位置, 移動前の位置)が
+        // recently_moved_blocksに記録され、block_fall_progressはそのtickの開始直後を
+        // 表す小さな値になっていることを確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[0][3] = Cell::Color(ColorKind::Red);
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+
+        let moves = game.recently_moved_blocks();
+        assert_eq!(moves, &[((1, 3), (0, 3))], "揺れが明けて1マス落下した直後のはず");
+        assert!(
+            game.block_fall_progress() < 0.2,
+            "ティック開始直後なのでprogressは小さいはず: {}",
+            game.block_fall_progress()
+        );
+
+        // 次のtickまでの間、時間経過とともにprogressが増える。
+        game.update(Duration::from_millis(FALL_TICK_MS / 2));
+        assert!(
+            game.block_fall_progress() > 0.3,
+            "半分近く経過すればprogressも増えるはず: {}",
+            game.block_fall_progress()
+        );
+    }
+
+    #[test]
+    fn free_fall_move_animation_duration_matches_player_fall_tick_ms_not_the_fixed_default() {
+        // ユーザー指摘: 「キャラの落ち方も1コマずつではなく、現在の落ちるスピードに
+        // あうように滑らかに落ちてほしい」。自由落下の見た目補間は、横移動用の固定の
+        // 短い時間(MOVE_ANIM_DURATION_MS)ではなく、実際のplayer_fall_tick_msぶんかけて
+        // 行われることを確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 10;
+        game.set_player_fall_tick_ms(400); // MOVE_ANIM_DURATION_MS(100ms)よりずっと長い
+
+        // ちょうど1回ぶんの自由落下tickを発生させる。
+        game.update(Duration::from_millis(410));
+        assert_eq!(game.player.row, 11, "1マス落下しているはず");
+        assert_eq!(game.move_anim_progress(), 0.0, "落下tick直後は補間がまだ始まったばかりのはず");
+
+        // 次のtick(400ms後)がまだ来ない150ms経過時点でも、補間が完了していないはず
+        // (固定100msのままなら、ここで既に1.0=完了してしまう)。
+        game.update(Duration::from_millis(150));
+        assert!(
+            game.move_anim_progress() < 1.0,
+            "player_fall_tick_ms(400ms)に合わせた補間ならまだ完了していないはず: {}",
+            game.move_anim_progress()
+        );
     }
 
     #[test]

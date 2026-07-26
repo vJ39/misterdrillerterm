@@ -6,7 +6,7 @@
 use crate::constants::OXYGEN_DECAY_PER_SEC;
 use crate::game::board::{
     apply_gravity_tick, connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
-    is_supported, Board, Cell, GravityState, RockHitResult,
+    is_supported, Board, BlockMove, Cell, GravityState, RockHitResult,
 };
 use crate::game::player::{Direction, Player};
 
@@ -255,10 +255,12 @@ pub fn apply_oxygen_decay(player: &mut Player, delta_seconds: f32) {
 }
 
 /// 重力ティック1回ぶんの、ゲームルールとしての結果(spec.md 4〜5章)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct GravityTickResult {
-    /// このティックで実際に1マス落下したセルの数。
-    pub cells_moved: usize,
+    /// このティックで実際に1マス落下した各セルの(移動後の位置, 移動前の位置)
+    /// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う。個数は`.len()`で取れる
+    /// ため、落下セル数を別フィールドに重複して持たない)。
+    pub moved_cells: Vec<BlockMove>,
     /// 自動消滅(spec.md 4.5)で消滅した色ブロック数(スコア加算はこの呼び出し内で適用済み)。
     pub auto_vanished_blocks: usize,
     /// 自動消滅(spec.md 4.9)で消滅した岩ブロック数。色ブロックと異なり得点は発生しない
@@ -298,7 +300,7 @@ pub fn process_gravity_tick(
     }
 
     GravityTickResult {
-        cells_moved: outcome.cells_moved,
+        moved_cells: outcome.moved_cells,
         auto_vanished_blocks: outcome.auto_vanished_blocks,
         auto_vanished_rock_blocks: outcome.auto_vanished_rock_blocks,
         life_lost_to_crush: outcome.crushed && !invulnerable,
@@ -824,13 +826,13 @@ mod tests {
         // 支えを失った直後、SHAKE_TICKSぶんはまだ落下しない。
         for _ in 0..SHAKE_TICKS {
             let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
-            assert_eq!(tick.cells_moved, 0);
+            assert_eq!(tick.moved_cells.len(), 0);
         }
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red), "揺れている間はまだ落下しない");
 
         // 揺れが明けた次のティックで初めて1マス落下する。
         let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
-        assert_eq!(tick.cells_moved, 1);
+        assert_eq!(tick.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
     }

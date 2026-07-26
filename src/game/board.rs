@@ -531,11 +531,23 @@ impl GravityState {
     }
 }
 
+/// 盤面上の座標(行, 列)。
+pub type Pos = (usize, usize);
+
+/// 1回の重力ティックで実際に1マス落下したセル1つぶんの(移動後の位置, 移動前の位置)
+/// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う)。
+pub type BlockMove = (Pos, Pos);
+
 /// 1回の重力ティックの結果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct FallTickOutcome {
-    /// このティックで実際に1マス落下したセルの数(揺れ中のセルは含まない)。
-    pub cells_moved: usize,
+    /// このティックで実際に1マス落下した各セルの(移動後の位置, 移動前の位置)
+    /// (TERM独自拡張。ユーザー指摘: 「ブロックの落ち方をコマ送りでなくピクセル単位で
+    /// 滑らかにしてほしい」)。描画側(render.rs)がこれを使って、移動後の位置から
+    /// 移動前の位置へ向けて補間描画する。押し潰しで消滅したセルは含まない
+    /// (揺れ中のセルも含まない。落下セル数は`.len()`で取れるため別フィールドに
+    /// 重複して持たない)。
+    pub moved_cells: Vec<BlockMove>,
     /// 落下してきたセルがプレイヤー位置に重なった(=押し潰された)かどうか。
     pub crushed: bool,
     /// 落下・着地した結果、同色4連結により自動消滅した色ブロック数
@@ -781,8 +793,6 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
     }
 
     for group in &falling_groups {
-        outcome.cells_moved += group.len();
-
         // 各セルの内容(色ブロックのColorKind・岩ブロックのhits)は`snapshot`から
         // セルごとに個別取得する。グループ代表セル1つの内容を全セルへ使い回すと、
         // 岩ブロックのようにセルごとに異なる付随データ(hits)を持つ塊で、着地後に
@@ -805,6 +815,7 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
                 }
             } else {
                 board.set(to.0, to.1, cell);
+                outcome.moved_cells.push((to, (r, c)));
             }
         }
 
@@ -1418,14 +1429,14 @@ mod tests {
         // 描画側がシェイク演出に使えるデータとして残る(spec.md 4.3)。
         for _ in 0..SHAKE_TICKS {
             let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-            assert_eq!(outcome.cells_moved, 0);
+            assert_eq!(outcome.moved_cells.len(), 0);
             assert!(gravity.is_shaking((0, 0)));
         }
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
 
         // SHAKE_TICKS+1ティック目で実際に1マス落下する
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-        assert_eq!(outcome.cells_moved, 1);
+        assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
         assert!(!gravity.is_shaking((1, 0)), "着地して支持されればもう揺れていない");
@@ -1446,7 +1457,7 @@ mod tests {
 
         // SHAKE_TICKS+1回目の呼び出しで揺れが明けて最初の1マスが落ちる。
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-        assert_eq!(outcome.cells_moved, 1);
+        assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
         assert!(!gravity.is_shaking((1, 0)));
 
@@ -1454,7 +1465,7 @@ mod tests {
         // 揺れ状態(is_shaking)には一切戻らない。
         for expected_row in 2..6 {
             let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-            assert_eq!(outcome.cells_moved, 1, "row={expected_row}到達時点で連続落下しているはず");
+            assert_eq!(outcome.moved_cells.len(), 1, "row={expected_row}到達時点で連続落下しているはず");
             assert_eq!(board.cell(expected_row, 0), Cell::Color(ColorKind::Red));
             assert!(!gravity.is_shaking((expected_row, 0)), "落下中は揺れ状態に戻らないはず");
         }
@@ -1479,7 +1490,7 @@ mod tests {
         gravity.reset_shake_progress(SHAKE_TICKS);
 
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-        assert_eq!(outcome.cells_moved, 1, "reset_shake_progress後も揺れ直さず連続で落下し続けるはず");
+        assert_eq!(outcome.moved_cells.len(), 1, "reset_shake_progress後も揺れ直さず連続で落下し続けるはず");
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
     }
 
@@ -1537,7 +1548,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 2, "上段・下段とも同じティックで一緒に落下するはず");
+        assert_eq!(outcome.moved_cells.len(), 2, "上段・下段とも同じティックで一緒に落下するはず");
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Blue));
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
@@ -1554,7 +1565,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 0);
+        assert_eq!(outcome.moved_cells.len(), 0);
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Blue));
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
     }
@@ -1572,7 +1583,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 3);
+        assert_eq!(outcome.moved_cells.len(), 3);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Green));
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Blue));
         assert_eq!(board.cell(3, 0), Cell::Color(ColorKind::Red));
@@ -1589,7 +1600,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 1, "孤立していても支えが無ければ落ちるはず");
+        assert_eq!(outcome.moved_cells.len(), 1, "孤立していても支えが無ければ落ちるはず");
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
     }
@@ -1610,7 +1621,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 1, "赤ブロックだけが落ちるはず");
+        assert_eq!(outcome.moved_cells.len(), 1, "赤ブロックだけが落ちるはず");
         assert_eq!(board.cell(0, 1), Cell::Empty);
         assert_eq!(board.cell(1, 1), Cell::Color(ColorKind::Red));
         // 青グループは安定したまま動かない
@@ -1632,7 +1643,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity); // 3セル全体が一緒に落下
 
-        assert_eq!(outcome.cells_moved, 3);
+        assert_eq!(outcome.moved_cells.len(), 3);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
@@ -1656,7 +1667,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 3, "3つとも一緒に1マス落下するはず(ちぎれない)");
+        assert_eq!(outcome.moved_cells.len(), 3, "3つとも一緒に1マス落下するはず(ちぎれない)");
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(0, 1), Cell::Empty);
         assert_eq!(board.cell(0, 2), Cell::Empty);
@@ -1678,7 +1689,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.cells_moved, 0);
+        assert_eq!(outcome.moved_cells.len(), 0);
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
         assert_eq!(board.cell(0, 1), Cell::Color(ColorKind::Red));
         assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Red));
@@ -1826,7 +1837,7 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity); // 落下→接触→連結→自動消滅
 
-        assert_eq!(outcome.cells_moved, 2, "落下グループの2個が同時に1マス落ちる");
+        assert_eq!(outcome.moved_cells.len(), 2, "落下グループの2個が同時に1マス落ちる");
         assert_eq!(outcome.auto_vanished_blocks, 4, "接触した結果、合計4個で自動消滅する");
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(board.cell(1, 1), Cell::Empty);
@@ -1972,13 +1983,13 @@ mod tests {
 
         for _ in 0..SHAKE_TICKS {
             let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-            assert_eq!(outcome.cells_moved, 0);
+            assert_eq!(outcome.moved_cells.len(), 0);
             assert!(gravity.is_shaking((0, 0)));
         }
         assert!(matches!(board.cell(0, 0), Cell::Rock { hits: 2 }), "揺れている間はまだ落下しない");
 
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-        assert_eq!(outcome.cells_moved, 1);
+        assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert!(matches!(board.cell(1, 0), Cell::Rock { hits: 2 }), "落下してもhitsは保持される");
         assert!(!gravity.is_shaking((1, 0)), "着地して支持されればもう揺れていない");
@@ -2056,7 +2067,7 @@ mod tests {
         apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 揺れ
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 支持判定
 
-        assert_eq!(outcome.cells_moved, 0, "酸素カプセルは非Emptyなので上のRedは支持され落下しない");
+        assert_eq!(outcome.moved_cells.len(), 0, "酸素カプセルは非Emptyなので上のRedは支持され落下しない");
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
         assert_eq!(board.cell(1, 0), Cell::Oxygen, "酸素カプセルは上書き・消滅していない");
     }
