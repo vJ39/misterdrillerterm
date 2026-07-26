@@ -14,8 +14,9 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_ENTER_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD,
-    BOMB_ROLL_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
+    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS,
+    BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
+    BOMB_SPAWN_DEPTH_MAX_BONUS,
     CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN,
     DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS,
@@ -309,6 +310,11 @@ pub struct Game {
     /// (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
     /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
     recently_vanished: Vec<(board::Pos, Duration)>,
+    /// ボム爆発の爆風が届いた直後のセルと、炎の演出の残り時間・爆心地からの距離
+    /// (TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、ボンバーマンTERMの
+    /// ように炎アニメーションほしい」)。距離(0=爆心地、遠いほど大きい)で炎の色調を
+    /// 変え、`recently_vanished`と同じ考え方で描画側(render.rs)がフラッシュ演出に使う。
+    recently_exploded: Vec<(board::Pos, Duration, u8)>,
     /// GameOverダイアログでの現在の選択項目(TERM独自拡張)。GameOver状態でのみ意味を持つ。
     game_over_selection: GameOverChoice,
     /// `update()`が呼ばれるたびに1増えるフレーム通し番号(TERM独自拡張。#85調査用。
@@ -392,6 +398,7 @@ impl Game {
             render_anim_duration_secs: move_anim_duration_secs(),
             last_block_moves: Vec::new(),
             recently_vanished: Vec::new(),
+            recently_exploded: Vec::new(),
             game_over_selection: GameOverChoice::BackToTitle,
             frame_counter: 0,
             debug_log: None,
@@ -778,6 +785,11 @@ impl Game {
         }
         self.recently_vanished
             .retain(|&(_, remaining)| remaining > Duration::ZERO);
+        for (_, remaining, _) in self.recently_exploded.iter_mut() {
+            *remaining = remaining.saturating_sub(delta);
+        }
+        self.recently_exploded
+            .retain(|&(_, remaining, _)| remaining > Duration::ZERO);
 
         if self.status != GameStatus::Playing {
             return events;
@@ -995,12 +1007,21 @@ impl Game {
                 let bomb = self.bombs.remove(i);
                 let blast_cells = bomb_blast_cells(&self.board, bomb.pos, BOMB_BLAST_RANGE);
                 let mut hit_player = false;
+                let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS);
                 for &(row, col) in &blast_cells {
                     if (row, col) == self.player.position() {
                         hit_player = true;
                     }
                     if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
                         self.board.set(row, col, Cell::Star { visible_ms: 0 });
+                        // 爆心地(ボム設置マス)からの距離が遠いほど炎の色調を外側寄りに
+                        // する(TERM独自拡張。#126。bombermantermの爆風スプライトが
+                        // 中心ほど白熱・外側ほど赤黒くなるのに倣う)。爆風は上下左右の
+                        // 直線上にしか届かないため、マンハッタン距離がそのまま
+                        // 「軸方向に何マス離れているか」と一致する。
+                        let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
+                        self.recently_exploded
+                            .push(((row, col), flash, tier.min(u8::MAX as usize) as u8));
                     }
                 }
                 events.push(GameEvent::BombExploded);
@@ -1195,6 +1216,23 @@ impl Game {
             .iter()
             .find(|&&(p, _)| p == pos)
             .map(|&(_, remaining)| (1.0 - remaining.as_secs_f32() / flash).clamp(0.0, 1.0))
+    }
+
+    /// 描画側が使う、指定セルのボム爆発・炎演出の進捗(0.0=爆発直後、1.0=演出完了
+    /// 直前)と爆心地からの距離(TERM独自拡張。#126)。対象でなければ`None`を返す。
+    pub fn explosion_flash_progress(&self, pos: board::Pos) -> Option<(f32, u8)> {
+        let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS)
+            .as_secs_f32()
+            .max(0.001);
+        self.recently_exploded
+            .iter()
+            .find(|&&(p, _, _)| p == pos)
+            .map(|&(_, remaining, tier)| {
+                (
+                    (1.0 - remaining.as_secs_f32() / flash).clamp(0.0, 1.0),
+                    tier,
+                )
+            })
     }
 
     /// 描画側が使う、ブロック落下ティックの進捗(0.0=直前のティック直後,
@@ -3766,6 +3804,54 @@ mod tests {
             "アイテムブロックは爆風の影響を受けないはず"
         );
         assert!(events.contains(&GameEvent::BombExploded));
+    }
+
+    #[test]
+    fn bomb_explosion_shows_a_flame_flash_on_blast_cells_with_distance_based_tier_that_fades_out_after_the_flash_duration()
+     {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+        });
+        game.board.rows[520][5] = Cell::Rock { hits: 0 }; // 爆心地(距離0)
+        game.board.rows[519][5] = Cell::Rock { hits: 0 }; // 距離1(上方向)
+        game.board.rows[520][7] = Cell::Rock { hits: 0 }; // 距離2(右方向、520,6はEmptyのまま)
+
+        game.update(Duration::from_millis(60));
+
+        let (progress0, tier0) = game
+            .explosion_flash_progress((520, 5))
+            .expect("爆心地は炎演出の対象のはず");
+        assert_eq!(tier0, 0, "爆心地は距離0(炎の中心=CORE)のはず");
+        assert!(progress0 < 0.5, "爆発直後は演出の進捗がまだ浅いはず");
+
+        let (_, tier1) = game
+            .explosion_flash_progress((519, 5))
+            .expect("距離1のセルも炎演出の対象のはず");
+        assert_eq!(tier1, 1, "距離1はMID相当のはず");
+
+        let (_, tier2) = game
+            .explosion_flash_progress((520, 7))
+            .expect("距離2のセルも炎演出の対象のはず");
+        assert_eq!(tier2, 2, "距離2はOUTER相当のはず");
+
+        assert!(
+            game.explosion_flash_progress((500, 5)).is_none(),
+            "爆風の届いていないセルは対象にならないはず"
+        );
+
+        game.update(Duration::from_millis(BOMB_EXPLOSION_FLASH_MS + 10));
+        assert!(
+            game.explosion_flash_progress((520, 5)).is_none(),
+            "演出時間が経過したら炎フラッシュは終わるはず"
+        );
     }
 
     #[test]

@@ -817,7 +817,12 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             // 消滅した直後のセルは一瞬フラッシュしてから背景色へ消えていく
             // (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出して
             // ほしい」)。
-            if cell == BoardCell::Empty
+            // ボム爆発の爆風が届いた直後のセルは、スター変換後の見た目を炎の色で
+            // 一瞬覆う(TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、
+            // ボンバーマンTERMのように炎アニメーションほしい」)。
+            if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
+                fill_block(buf, draw_x, y, colors::explosion_flame_bg(tier, t));
+            } else if cell == BoardCell::Empty
                 && let Some(t) = game.vanish_flash_progress((board_row, col))
             {
                 fill_block(buf, draw_x, y, colors::vanish_flash_bg(t));

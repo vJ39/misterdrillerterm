@@ -116,6 +116,33 @@ pub const BOMB_SPARK_BRIGHT: Color = Color::Rgb(255, 220, 60);
 /// 白ボン(TERM独自拡張。#123)の前景色。名前の通り白系にする。
 pub const SHIROBON_FG: Color = Color::Rgb(240, 240, 240);
 
+/// ボム爆発時の炎アニメーション(TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発する
+/// ときは、ボンバーマンTERMのように炎アニメーションほしい」)。bombermantermの爆風
+/// スプライトに倣い、爆心地に近いほど白熱、遠いほど赤黒くなる3段階の色調にする。
+pub const EXPLOSION_FLAME_CORE: Color = Color::Rgb(255, 250, 220);
+pub const EXPLOSION_FLAME_MID: Color = Color::Rgb(255, 170, 40);
+pub const EXPLOSION_FLAME_OUTER: Color = Color::Rgb(230, 60, 10);
+
+/// 爆風が届いたセルの炎の色を、爆心地からの距離(`tier`: 0=爆心地、数値が大きいほど
+/// 遠い)と演出の進捗(0.0=爆発直後、1.0=演出完了直前)から求める。進捗が進むにつれ
+/// 爆発後に実際に変化する先の見た目(スターブロックの地色`STAR_BG`)へ補間し、炎から
+/// スターの輝きへ自然に移り変わるようにする。
+pub fn explosion_flame_bg(tier: u8, progress: f32) -> Color {
+    let base = match tier {
+        0 => EXPLOSION_FLAME_CORE,
+        1 => EXPLOSION_FLAME_MID,
+        _ => EXPLOSION_FLAME_OUTER,
+    };
+    let t = progress.clamp(0.0, 1.0);
+    let Color::Rgb(ar, ag, ab) = base else {
+        unreachable!("炎の色は常にColor::Rgb")
+    };
+    let Color::Rgb(br, bg, bb) = STAR_BG else {
+        unreachable!("STAR_BGは常にColor::Rgb")
+    };
+    Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+}
+
 /// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
 /// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、
 /// その後`melt_duration_ms`かけて進行度が1.0(消滅)まで進む。
