@@ -1180,11 +1180,17 @@ fn draw_logical_cell(
             colors::DIAMOND_FG,
             colors::DIAMOND_BG,
         ),
-        BoardCell::Star { visible_ms } => draw_fixed_unit(
+        // スターブロックは氷の結晶のようにきらめかせる(TERM独自拡張。#134。ユーザー
+        // 指摘: 「スター化したブロックはもっとキラキラしたモーションしてほしい
+        // 本当に氷見たく いまのままだとただの白い正方形だ」)。#128/#132と同じく
+        // `draw_rounded_unit`で正方形の塗りつぶしをやめ、さらに4マスを同時に一斉
+        // 点滅させるのでなく`star_sparkle_content`で位置ごとに位相をずらし、複数
+        // 箇所が順にきらめくようにする。
+        BoardCell::Star { visible_ms } => draw_rounded_unit(
             buf,
             x,
             y,
-            [[star_glyph(visible_ms); 2]; 2],
+            star_sparkle_content(visible_ms),
             colors::STAR_FG,
             colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         ),
@@ -1232,6 +1238,28 @@ fn star_glyph(visible_ms: u32) -> char {
     } else {
         '★'
     }
+}
+
+/// スターブロック内の4マス(2列×2行)ぶんの位相ずれ(TERM独自拡張。#134。ユーザー
+/// 指摘: 「スター化したブロックはもっとキラキラしたモーションしてほしい 本当に
+/// 氷見たく いまのままだとただの白い正方形だ」)。4マスが完全に同時に一斉点滅する
+/// と結局「均一な四角」にしか見えないため、位置ごとに`STAR_SPARKLE_PERIOD_MS`の
+/// 1/4ずつ位相をずらし、氷の結晶のように複数箇所が順にきらめくようにする。
+const STAR_SPARKLE_PHASE_OFFSETS_MS: [[u32; 2]; 2] = [
+    [0, STAR_SPARKLE_PERIOD_MS / 4],
+    [STAR_SPARKLE_PERIOD_MS / 2, STAR_SPARKLE_PERIOD_MS * 3 / 4],
+];
+
+/// スターブロックの`draw_rounded_unit`用の中央2列×2行のコンテンツを、位置ごとに
+/// 位相をずらした`star_glyph`で組み立てる(TERM独自拡張。#134)。
+fn star_sparkle_content(visible_ms: u32) -> [[char; 2]; 2] {
+    let mut content = [[' '; 2]; 2];
+    for (row, offsets) in STAR_SPARKLE_PHASE_OFFSETS_MS.iter().enumerate() {
+        for (col, &offset) in offsets.iter().enumerate() {
+            content[row][col] = star_glyph(visible_ms.wrapping_add(offset));
+        }
+    }
+    content
 }
 
 /// バッファ1マスへ文字・前景色・背景色を明示的に設定する(範囲外は無視)。
@@ -1727,6 +1755,46 @@ mod tests {
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS), '★');
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS * 2 - 1), '★');
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS * 2), '☆');
+    }
+
+    #[test]
+    fn star_sparkle_content_staggers_the_four_positions_instead_of_flashing_in_unison() {
+        // ユーザー指摘: 「スター化したブロックはもっとキラキラしたモーションして
+        // ほしい 本当に氷見たく いまのままだとただの白い正方形だ」。4マスが完全に
+        // 同時に切り替わってしまうと結局「均一な四角」にしか見えないため、位置に
+        // よって☆/★の切り替わるタイミングがずれている(=ある瞬間には両方の記号が
+        // 混在する)ことを確認する。
+        let mut saw_mixed = false;
+        for visible_ms in (0..STAR_SPARKLE_PERIOD_MS).step_by(10) {
+            let content = star_sparkle_content(visible_ms);
+            let flat = [content[0][0], content[0][1], content[1][0], content[1][1]];
+            if flat.contains(&'☆') && flat.contains(&'★') {
+                saw_mixed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_mixed,
+            "位相がずれていれば、ある時点で☆と★が混在する瞬間があるはず"
+        );
+    }
+
+    #[test]
+    fn star_block_has_its_corners_cut_to_the_field_background_not_a_flat_square() {
+        // ユーザー指摘: 「いまのままだとただの白い正方形だ」。AIR(#128)・アイテム
+        // (#132)と同じく、四隅がフィールド背景色まで欠き取られていることを確認する。
+        let inner = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(inner);
+        let bg = colors::star_bg(0, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS);
+        draw_rounded_unit(&mut buf, 0, 0, star_sparkle_content(0), colors::STAR_FG, bg);
+
+        for &(x, y) in &[(0u16, 0u16), (3, 0), (0, 1), (3, 1)] {
+            assert_eq!(
+                buf.cell(Position::new(x, y)).unwrap().bg,
+                colors::FIELD_EMPTY_BG,
+                "四隅({x},{y})はフィールド背景色まで欠き取られているはず"
+            );
+        }
     }
 
     #[test]
