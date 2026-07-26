@@ -3918,6 +3918,96 @@ mod tests {
     }
 
     #[test]
+    fn a_falling_rock_stops_on_top_of_a_stationary_diamond_directly_in_its_path() {
+        // #85再調査(2026/07/27): 実プレイのフレーム単位キャプチャで、静止したダイヤ
+        // ブロックの真上を、別に落下中の岩ブロックが1マスずつ近づいてくる状況を確認した。
+        // 本来、岩がダイヤの1マス上に来た時点で「直下(ダイヤ)が非Empty」により支持され、
+        // そこで止まってダイヤの上に乗るはずである。ところが実際のログでは、岩が
+        // ダイヤの座標へ何の抵抗もなく通過していた(ダイヤ側にはmove/vanishどちらの
+        // 記録も一切残らないまま消えていた)。この再現テストは、その状況(静止した
+        // 単独セルの真上を、別カラムからではなく同一カラムで落下中の塊が1マスずつ
+        // 接近する)を直接構築し、岩が正しくダイヤの上で止まる(=ダイヤを通過しない)
+        // ことを確認する。
+        let mut board = empty_board(10);
+        board.rows[8][3] = Cell::Diamond;
+        board.rows[9][3] = Cell::Rock { hits: 0 }; // ダイヤ自身の支え(最深行そのものでもよい)
+        board.rows[0][3] = Cell::Rock { hits: 0 }; // 同じ列を落ちてくる、無関係な岩
+        let mut gravity = GravityState::new();
+        let player_pos = (usize::MAX, usize::MAX);
+
+        for tick in 0..((SHAKE_TICKS as usize + 1) * 10) {
+            let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            if board.cell(8, 3) != Cell::Diamond {
+                let logged = outcome
+                    .vanished_cells
+                    .iter()
+                    .any(|&(pos, kind)| pos == (8, 3) && kind == Cell::Diamond);
+                assert!(
+                    logged,
+                    "tick={tick}: (8,3)のダイヤがログに残らず盤面から消えた(自動消滅対象ではないはず)"
+                );
+            }
+        }
+
+        assert_eq!(
+            board.cell(8, 3),
+            Cell::Diamond,
+            "ダイヤは(押し潰し等の正規経路がない限り)最後まで(8,3)に残っているはず"
+        );
+        assert_eq!(
+            board.cell(7, 3),
+            Cell::Rock { hits: 0 },
+            "落ちてきた岩はダイヤの1マス上(7,3)で止まって乗っているはず(ダイヤを素通りしていないか)"
+        );
+    }
+
+    #[test]
+    fn a_stationary_diamond_survives_a_wide_simultaneous_multi_column_cascade_passing_beside_it() {
+        // #85再調査: 単純な「岩1個がダイヤ1個の真上に近づく」だけの再現テスト
+        // (a_falling_rock_stops_on_top_of_a_stationary_diamond_directly_in_its_path)では
+        // 再現しなかった。実プレイのログでは、静止したダイヤの列(col5)だけでなく
+        // 隣接列(col6・col7)でも同時に別の塊(ダイヤ・色ブロック混在)が同じペースで
+        // 落下しており、しかもダイヤが消えたのと同じtickで隣列の塊が真横(同じ行)へ
+        // 着地していた。この、より実プレイに近い「複数列が同時に連鎖落下し、静止した
+        // 単独セルの真横にも別の塊が同じ行へ着地する」状況を再現し、ダイヤが
+        // 通過されず・ログにも残らず消えないことを確認する。
+        let mut board = empty_board(20);
+        // col3: 静止しているはずのダイヤ(row19=最深行、常に支持される)。
+        board.rows[19][3] = Cell::Diamond;
+        // col2・col3・col4(ダイヤの列の両隣に直接隣接)に、遠く上から落ちてくる
+        // 単独セルを1個ずつ置く(実ログ同様、何tickもかけて1マスずつ近づく状況を
+        // 模す)。col2・col4は色ブロック(岩と結合しないので隣接していても4連結には
+        // ならない)、col3はダイヤと同じ列の岩(実ログのcol5と同じ関係)。
+        board.rows[0][2] = Cell::Color(ColorKind::Blue);
+        board.rows[0][3] = Cell::Rock { hits: 0 };
+        board.rows[0][4] = Cell::Color(ColorKind::Green);
+
+        let mut gravity = GravityState::new();
+        let player_pos = (usize::MAX, usize::MAX);
+
+        for tick in 0..((SHAKE_TICKS as usize + 1) * 20) {
+            let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            if board.cell(19, 3) != Cell::Diamond {
+                let logged = outcome
+                    .vanished_cells
+                    .iter()
+                    .any(|&(pos, kind)| pos == (19, 3) && kind == Cell::Diamond);
+                assert!(
+                    logged,
+                    "tick={tick}: (19,3)のダイヤがログに残らず盤面から消えた(自動消滅対象ではないはず): moved={:?} vanished={:?}",
+                    outcome.moved_cells, outcome.vanished_cells
+                );
+            }
+        }
+
+        assert_eq!(
+            board.cell(19, 3),
+            Cell::Diamond,
+            "同一列を単独セルの岩が素通りするなどして、ダイヤは(19,3)に残っているはず"
+        );
+    }
+
+    #[test]
     fn diamond_count_is_conserved_across_many_gravity_ticks_on_random_boards() {
         // #85再調査(2026/07/27): プレイ中のスクリーンショットで、単独のダイヤブロックが
         // 移動(move)・消滅(vanish)どちらのログにも一度も現れないまま盤面から消えている
