@@ -30,7 +30,7 @@
 
 ## BGM
 
-自作曲「地底のダンス」
+「地底のダンス」
 
 <video src="https://github.com/vJ39/misterdrillerterm/raw/main/assets/chitei-no-dance.mp4" controls width="480"></video>
 
