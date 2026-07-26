@@ -487,6 +487,11 @@ impl Game {
             // 空いている(=次の自由落下tickで必ず1マス落ちる)間は横移動を受け付けない。
             return Vec::new();
         }
+        if !self.push_bomb_in_the_way(dir) {
+            // 押し出せなかった(押し出し先が塞がっている)ので、壁にぶつかった
+            // 時と同じ扱いでこの場に留まる(TERM独自拡張。#149)。
+            return Vec::new();
+        }
 
         let before = self.player.position();
         let outcome = physics::move_lateral(&mut self.board, &mut self.player, dir);
@@ -505,6 +510,51 @@ impl Game {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// 移動先セルに静止中(Settling/Ticking、まだ登場・投擲演出中のEntering/Rolling
+    /// は対象外)のボムがあれば、進行方向へさらに1マス押し出す(TERM独自拡張。#149。
+    /// ユーザー指摘: 「爆弾はキャラが押したらそっちに転がる」)。押し出したボムは
+    /// Settling(左右バウンド中)へ遷移させ、以後は既存の重力・バウンド判定
+    /// (#140/#143/#144)にそのまま委ねる。押し出し先が盤面外・ブロック・他の
+    /// ボムで塞がっていて動かせない場合は`false`を返し、呼び出し側で移動そのものを
+    /// 妨げる(壁にぶつかった時と同じ扱い)。ボムが無い、またはまだ登場・投擲演出中
+    /// であれば何もせず`true`を返す(移動を妨げない)。
+    fn push_bomb_in_the_way(&mut self, dir: Direction) -> bool {
+        let (_, dc) = dir.delta();
+        let nc = self.player.col as isize + dc;
+        if nc < 0 || nc as usize >= self.board.width() {
+            return true; // 盤面外は既存の境界チェック(physics::move_lateral)に任せる。
+        }
+        let nc = nc as usize;
+        let row = self.player.row;
+
+        let Some(bomb_index) = self.bombs.iter().position(|b| {
+            b.pos == (row, nc) && matches!(b.phase, BombPhase::Settling | BombPhase::Ticking)
+        }) else {
+            return true;
+        };
+
+        let push_c = nc as isize + dc;
+        if push_c < 0 || push_c as usize >= self.board.width() {
+            return false;
+        }
+        let push_pos = (row, push_c as usize);
+        let occupied_by_other_bomb = self
+            .bombs
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i != bomb_index && b.pos == push_pos);
+        if self.board.cell(push_pos.0, push_pos.1) != Cell::Empty || occupied_by_other_bomb {
+            return false;
+        }
+
+        let bomb = &mut self.bombs[bomb_index];
+        bomb.pos = push_pos;
+        bomb.phase = BombPhase::Settling;
+        bomb.phase_elapsed_ms = 0;
+        bomb.settle_bounce_dir = if dc > 0 { 1 } else { -1 };
+        true
     }
 
     /// ↑ キー: facingをUpに変更するのみ(移動・掘削は発生しない。spec.md 1章)。
@@ -3850,6 +3900,138 @@ mod tests {
 
     // --- ボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、爆弾をランダムに投げて
     // くるイメージで、敵は出現しないものとする」) ---
+
+    #[test]
+    fn pushing_into_a_resting_bomb_rolls_it_further_in_the_move_direction() {
+        // ユーザー指摘: 「爆弾はキャラが押したらそっちに転がる」(#149)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場(横移動には支持が必要)
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right();
+
+        assert_eq!(
+            game.player.col, 6,
+            "ボムが押し出された先(元のボムの位置)へ移動できるはず"
+        );
+        assert_eq!(
+            game.bombs[0].pos,
+            (500, 7),
+            "ボムはさらに進行方向へ1マス押し出されるはず"
+        );
+        assert_eq!(
+            game.bombs[0].phase,
+            BombPhase::Settling,
+            "押し出されたボムはSettling(左右バウンド中)へ遷移するはず"
+        );
+        assert_eq!(
+            game.bombs[0].settle_bounce_dir, 1,
+            "押した方向(右)へバウンドする向きになっているはず"
+        );
+    }
+
+    #[test]
+    fn pushing_a_bomb_against_a_wall_blocks_the_move() {
+        // 押し出し先が塞がっていれば、壁にぶつかった時と同じくその場に留まるはず
+        // (TERM独自拡張。#149)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][7] = Cell::Rock { hits: 0 }; // 押し出し先を塞ぐ壁
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right();
+
+        assert_eq!(game.player.col, 5, "押し出せないので移動しないはず");
+        assert_eq!(game.bombs[0].pos, (500, 6), "ボムも動かないはず");
+        assert_eq!(
+            game.bombs[0].phase,
+            BombPhase::Ticking,
+            "押し出せなかったボムの段階は変わらないはず"
+        );
+    }
+
+    #[test]
+    fn pushing_a_bomb_into_another_bomb_blocks_the_move() {
+        // 押し出し先に既に他のボムが居座っていれば、同じく移動を妨げるはず
+        // (TERM独自拡張。#149。#143の「爆弾は爆弾に重ならない」と一貫させる)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+        game.bombs.push(Bomb {
+            pos: (500, 7),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right();
+
+        assert_eq!(game.player.col, 5, "押し出せないので移動しないはず");
+        assert_eq!(game.bombs[0].pos, (500, 6), "手前のボムも動かないはず");
+    }
+
+    #[test]
+    fn walking_toward_a_bomb_still_entering_does_not_push_it() {
+        // 登場・投擲演出中(Entering/Rolling)のボムはまだ「静止」していないため、
+        // 押し出しの対象外(TERM独自拡張。#149)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right();
+
+        assert_eq!(
+            game.player.col, 6,
+            "Enteringのボムは押し出し判定の対象外で、通常通り移動できるはず"
+        );
+        assert_eq!(
+            game.bombs[0].pos,
+            (500, 6),
+            "Enteringのボムの位置は変わらないはず"
+        );
+    }
 
     #[test]
     fn debug_place_bomb_spawns_at_the_only_empty_cell_within_visible_range() {
