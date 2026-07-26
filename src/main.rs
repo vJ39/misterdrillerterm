@@ -660,15 +660,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
 /// MUSIC設定・現在の画面から、実際にBGMスレッドで鳴らすべきかを判定する(TERM独自
 /// 拡張。ユーザー指摘: 「タイトル画面ではMUSIC無し」「ゲームオーバーになったら、
-/// ゲームオーバーの短いミス音の後、MUSIC停止」)。タイトル画面・ゲームオーバー中は
-/// MUSIC設定のON/OFFに関わらず常に無音にする。
+/// ゲームオーバーの短いミス音の後、MUSIC停止」「ゴールしたらMUSICとめてファンファーレ
+/// でしょう」)。タイトル画面・ゲームオーバー中・ゴールクリア後はMUSIC設定のON/OFFに
+/// 関わらず常に無音にする(クリアファンファーレはBGMと別にSEとして再生される)。
 fn effective_music_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
     if !settings_music_enabled {
         return false;
     }
     match screen {
         Screen::Title => false,
-        Screen::Playing(game) => game.status != GameStatus::GameOver,
+        Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
         Screen::Settings | Screen::Help => true,
     }
 }
@@ -805,5 +806,33 @@ mod tests {
         assert!(!effective_music_enabled(false, &Screen::Settings));
         assert!(effective_music_enabled(true, &Screen::Help));
         assert!(!effective_music_enabled(false, &Screen::Help));
+    }
+
+    #[test]
+    fn effective_music_enabled_is_true_while_playing_or_paused() {
+        let game = Game::new(1);
+        assert!(effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+
+        let mut game = Game::new(1);
+        game.status = GameStatus::Paused;
+        assert!(effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+    }
+
+    #[test]
+    fn effective_music_enabled_is_false_on_game_over() {
+        // ユーザー指摘: 「ゲームオーバーになったら、ゲームオーバーの短いミス音の後、
+        // MUSIC停止」。
+        let mut game = Game::new(1);
+        game.status = GameStatus::GameOver;
+        assert!(!effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+    }
+
+    #[test]
+    fn effective_music_enabled_is_false_on_cleared() {
+        // ユーザー指摘: 「ゴールしたらMUSICとめてファンファーレでしょう」。
+        // クリア時はBGMを止め、ファンファーレはSEとして別途再生する。
+        let mut game = Game::new(1);
+        game.status = GameStatus::Cleared;
+        assert!(!effective_music_enabled(true, &Screen::Playing(Box::new(game))));
     }
 }

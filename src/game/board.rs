@@ -447,13 +447,14 @@ impl Board {
                     matches!(left, Some(Cell::Rock { .. })) || matches!(top, Some(Cell::Rock { .. }));
                 let rock_cluster_bonus = if adjacent_is_rock { rock_cluster_bonus_if_adjacent } else { 0.0 };
 
-                // スターへの再抽選は、元が色ブロック(またはスター自身)だったセルに限る
-                // (TERM独自拡張。ユーザー指摘: 「スターブロックに変わる対象ブロックは
-                // 色ブロックのみで、Xブロック、ダイヤブロック、AIRは対象外とする」)。
-                // 揺れ中/落下中のセルも対象外にする(ユーザー指摘: 「ぐらぐら/落下中の
-                // ブロックはスターブロックへの変化対象外とする」)。
-                let was_rock_diamond_or_oxygen = matches!(current, Cell::Rock { .. } | Cell::Diamond | Cell::Oxygen);
-                let allow_star = !was_rock_diamond_or_oxygen && !gravity.is_shaking((row, col));
+                // スターへの再抽選は、元がXブロックまたはダイヤブロックだったセルに限る
+                // (TERM独自拡張。ユーザー指摘: 「スターブロックに変わるのはXブロックと
+                // ダイヤブロックだけという前提にする」。以前は逆に色ブロックのみが対象
+                // だったが、この指示により反転した)。揺れ中/落下中のセルは対象外にする
+                // (ユーザー指摘: 「ぐらぐら/落下中のブロックはスターブロックへの変化
+                // 対象外とする」)。
+                let was_rock_or_diamond = matches!(current, Cell::Rock { .. } | Cell::Diamond);
+                let allow_star = was_rock_or_diamond && !gravity.is_shaking((row, col));
 
                 self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
                     &mut rng,
@@ -1144,24 +1145,23 @@ mod tests {
     }
 
     #[test]
-    fn reroll_overlays_from_row_never_converts_existing_rock_diamond_or_oxygen_cells_into_stars() {
-        // ユーザー指摘: 「スターブロックに変わる対象ブロックは色ブロックのみで、Xブロック、
-        // ダイヤブロック、AIRは対象外とする」。既存のRock/Diamond/Oxygenセルは、岩/ダイヤ/AIR
-        // 配分率を0%にしてスター配分率を上限にしても、スターへは変わらないことを確認する。
+    fn reroll_overlays_from_row_never_converts_existing_color_or_oxygen_cells_into_stars() {
+        // ユーザー指摘: 「スターブロックに変わるのはXブロックとダイヤブロックだけという
+        // 前提にする」(#71の色ブロックのみルールから反転)。既存のColor/Oxygenセルは、
+        // スター配分率を上限にしても、スターへは変わらないことを確認する。
         let mut board = empty_board(3);
         for col in 0..FIELD_WIDTH {
-            board.rows[0][col] = Cell::Rock { hits: 0 };
-            board.rows[1][col] = Cell::Diamond;
-            board.rows[2][col] = Cell::Oxygen;
+            board.rows[0][col] = Cell::Color(ColorKind::Red);
+            board.rows[1][col] = Cell::Oxygen;
         }
 
         board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &GravityState::new());
 
-        for row in 0..3 {
+        for row in 0..2 {
             for col in 0..FIELD_WIDTH {
                 assert!(
                     !matches!(board.cell(row, col), Cell::Star { .. }),
-                    "row={row} col={col}は元がRock/Diamond/Oxygenなのでスターへ変わらないはず: {:?}",
+                    "row={row} col={col}は元がColor/Oxygenなのでスターへ変わらないはず: {:?}",
                     board.cell(row, col)
                 );
             }
@@ -1169,11 +1169,30 @@ mod tests {
     }
 
     #[test]
+    fn reroll_overlays_from_row_can_convert_existing_rock_or_diamond_cells_into_stars() {
+        // ユーザー指摘: 「スターブロックに変わるのはXブロックとダイヤブロックだけという
+        // 前提にする」。既存のRock/Diamondセルは、スター配分率を上限にすれば
+        // スターへ変わり得ることを統計的に確認する(0件は不自然)。
+        let mut board = empty_board(500);
+        for row in 0..500 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = if col % 2 == 0 { Cell::Rock { hits: 0 } } else { Cell::Diamond };
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &GravityState::new());
+
+        let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
+        assert!(star_count > 0, "Xブロック・ダイヤブロックはスターへ変わり得るはず(0件は不自然)");
+    }
+
+    #[test]
     fn reroll_overlays_from_row_never_converts_shaking_cells_into_stars() {
         // ユーザー指摘: 「ぐらぐら/落下中のブロックはスターブロックへの変化対象外とする」。
+        // 元がRockなら本来スター化対象だが、揺れ中は除外されることを確認する。
         let mut board = empty_board(1);
         for col in 0..FIELD_WIDTH {
-            board.rows[0][col] = Cell::Color(ColorKind::Red);
+            board.rows[0][col] = Cell::Rock { hits: 0 };
         }
         let mut gravity = GravityState::new();
         for col in 0..FIELD_WIDTH {
