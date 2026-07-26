@@ -18,14 +18,6 @@
 
 岩ブロック(灰色)は掘削不可。迂回して進む必要がある。
 
-## BGM
-
-「地底のダンス」
-
-<video src="https://github.com/vJ39/misterdrillerterm/raw/main/assets/chitei-no-dance.mp4" controls width="480"></video>
-
-[🎬 mp4](assets/chitei-no-dance.mp4) / [🎵 mp3](assets/chitei-no-dance.mp3)
-
 ## ビルド方法
 
 実装が揃い次第、通常のcargoプロジェクトとしてビルド・実行できるようにする予定。
