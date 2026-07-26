@@ -358,6 +358,9 @@ pub enum SettingsChoice {
     /// キャラに関する落下などの設定がなくなってる」を受け、設定画面からも
     /// 調整できるようにした。
     PlayerFallSpeed,
+    /// 横移動(MoveLeft/MoveRight)のクールダウン間隔(ms、小さいほど速い)。TERM独自
+    /// 拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」。
+    MoveSpeed,
     /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms)。
     /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」。
     DodgeRecoveryMs,
@@ -376,7 +379,8 @@ impl SettingsChoice {
             SettingsChoice::ColorCount => SettingsChoice::ColorClusterRate,
             SettingsChoice::ColorClusterRate => SettingsChoice::BlockFallSpeed,
             SettingsChoice::BlockFallSpeed => SettingsChoice::PlayerFallSpeed,
-            SettingsChoice::PlayerFallSpeed => SettingsChoice::DodgeRecoveryMs,
+            SettingsChoice::PlayerFallSpeed => SettingsChoice::MoveSpeed,
+            SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::Music,
         }
     }
@@ -396,7 +400,8 @@ impl SettingsChoice {
             SettingsChoice::ColorClusterRate => SettingsChoice::ColorCount,
             SettingsChoice::BlockFallSpeed => SettingsChoice::ColorClusterRate,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::BlockFallSpeed,
-            SettingsChoice::DodgeRecoveryMs => SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::MoveSpeed => SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::DodgeRecoveryMs => SettingsChoice::MoveSpeed,
         }
     }
 }
@@ -417,6 +422,7 @@ pub fn draw_settings(
     color_cluster_rate_percent: u32,
     block_fall_tick_ms: u64,
     player_fall_tick_ms: u64,
+    move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
 ) {
     let area = frame.area();
@@ -481,6 +487,11 @@ pub fn draw_settings(
             "キャラの落下速度(小さいほど速い)",
             player_fall_tick_ms,
             selection == SettingsChoice::PlayerFallSpeed,
+        ),
+        ms_line(
+            "横移動速度(小さいほど速い)",
+            move_cooldown_ms,
+            selection == SettingsChoice::MoveSpeed,
         ),
         ms_line(
             "回避後の硬直時間",
@@ -1169,6 +1180,7 @@ mod tests {
             SettingsChoice::ColorClusterRate,
             SettingsChoice::BlockFallSpeed,
             SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::MoveSpeed,
             SettingsChoice::DodgeRecoveryMs,
         ];
         for choice in all {

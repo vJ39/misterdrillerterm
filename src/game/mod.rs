@@ -18,7 +18,8 @@ use crate::constants::{
     FALL_SPEED_DEPTH_MAX_SPEEDUP,
     FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS,
     LIVES_DEFAULT, LIVES_MAX,
-    MOVE_ANIM_DURATION_MS, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
+    MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
+    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
 };
 use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
@@ -173,6 +174,11 @@ pub struct Game {
     /// プレイヤー自身の自由落下tick間隔(ms)。既定は`FALL_TICK_MS`だが、デバッグショートカット
     /// (`debug_adjust_player_fall_speed`)で動作確認用に実行時調整できる(TERM独自拡張)。
     player_fall_tick_ms: u64,
+    /// 横移動(MoveLeft/MoveRight)のクールダウン間隔(ms、小さいほど速い)。既定は
+    /// `MOVE_COOLDOWN_MS_DEFAULT`(`INPUT_COOLDOWN_MS`相当)だが、設定画面から調整
+    /// できる(TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
+    /// 掘削(Drill)のクールダウンは対象外で、引き続き`INPUT_COOLDOWN_MS`固定のまま。
+    move_cooldown_ms: u64,
     /// 移動系入力(MoveLeft/MoveRight)専用のクールダウン。掘削(Drill)とは別に管理する
     /// (TERM独自拡張。ユーザー指摘: 「カーソルとスペース、両方押してるときにどちらかが
     /// 効かない」。1つの共有クールダウンだと、同一フレームで移動キーと掘削キーが両方
@@ -272,9 +278,10 @@ impl Game {
             block_fall_tick_ms: FALL_TICK_MS,
             player_fall_tick_ms: FALL_TICK_MS,
             shake_duration_ms: SHAKE_DURATION_MS,
+            move_cooldown_ms: MOVE_COOLDOWN_MS_DEFAULT,
             // ゲーム開始直後は即座に入力を受理できるよう、アキュムレータを満タン
             // (=1クールダウンぶん貯まっている状態)から始める。
-            move_cooldown_accum: Duration::from_millis(INPUT_COOLDOWN_MS),
+            move_cooldown_accum: Duration::from_millis(MOVE_COOLDOWN_MS_DEFAULT),
             drill_cooldown_accum: Duration::from_millis(INPUT_COOLDOWN_MS),
             oxygen_warning_accum: Duration::ZERO,
             invulnerability_ticks_remaining: 0,
@@ -427,7 +434,7 @@ impl Game {
         if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
         }
-        let slot = Duration::from_millis(INPUT_COOLDOWN_MS);
+        let slot = Duration::from_millis(self.move_cooldown_ms);
         if self.move_cooldown_accum < slot {
             return false;
         }
@@ -662,9 +669,13 @@ impl Game {
         if !was_dying {
             self.player.elapsed_seconds += delta.as_secs_f32();
 
-            let accum_cap = Duration::from_millis(INPUT_COOLDOWN_ACCUM_CAP_MS);
-            self.move_cooldown_accum = (self.move_cooldown_accum + delta).min(accum_cap);
-            self.drill_cooldown_accum = (self.drill_cooldown_accum + delta).min(accum_cap);
+            // 移動クールダウンは設定で変えられるため、上限も現在の値の1.5倍で都度計算する
+            // (TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
+            // 掘削クールダウンは引き続き固定値なので、既存の定数上限のままでよい。
+            let move_accum_cap = Duration::from_millis(self.move_cooldown_ms + self.move_cooldown_ms / 2);
+            let drill_accum_cap = Duration::from_millis(INPUT_COOLDOWN_ACCUM_CAP_MS);
+            self.move_cooldown_accum = (self.move_cooldown_accum + delta).min(move_accum_cap);
+            self.drill_cooldown_accum = (self.drill_cooldown_accum + delta).min(drill_accum_cap);
             self.drill_flash_remaining = self.drill_flash_remaining.saturating_sub(delta);
 
             // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
@@ -1009,6 +1020,13 @@ impl Game {
         self.player_fall_tick_ms = ms.clamp(DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_MS_MAX);
     }
 
+    /// 横移動のクールダウン間隔を直接指定する(起動時、Settingsから読み込んだ値を適用する
+    /// 用途。TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
+    /// 範囲外の値は`MOVE_COOLDOWN_MS_MIN`〜`MAX`にクランプする。
+    pub fn set_move_cooldown_ms(&mut self, ms: u64) {
+        self.move_cooldown_ms = ms.clamp(MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_MAX);
+    }
+
     /// 現在の揺れ時間(ms)。設定の永続化(main.rs/Settings)用に公開する。
     pub fn shake_duration_ms(&self) -> u64 {
         self.shake_duration_ms
@@ -1308,6 +1326,37 @@ mod tests {
 
         assert_eq!(game.player.col, col_after_first);
         assert_ne!(col_before, col_after_first);
+    }
+
+    #[test]
+    fn set_move_cooldown_ms_clamps_to_min_and_max() {
+        let mut game = Game::new(4);
+        game.set_move_cooldown_ms(0);
+        assert_eq!(game.move_cooldown_ms, crate::constants::MOVE_COOLDOWN_MS_MIN);
+
+        game.set_move_cooldown_ms(u64::MAX);
+        assert_eq!(game.move_cooldown_ms, crate::constants::MOVE_COOLDOWN_MS_MAX);
+    }
+
+    #[test]
+    fn set_move_cooldown_ms_changes_how_quickly_repeated_moves_are_accepted() {
+        // ユーザー指摘: 「横移動のスピードを設定で変えられるように」。設定値を小さく
+        // すると、既定(INPUT_COOLDOWN_MS=80ms)では通らないはずの短い間隔でも
+        // 次の移動入力が通ることを確認する。
+        let mut game = Game::new(5);
+        for col in 0..FIELD_WIDTH {
+            game.board.rows[game.player.row + 1][col] = Cell::Rock { hits: 0 };
+        }
+        game.set_move_cooldown_ms(crate::constants::MOVE_COOLDOWN_MS_MIN);
+
+        game.try_move_right();
+        let col_after_first = game.player.col;
+        // MOVE_COOLDOWN_MS_MIN(20ms)は上回るが、既定のINPUT_COOLDOWN_MS(80ms)は
+        // 上回らない経過時間を進める。
+        game.update(Duration::from_millis(30));
+        game.try_move_right();
+
+        assert_ne!(game.player.col, col_after_first, "短いクールダウン設定なら次の移動が通るはず");
     }
 
     #[test]

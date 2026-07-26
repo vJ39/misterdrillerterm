@@ -76,6 +76,15 @@ pub const INPUT_COOLDOWN_MS: u64 = 80;
 /// 場合の「うなり」を軽減するため、多少のオーバーシュートは許容しつつ上限を設ける。
 pub const INPUT_COOLDOWN_ACCUM_CAP_MS: u64 = INPUT_COOLDOWN_MS + INPUT_COOLDOWN_MS / 2;
 
+/// 横移動(MoveLeft/MoveRight)のクールダウン間隔設定(ms、小さいほど速い。TERM独自
+/// 拡張)。掘削(Drill)のクールダウンは`INPUT_COOLDOWN_MS`固定のままで、この設定の
+/// 対象外。ユーザー指摘: 「横移動のスピードを設定で変えられるように」。設定画面から
+/// 調整でき、settings.jsonに永続化する。
+pub const MOVE_COOLDOWN_MS_DEFAULT: u64 = INPUT_COOLDOWN_MS;
+pub const MOVE_COOLDOWN_MS_MIN: u64 = 20;
+pub const MOVE_COOLDOWN_MS_MAX: u64 = 300;
+pub const MOVE_COOLDOWN_MS_STEP: u64 = 20;
+
 /// 落下ブロックに押し潰された際、GameOverオーバーレイを表示するまでの一呼吸
 /// (「潰れた」見た目に切り替えておく時間、ms。TERM独自拡張、9章)。ライフが
 /// 残っていて続行する場合は`CRUSH_ASCEND_MS`の演出に置き換わる(そちらの方が

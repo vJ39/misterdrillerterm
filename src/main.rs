@@ -22,8 +22,8 @@ use rodio::mixer::Mixer;
 use constants::{
     COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
-    SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
-    STAR_SPAWN_RATE_PERCENT_MIN,
+    MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -204,6 +204,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::ColorClusterRate
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
+                            | ui::render::SettingsChoice::MoveSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
@@ -238,6 +239,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings_selection,
                                 ui::render::SettingsChoice::BlockFallSpeed
                                     | ui::render::SettingsChoice::PlayerFallSpeed
+                                    | ui::render::SettingsChoice::MoveSpeed
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
                             ) =>
                     {
@@ -250,6 +252,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::PlayerFallSpeed => {
                                 settings.player_fall_tick_ms = adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
                                 game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
+                            }
+                            ui::render::SettingsChoice::MoveSpeed => {
+                                settings.move_cooldown_ms = adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
+                                game.set_move_cooldown_ms(settings.move_cooldown_ms);
                             }
                             ui::render::SettingsChoice::DodgeRecoveryMs => {
                                 settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
@@ -415,6 +421,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.color_cluster_rate_percent,
                             settings.block_fall_tick_ms,
                             settings.player_fall_tick_ms,
+                            settings.move_cooldown_ms,
                             settings.dodge_recovery_ms,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
@@ -438,6 +445,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.color_cluster_rate_percent,
                     settings.block_fall_tick_ms,
                     settings.player_fall_tick_ms,
+                    settings.move_cooldown_ms,
                     settings.dodge_recovery_ms,
                 )
             })?;
@@ -475,6 +483,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::ColorClusterRate
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
+                            | ui::render::SettingsChoice::MoveSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
@@ -511,6 +520,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::ColorClusterRate
                                 | ui::render::SettingsChoice::BlockFallSpeed
                                 | ui::render::SettingsChoice::PlayerFallSpeed
+                                | ui::render::SettingsChoice::MoveSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                         ) =>
                     {
@@ -551,6 +561,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::PlayerFallSpeed => {
                                 settings.player_fall_tick_ms = adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
                             }
+                            ui::render::SettingsChoice::MoveSpeed => {
+                                settings.move_cooldown_ms = adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
+                            }
                             ui::render::SettingsChoice::DodgeRecoveryMs => {
                                 settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                             }
@@ -588,6 +601,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                         game.set_shake_duration_ms(settings.shake_duration_ms);
                         game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
+                        game.set_move_cooldown_ms(settings.move_cooldown_ms);
                         // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
                         // 安全地帯明け(行2)以降の全体へ反映する(TERM独自拡張)。
                         game.reroll_spawn_rates_from(
@@ -679,6 +693,17 @@ fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
         (current + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
     } else {
         current.saturating_sub(DEBUG_FALL_TICK_STEP_MS).max(DEBUG_FALL_TICK_MS_MIN)
+    }
+}
+
+/// 横移動のクールダウン間隔(ms)を`MOVE_COOLDOWN_MS_STEP`ぶん増減する(TERM独自拡張。
+/// ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。`increase`はms値
+/// そのものの増減方向(true=ms増加=遅くなる)を表す。
+fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
+    if increase {
+        (current + MOVE_COOLDOWN_MS_STEP).min(MOVE_COOLDOWN_MS_MAX)
+    } else {
+        current.saturating_sub(MOVE_COOLDOWN_MS_STEP).max(MOVE_COOLDOWN_MS_MIN)
     }
 }
 
