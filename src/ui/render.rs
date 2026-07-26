@@ -16,7 +16,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::constants::{
-    BOMB_ROLL_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
+    BOMB_DANGER_MS, BOMB_ROLL_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS,
+    STAR_VISIBLE_GRACE_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -1146,13 +1147,13 @@ fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
 
 /// 起爆間際は導火線の火花だけでなく本体そのものも激しく赤く点滅させる
 /// (TERM独自拡張。#138。ユーザー指摘: 「爆発直前で爆弾がチカチカ激しく赤く
-/// 光るようにして」)。残り時間が`BOMB_BODY_FLASH_THRESHOLD_MS`を切ったら、
-/// `BOMB_BODY_FLASH_PERIOD_MS`ごとに通常の本体色と警告色(赤)を切り替える。
-const BOMB_BODY_FLASH_THRESHOLD_MS: u32 = 1000;
+/// 光るようにして」)。残り時間が`BOMB_DANGER_MS`(#168で導火線カウントダウンSE
+/// と共有する定数に切り出した)を切ったら、`BOMB_BODY_FLASH_PERIOD_MS`ごとに
+/// 通常の本体色と警告色(赤)を切り替える。
 const BOMB_BODY_FLASH_PERIOD_MS: u32 = 100;
 
 fn bomb_body_color(remaining_ms: u32) -> Color {
-    if remaining_ms > BOMB_BODY_FLASH_THRESHOLD_MS {
+    if remaining_ms > BOMB_DANGER_MS {
         return colors::BOMB_BODY_FG;
     }
     if (remaining_ms / BOMB_BODY_FLASH_PERIOD_MS).is_multiple_of(2) {
@@ -2055,15 +2056,15 @@ mod tests {
     #[test]
     fn bomb_body_color_flashes_red_only_once_the_fuse_is_almost_out() {
         // ユーザー指摘: 「爆発直前で爆弾がチカチカ激しく赤く光るようにして」(#138)。
-        // 残り時間が`BOMB_BODY_FLASH_THRESHOLD_MS`を超えている間は通常色のまま、
+        // 残り時間が`BOMB_DANGER_MS`を超えている間は通常色のまま、
         // それを切ったら警告色(赤)と通常色を激しく切り替えることを確認する。
         assert_eq!(
-            bomb_body_color(BOMB_BODY_FLASH_THRESHOLD_MS + 1),
+            bomb_body_color(BOMB_DANGER_MS + 1),
             colors::BOMB_BODY_FG,
             "閾値を超えている間は通常色のはず"
         );
         assert_eq!(
-            bomb_body_color(BOMB_BODY_FLASH_THRESHOLD_MS),
+            bomb_body_color(BOMB_DANGER_MS),
             colors::BOMB_BODY_DANGER_FG,
             "閾値ちょうどでは警告色に切り替わっているはず"
         );

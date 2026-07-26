@@ -561,3 +561,21 @@ pub fn play_bomb_explosion(mixer: &Mixer) {
         SE_VOLUME,
     );
 }
+
+/// ボム起爆直前の導火線カウントダウン音(TERM独自拡張。#168。ユーザー指摘:
+/// 「爆弾が爆発しそうな赤くチカチカするとき爆弾の爆発しそうな導火線の音させろ」)。
+/// 本体が激しく赤く点滅し始める瞬間(残り`constants::BOMB_DANGER_MS`)に1回だけ
+/// 鳴る。矩形波の短い「チッチッチッチッ」を駆け上がらせ、この後続く爆発音
+/// (play_bomb_explosion)への緊張を煽る。
+pub fn play_bomb_fuse_warning(mixer: &Mixer) {
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(square_tone(220.0, 55, 0.45)) as Box<dyn Source<Item = f32> + Send>,
+            Box::new(square_tone(277.0, 55, 0.45)) as Box<dyn Source<Item = f32> + Send>,
+            Box::new(square_tone(349.0, 55, 0.45)) as Box<dyn Source<Item = f32> + Send>,
+            Box::new(square_tone(440.0, 55, 0.45)) as Box<dyn Source<Item = f32> + Send>,
+        ],
+        SE_VOLUME,
+    );
+}

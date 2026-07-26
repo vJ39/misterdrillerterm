@@ -14,9 +14,9 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_ENTER_MS,
-    BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS,
-    BOMB_SETTLE_TICK_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
+    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_DANGER_MS,
+    BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS,
+    BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
     BOMB_SPAWN_DEPTH_MAX_BONUS, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
     DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
     DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
@@ -230,6 +230,10 @@ pub enum GameEvent {
     /// ボムが爆発した(TERM独自拡張。#96)。プレイヤーが爆風に巻き込まれたかどうかは
     /// 別途`LifeLost`/`GameOverMiss`が続けて発生するかで判断できる。
     BombExploded,
+    /// ボムの残り時間が`BOMB_DANGER_MS`を切り、本体が激しく赤く点滅し始めた瞬間
+    /// (TERM独自拡張。#168。ユーザー指摘: 「爆弾が爆発しそうな赤くチカチカする
+    /// とき爆弾の爆発しそうな導火線の音させろ」)。1個のボムにつき1回だけ発生する。
+    BombFuseWarning,
 }
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
@@ -1205,7 +1209,16 @@ impl Game {
                             bomb.phase_elapsed_ms = 0;
                         } else {
                             bomb.phase_elapsed_ms = 0;
+                            let remaining_before = bomb.remaining_ms;
                             bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta_ms);
+                            // 残り時間が`BOMB_DANGER_MS`を初めて下回った瞬間(本体が
+                            // 赤く点滅し始めるのと同じタイミング)に1回だけ導火線
+                            // カウントダウンSEを鳴らす(TERM独自拡張。#168)。
+                            if remaining_before > BOMB_DANGER_MS
+                                && bomb.remaining_ms <= BOMB_DANGER_MS
+                            {
+                                events.push(GameEvent::BombFuseWarning);
+                            }
                             if bomb.remaining_ms == 0 {
                                 exploded.push(i);
                             }
@@ -4385,6 +4398,48 @@ mod tests {
         assert_eq!(game.bombs[0].phase, BombPhase::Ticking);
         game.update(Duration::from_millis(100));
         assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS - 100);
+    }
+
+    #[test]
+    fn bomb_fuse_warning_fires_exactly_once_when_remaining_time_crosses_the_danger_threshold() {
+        // ユーザー指摘: 「爆弾が爆発しそうな赤くチカチカするとき爆弾の爆発しそうな
+        // 導火線の音させろ」(#168)。本体が激しく赤く点滅し始める瞬間(残り時間が
+        // BOMB_DANGER_MSを初めて下回った瞬間)にBombFuseWarningを1回だけ発火する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        let bomb_row = FIELD_DEPTH_M - 1;
+        game.bombs.push(Bomb {
+            pos: (bomb_row, 5),
+            origin: (bomb_row, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_DANGER_MS + 50,
+            settle_bounce_dir: 1,
+        });
+
+        // まだ閾値を上回っている間は発火しないはず。
+        let events = game.update(Duration::from_millis(20));
+        assert!(!events.contains(&GameEvent::BombFuseWarning));
+
+        // 閾値をまたぐ1ティックで1回だけ発火するはず。
+        let events = game.update(Duration::from_millis(40));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| **e == GameEvent::BombFuseWarning)
+                .count(),
+            1,
+            "閾値をまたいだ瞬間に1回だけ発火するはず: {events:?}"
+        );
+
+        // 閾値を下回ったまま経過しても再発火しないはず。
+        let events = game.update(Duration::from_millis(100));
+        assert!(
+            !events.contains(&GameEvent::BombFuseWarning),
+            "既に閾値未満なら再発火しないはず: {events:?}"
+        );
     }
 
     #[test]

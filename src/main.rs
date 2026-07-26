@@ -1071,6 +1071,7 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
             GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
             GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer),
+            GameEvent::BombFuseWarning => audio::sfx::play_bomb_fuse_warning(mixer),
         }
     }
 }
