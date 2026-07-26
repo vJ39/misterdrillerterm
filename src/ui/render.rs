@@ -1114,17 +1114,13 @@ fn draw_logical_cell(
         BoardCell::Empty => fill_block(buf, x, y, colors::FIELD_EMPTY_BG),
         BoardCell::Color(kind) => draw_color_block(buf, x, y, board, row, col, kind),
         BoardCell::Rock { hits } => draw_rock_block(buf, x, y, board, row, col, hits),
-        // AIRはカプセル(丸薬)らしいシルエットにする(TERM独自拡張。ユーザー指摘:
-        // 「AIRをカプセルのような形状にしたい」)。4分円グリフを組み合わせて楕円の
-        // 輪郭を描く。
-        BoardCell::Oxygen => draw_fixed_unit(
-            buf,
-            x,
-            y,
-            [['◜', '◝'], ['◟', '◞']],
-            colors::OXYGEN_FG,
-            colors::OXYGEN_BG,
-        ),
+        // AIRはカプセル(丸薬)らしいシルエットにする(TERM独自拡張。#106/#128。
+        // ユーザー指摘: 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」。
+        // #106時点では枠線の角glyphを丸めるだけで、セル自体の背景は正方形のまま
+        // 塗りつぶされていたため依然として正方形に見えていた。`draw_capsule_unit`
+        // は四隅のセルをフィールド背景色で斜めに欠き取り、実際に輪郭が丸まった
+        // シルエットになるようにする。
+        BoardCell::Oxygen => draw_capsule_unit(buf, x, y, colors::OXYGEN_FG, colors::OXYGEN_BG),
         BoardCell::Diamond => draw_fixed_unit(
             buf,
             x,
@@ -1320,6 +1316,28 @@ fn draw_fixed_unit(
     put(buf, x + 2, y, content[0][1], fg, bg);
     put(buf, x + 1, y + 1, content[1][0], fg, bg);
     put(buf, x + 2, y + 1, content[1][1], fg, bg);
+}
+
+/// AIR(酸素カプセル)専用の描画(TERM独自拡張。#106/#128。ユーザー指摘: 「AIRは
+/// カプセルの形状をしていてほしい 正方形ではなくて」)。`draw_fixed_unit`は角に
+/// 丸罫線の"glyph"を乗せるだけでセル自体の背景は正方形のまま塗りつぶすため、
+/// 依然として正方形に見えてしまう。ここでは四隅のセルを四分割ブロック文字
+/// (`▘▝▖▗`)でフィールド背景色(`FIELD_EMPTY_BG`)側に3/4欠き取り、実際に輪郭が
+/// 斜めに丸まったシルエット(カプセルらしい八角形状)になるようにする。
+fn draw_capsule_unit(buf: &mut Buffer, x: u16, y: u16, fg: Color, bg: Color) {
+    let field_bg = colors::FIELD_EMPTY_BG;
+    // 各隅セルは、外向きの角(=フィールド側)を`field_bg`、内向きの1/4だけを`bg`
+    // (カプセル本体色)で残す。
+    put(buf, x, y, '▗', bg, field_bg);
+    put(buf, x + 3, y, '▖', bg, field_bg);
+    put(buf, x, y + 1, '▝', bg, field_bg);
+    put(buf, x + 3, y + 1, '▘', bg, field_bg);
+
+    // 中央2列×2行は無地で塗りつぶした上に、既存の4分円グリフで楕円の輪郭を描く。
+    put(buf, x + 1, y, '◜', fg, bg);
+    put(buf, x + 2, y, '◝', fg, bg);
+    put(buf, x + 1, y + 1, '◟', fg, bg);
+    put(buf, x + 2, y + 1, '◞', fg, bg);
 }
 
 /// 岩ブロックのヒビ表現(spec.md 9.4)。固定順`[(0,0),(0,1),(1,0),(1,1)]`の先頭から
@@ -1693,6 +1711,35 @@ mod tests {
             has_diamond_glyph,
             "落下中もダイヤの◆グリフが描画されているはず"
         );
+    }
+
+    #[test]
+    fn oxygen_capsule_has_its_corners_cut_to_the_field_background_not_a_flat_square() {
+        // ユーザー指摘: 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」。
+        // #106時点は角の罫線glyphを丸めるだけでセル自体の背景は正方形のまま
+        // 塗りつぶされていたため、依然として正方形に見えていた。四隅のセルの
+        // 背景色がフィールド背景色(`FIELD_EMPTY_BG`)まで欠き取られていることを
+        // 確認する(中央2列×2行だけが酸素カプセルの地色`OXYGEN_BG`のまま残るはず)。
+        let inner = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(inner);
+        draw_capsule_unit(&mut buf, 0, 0, colors::OXYGEN_FG, colors::OXYGEN_BG);
+
+        for &(x, y) in &[(0u16, 0u16), (3, 0), (0, 1), (3, 1)] {
+            let bg = buf.cell(Position::new(x, y)).unwrap().bg;
+            assert_eq!(
+                bg,
+                colors::FIELD_EMPTY_BG,
+                "四隅({x},{y})はフィールド背景色まで欠き取られているはず"
+            );
+        }
+        for &(x, y) in &[(1u16, 0u16), (2, 0), (1, 1), (2, 1)] {
+            let bg = buf.cell(Position::new(x, y)).unwrap().bg;
+            assert_eq!(
+                bg,
+                colors::OXYGEN_BG,
+                "中央2列×2行({x},{y})はカプセル本体色のまま残るはず"
+            );
+        }
     }
 
     // --- 設定画面のカーソル移動(TERM独自拡張) ---
