@@ -293,6 +293,18 @@ fn overlay_rock_oxygen_diamond_with_rates(
     }
 }
 
+/// 行内の全マスが岩ブロックになっている場合、少なくとも1マスを色ブロックへ
+/// 差し替える(TERM独自拡張。ユーザー指摘: 「Xブロック配置のとき横一列全部埋まる
+/// 配置にはならないように」)。岩ブロックだけで完全にふさがった横一列は掘削しないと
+/// 絶対に通過できない壁になってしまうため、必ず逃げ道を1マス残す。
+fn ensure_row_is_not_fully_blocked_by_rock(row_cells: &mut [Cell; FIELD_WIDTH], rng: &mut ChaCha8Rng, color_count: usize) {
+    if row_cells.iter().all(|c| matches!(c, Cell::Rock { .. })) {
+        let escape_col = rng.random_range(0..FIELD_WIDTH);
+        let escape_color = ColorKind::ALL[rng.random_range(0..color_count)];
+        row_cells[escape_col] = Cell::Color(escape_color);
+    }
+}
+
 /// ゲームフィールド全体(1000行×12列)。
 #[derive(Debug, Clone)]
 pub struct Board {
@@ -319,6 +331,7 @@ impl Board {
                         Some(color) => overlay_rock_oxygen_diamond(&mut rng, color, row),
                     };
                 }
+                ensure_row_is_not_fully_blocked_by_rock(&mut cells, &mut rng, ColorKind::ALL.len());
                 cells
             })
             .collect();
@@ -410,6 +423,8 @@ impl Board {
                     rock_cluster_bonus,
                 );
             }
+
+            ensure_row_is_not_fully_blocked_by_rock(&mut self.rows[row], &mut rng, color_count);
         }
     }
 }
@@ -1274,6 +1289,51 @@ mod tests {
             deep_avg > shallow_avg + 0.1,
             "深い深度の方が岩ブロックの塊が大きいはず: shallow={shallow_avg}, deep={deep_avg}"
         );
+    }
+
+    // --- 横一列が岩ブロックで完全に埋まる配置の禁止(TERM独自拡張) ---
+
+    #[test]
+    fn ensure_row_is_not_fully_blocked_by_rock_replaces_one_cell_when_the_whole_row_is_rock() {
+        // ユーザー指摘: 「Xブロック配置のとき横一列全部埋まる配置にはならないように」。
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let mut row = [Cell::Rock { hits: 0 }; FIELD_WIDTH];
+
+        ensure_row_is_not_fully_blocked_by_rock(&mut row, &mut rng, 4);
+
+        let rock_count = row.iter().filter(|c| matches!(c, Cell::Rock { .. })).count();
+        assert_eq!(rock_count, FIELD_WIDTH - 1, "少なくとも1マスは岩ブロック以外に差し替わるはず");
+        assert!(row.iter().any(|c| matches!(c, Cell::Color(_))), "差し替え先は色ブロックのはず");
+    }
+
+    #[test]
+    fn ensure_row_is_not_fully_blocked_by_rock_leaves_a_non_full_row_untouched() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
+        let mut row = [Cell::Rock { hits: 0 }; FIELD_WIDTH];
+        row[3] = Cell::Empty; // 既に掘削済みの穴が1つあれば「完全に塞がった壁」ではない
+
+        ensure_row_is_not_fully_blocked_by_rock(&mut row, &mut rng, 4);
+
+        let rock_count = row.iter().filter(|c| matches!(c, Cell::Rock { .. })).count();
+        assert_eq!(rock_count, FIELD_WIDTH - 1, "既に穴がある行はそのまま変更されないはず");
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_never_produces_a_row_fully_blocked_by_rock() {
+        // 岩の出現率を上限(300%)・最大深度(塊化ボーナス最大)にしても、横一列が
+        // 岩ブロックだけで完全に埋まることは無いことを確認する。
+        let mut board = empty_board(1000);
+        for row in 0..1000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4);
+
+        for row in 800..1000 {
+            let all_rock = (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }));
+            assert!(!all_rock, "row={row}が岩ブロックだけで完全に埋まっているはず無い");
+        }
     }
 
     #[test]
