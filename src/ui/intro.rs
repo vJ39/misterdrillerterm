@@ -25,10 +25,13 @@ const INTRO_IMAGE_BYTES: &[u8] = include_bytes!("../../assets/intro.png");
 /// この値と`render::TITLE_ART_SCALE`は対で決める(TERM独自拡張。#124。ユーザー
 /// 指摘: 「スプラッシュもっと解像度高く」)。以前は64にリサイズした後で
 /// `TITLE_ART_SCALE`(0.75)により最近傍サンプリングでさらに間引いていたが、
-/// この二段階目は`image`クレートのフィルタ(Triangle)を経ない粗い間引きのため
-/// 画質が損なわれる。そこで`TITLE_ART_SCALE`を1.0にし、最終的に欲しい表示行数
-/// ぶんの解像度をここで直接指定する(=フィルタ付きリサイズ1回で完結させる)。
-const DISPLAY_SIZE: u32 = 60;
+/// この二段階目は`image`クレートのフィルタを経ない粗い間引きのため画質が
+/// 損なわれる。そこで`TITLE_ART_SCALE`を1.0にし、最終的に欲しい表示行数ぶんの
+/// 解像度をここで直接指定する(=フィルタ付きリサイズ1回で完結させる)。
+///
+/// 60→80へさらに引き上げた(#127。ユーザー指摘: 「もっとくっきり見えるように
+/// ならん？」。60でも大きな色ブロックのモザイクにしか見えなかった)。
+const DISPLAY_SIZE: u32 = 80;
 
 /// アルファ値がこれ未満の画素は透過(背景)として扱う。
 const ALPHA_THRESHOLD: u8 = 128;
@@ -47,8 +50,10 @@ pub fn build_canvas() -> PixelCanvas {
     } else {
         (DISPLAY_SIZE * src_w / src_h.max(1), DISPLAY_SIZE)
     };
+    // Lanczos3はTriangle(双線形)より輪郭・コントラストの保持に優れ、この規模の
+    // 縮小(1024x1536→数十px)でも模様が潰れにくい(TERM独自拡張。#127)。
     let resized = decoded
-        .resize_exact(target_w.max(1), target_h.max(1), FilterType::Triangle)
+        .resize_exact(target_w.max(1), target_h.max(1), FilterType::Lanczos3)
         .to_rgba8();
 
     let mut canvas = PixelCanvas::new(
