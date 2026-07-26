@@ -154,19 +154,37 @@ fn pick_base_color(rng: &mut ChaCha8Rng, left: Option<ColorKind>, top: Option<Co
 
 /// 同色連続の上限(横4・縦3、spec.md 3.3)を超える場合に候補色を差し替える。
 ///
-/// 差し替え先は追加の乱数を消費せず、`ColorKind::ALL`の固定順で最初に見つかった
-/// 制約に抵触しない色を採用する。
-fn resolve_run_limits(candidate: ColorKind, left3: [Option<ColorKind>; 3], top2: [Option<ColorKind>; 2]) -> ColorKind {
+/// 差し替え先は追加の乱数を消費せず、`ColorKind::ALL`の先頭`color_count`色
+/// (色数設定、TERM独自拡張)の固定順で最初に見つかった制約に抵触しない色を採用する。
+/// `color_count`が1などで両条件を満たす色が存在しない場合は候補をそのまま返す
+/// (色数を1つに絞る設定は「常に同色」を選んだということなので、ランは制限できない)。
+fn resolve_run_limits(
+    candidate: ColorKind,
+    left3: [Option<ColorKind>; 3],
+    top2: [Option<ColorKind>; 2],
+    color_count: usize,
+) -> ColorKind {
     let breaks_horizontal = |c: ColorKind| left3.iter().all(|n| *n == Some(c));
     let breaks_vertical = |c: ColorKind| top2.iter().all(|n| *n == Some(c));
 
     if !breaks_horizontal(candidate) && !breaks_vertical(candidate) {
         return candidate;
     }
-    ColorKind::ALL
-        .into_iter()
+    ColorKind::ALL[..color_count]
+        .iter()
+        .copied()
         .find(|&c| !breaks_horizontal(c) && !breaks_vertical(c))
-        .expect("4色中2色以上は必ず両条件を満たす")
+        .unwrap_or(candidate)
+}
+
+/// セルが色ブロックならその色を返す(TERM独自拡張。#118)。`resolve_run_limits`に
+/// 渡すラン判定は「同色ブロックが実際に連結するか」が基準であり、途中にRock/Oxygen等
+/// 色ブロック以外のセルが挟まればランは途切れる(色ブロック以外は常に`None`扱いにする)。
+fn color_of(cell: Cell) -> Option<ColorKind> {
+    match cell {
+        Cell::Color(c) => Some(c),
+        _ => None,
+    }
 }
 
 /// コース全行の色下地を生成する(spec.md 3.2〜3.3)。
@@ -192,7 +210,7 @@ fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize, width: usize) -
             ];
             let top2 = [base[row - 1][col], base[row - 2][col]];
 
-            base[row][col] = Some(resolve_run_limits(candidate, left3, top2));
+            base[row][col] = Some(resolve_run_limits(candidate, left3, top2, ColorKind::ALL.len()));
         }
     }
 
@@ -572,6 +590,21 @@ impl Board {
                     Some(Cell::Color(c)) if rng.random_range(0.0..1.0) < color_cluster_prob => c,
                     _ => ColorKind::ALL[rng.random_range(0..color_count)],
                 };
+                // 同色ランが横4・縦3(spec.md 3.3)を超えないよう調整する(TERM独自拡張。
+                // #118: 「8000フレーム付近で縦に大量消失」の調査(#114)で、
+                // reroll_overlays_from_row(新規ゲーム開始のたびに盤面全体へ必ず適用
+                // される)が初期生成(generate_base_colors)の同色ラン上限を継承しておらず、
+                // 巨大な同色塊が生成されうることが判明したため移植した)。
+                let left3 = [
+                    if col >= 1 { color_of(self.rows[row][col - 1]) } else { None },
+                    if col >= 2 { color_of(self.rows[row][col - 2]) } else { None },
+                    if col >= 3 { color_of(self.rows[row][col - 3]) } else { None },
+                ];
+                let top2 = [
+                    if row >= 1 { color_of(self.rows[row - 1][col]) } else { None },
+                    if row >= 2 { color_of(self.rows[row - 2][col]) } else { None },
+                ];
+                let fresh_color = resolve_run_limits(fresh_color, left3, top2, color_count);
                 let adjacent_is_rock =
                     matches!(left, Some(Cell::Rock { .. })) || matches!(top, Some(Cell::Rock { .. }));
                 let rock_cluster_bonus = if adjacent_is_rock { rock_cluster_bonus_if_adjacent } else { 0.0 };
@@ -1735,6 +1768,96 @@ mod tests {
     }
 
     #[test]
+    fn reroll_overlays_from_row_never_produces_a_same_color_run_beyond_the_spec_limit() {
+        // ユーザー報告(#114): 「8000フレーム付近で縦に大量消失してった」の根本原因調査で、
+        // reroll_overlays_from_row(新規ゲーム開始時に必ず盤面全体へ適用される)が
+        // 初期生成(generate_base_colors)の同色ラン上限(横4・縦3、spec.md 3.3)を
+        // 継承しておらず、無制限に同色が連続しうることが判明した(#118でresolve_run_limits
+        // を移植)。結合が最も強くなる浅い深度・rate=100%の条件で、横4・縦3を超える
+        // 同色の直線ランが生成されないことを確認する。
+        let mut board = empty_board(500);
+        for row in 0..500 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+
+        for row in 2..500 {
+            let mut run_color: Option<ColorKind> = None;
+            let mut run_len = 0u32;
+            for col in 0..FIELD_WIDTH {
+                let c = match board.cell(row, col) {
+                    Cell::Color(k) => Some(k),
+                    _ => None,
+                };
+                if c.is_some() && c == run_color {
+                    run_len += 1;
+                } else {
+                    run_color = c;
+                    run_len = if c.is_some() { 1 } else { 0 };
+                }
+                assert!(run_len <= 4, "row={row} col={col}で横方向の同色ランが4を超えている: {run_len}");
+            }
+        }
+
+        for col in 0..FIELD_WIDTH {
+            let mut run_color: Option<ColorKind> = None;
+            let mut run_len = 0u32;
+            for row in 2..500 {
+                let c = match board.cell(row, col) {
+                    Cell::Color(k) => Some(k),
+                    _ => None,
+                };
+                if c.is_some() && c == run_color {
+                    run_len += 1;
+                } else {
+                    run_color = c;
+                    run_len = if c.is_some() { 1 } else { 0 };
+                }
+                assert!(run_len <= 3, "col={col} row={row}で縦方向の同色ランが3を超えている: {run_len}");
+            }
+        }
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_keeps_same_color_connected_groups_reasonably_small() {
+        // #118の実測検証: ラン上限移植前は実プレイで86セルの巨大な同色塊(#114、
+        // frame636)が観測されていた。横4・縦3のラン上限を課すことで、最も結合が
+        // 強くなる条件(浅い深度・全配分率100%)でも連結グループが現実的な大きさに
+        // 収まることを統計的に確認する(実測: 移植後は概ね10〜13セル程度)。
+        let mut board = empty_board(5000);
+        for row in 0..5000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 0, 0, 0, 4, 100, &GravityState::new());
+
+        let mut visited: HashSet<(usize, usize)> = HashSet::new();
+        let mut max_size = 0usize;
+        for row in 0..5000 {
+            for col in 0..FIELD_WIDTH {
+                if visited.contains(&(row, col)) {
+                    continue;
+                }
+                if let Cell::Color(color) = board.cell(row, col) {
+                    let group = connected_same_color(&board, (row, col), color);
+                    visited.extend(group.iter().copied());
+                    max_size = max_size.max(group.len());
+                } else {
+                    visited.insert((row, col));
+                }
+            }
+        }
+        assert!(
+            max_size < 30,
+            "同色連結グループが不自然に巨大(#114で観測した86セルに近い規模)になっている: {max_size}"
+        );
+    }
+
+    #[test]
     fn reroll_overlays_from_row_rock_clustering_strengthens_with_depth() {
         // ユーザー指摘: 「Xブロックが結合で大量にあったりするように」。深度が深いほど
         // 岩ブロックの塊が大きくなりやすいことを確認する(TERM独自拡張の難易度カーブ)。
@@ -2071,22 +2194,32 @@ mod tests {
     #[test]
     fn resolve_run_limits_avoids_fifth_horizontal_same_color() {
         let left3 = [Some(ColorKind::Red), Some(ColorKind::Red), Some(ColorKind::Red)];
-        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None]);
+        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None], ColorKind::ALL.len());
         assert_ne!(resolved, ColorKind::Red);
     }
 
     #[test]
     fn resolve_run_limits_avoids_fourth_vertical_same_color() {
         let top2 = [Some(ColorKind::Blue), Some(ColorKind::Blue)];
-        let resolved = resolve_run_limits(ColorKind::Blue, [None, None, None], top2);
+        let resolved = resolve_run_limits(ColorKind::Blue, [None, None, None], top2, ColorKind::ALL.len());
         assert_ne!(resolved, ColorKind::Blue);
     }
 
     #[test]
     fn resolve_run_limits_keeps_candidate_when_no_limit_hit() {
         let left3 = [Some(ColorKind::Red), None, None];
-        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None]);
+        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None], ColorKind::ALL.len());
         assert_eq!(resolved, ColorKind::Red);
+    }
+
+    #[test]
+    fn resolve_run_limits_returns_candidate_unchanged_when_color_count_is_one() {
+        // 色数設定(color_count)が1の場合、常に同色になるのは仕様通りであり、
+        // ランを制限できる代替色が存在しないため候補をそのまま返すことを確認する
+        // (TERM独自拡張。#118: reroll_overlays_from_rowへのラン上限移植)。
+        let left3 = [Some(ColorKind::Red), Some(ColorKind::Red), Some(ColorKind::Red)];
+        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None], 1);
+        assert_eq!(resolved, ColorKind::Red, "色数1では代替色が無いため候補のまま返るはず");
     }
 
     // --- 直接掘削による即時消滅(4.6、サイズ問わず) ---
