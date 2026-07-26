@@ -1161,10 +1161,17 @@ fn draw_logical_cell(
         // AIRはカプセル(丸薬)らしいシルエットにする(TERM独自拡張。#106/#128。
         // ユーザー指摘: 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」。
         // #106時点では枠線の角glyphを丸めるだけで、セル自体の背景は正方形のまま
-        // 塗りつぶされていたため依然として正方形に見えていた。`draw_capsule_unit`
+        // 塗りつぶされていたため依然として正方形に見えていた。`draw_rounded_unit`
         // は四隅のセルをフィールド背景色で斜めに欠き取り、実際に輪郭が丸まった
         // シルエットになるようにする。
-        BoardCell::Oxygen => draw_capsule_unit(buf, x, y, colors::OXYGEN_FG, colors::OXYGEN_BG),
+        BoardCell::Oxygen => draw_rounded_unit(
+            buf,
+            x,
+            y,
+            [['◜', '◝'], ['◟', '◞']],
+            colors::OXYGEN_FG,
+            colors::OXYGEN_BG,
+        ),
         BoardCell::Diamond => draw_fixed_unit(
             buf,
             x,
@@ -1184,8 +1191,11 @@ fn draw_logical_cell(
         // アイテムブロックも他ブロック同様、効果ごとに専用の形状にする(TERM独自拡張。
         // ユーザー指摘: 「他のアイテムも相手有無特有の形状にしたい」)。ClearAboveは
         // 頭上を吹き飛ばすイメージで上向き矢印を、UnifyColorsは色が混ざり合う
-        // イメージで陰陽風の分割円を上段に添える。
-        BoardCell::Item(ItemEffect::ClearAbove) => draw_fixed_unit(
+        // イメージで陰陽風の分割円を上段に添える。AIR(#128)と同じく、`draw_fixed_unit`
+        // の「セル全体を正方形に塗りつぶす」見た目ではアイテムらしさが薄いという
+        // 指摘(#132。ユーザー指摘: 「C/R/Kアイテムもアイテムっぽい形状に変えよう」)
+        // を受け、`draw_rounded_unit`で四隅を欠き取った輪郭にした。
+        BoardCell::Item(ItemEffect::ClearAbove) => draw_rounded_unit(
             buf,
             x,
             y,
@@ -1193,7 +1203,7 @@ fn draw_logical_cell(
             colors::ITEM_CLEAR_ABOVE_FG,
             colors::ITEM_CLEAR_ABOVE_BG,
         ),
-        BoardCell::Item(ItemEffect::UnifyColors) => draw_fixed_unit(
+        BoardCell::Item(ItemEffect::UnifyColors) => draw_rounded_unit(
             buf,
             x,
             y,
@@ -1202,7 +1212,7 @@ fn draw_logical_cell(
             colors::ITEM_UNIFY_COLORS_BG,
         ),
         // StarifyScreenはスターブロックを連想させる☆をあしらう。
-        BoardCell::Item(ItemEffect::StarifyScreen) => draw_fixed_unit(
+        BoardCell::Item(ItemEffect::StarifyScreen) => draw_rounded_unit(
             buf,
             x,
             y,
@@ -1362,26 +1372,27 @@ fn draw_fixed_unit(
     put(buf, x + 2, y + 1, content[1][1], fg, bg);
 }
 
-/// AIR(酸素カプセル)専用の描画(TERM独自拡張。#106/#128。ユーザー指摘: 「AIRは
-/// カプセルの形状をしていてほしい 正方形ではなくて」)。`draw_fixed_unit`は角に
-/// 丸罫線の"glyph"を乗せるだけでセル自体の背景は正方形のまま塗りつぶすため、
-/// 依然として正方形に見えてしまう。ここでは四隅のセルを四分割ブロック文字
-/// (`▘▝▖▗`)でフィールド背景色(`FIELD_EMPTY_BG`)側に3/4欠き取り、実際に輪郭が
-/// 斜めに丸まったシルエット(カプセルらしい八角形状)になるようにする。
-fn draw_capsule_unit(buf: &mut Buffer, x: u16, y: u16, fg: Color, bg: Color) {
+/// AIR・アイテムブロック共通の描画(TERM独自拡張。#106/#128/#132。ユーザー指摘:
+/// 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」「C/R/Kアイテムも
+/// アイテムっぽい形状に変えよう」)。`draw_fixed_unit`は角に丸罫線の"glyph"を
+/// 乗せるだけでセル自体の背景は正方形のまま塗りつぶすため、依然として正方形に
+/// 見えてしまう。ここでは四隅のセルを四分割ブロック文字(`▘▝▖▗`)でフィールド
+/// 背景色(`FIELD_EMPTY_BG`)側に3/4欠き取り、実際に輪郭が斜めに丸まったシルエット
+/// (八角形状)になるようにする。中央2列×2行の`content`は呼び出し側で種類ごとに
+/// 変える。
+fn draw_rounded_unit(buf: &mut Buffer, x: u16, y: u16, content: [[char; 2]; 2], fg: Color, bg: Color) {
     let field_bg = colors::FIELD_EMPTY_BG;
     // 各隅セルは、外向きの角(=フィールド側)を`field_bg`、内向きの1/4だけを`bg`
-    // (カプセル本体色)で残す。
+    // (本体色)で残す。
     put(buf, x, y, '▗', bg, field_bg);
     put(buf, x + 3, y, '▖', bg, field_bg);
     put(buf, x, y + 1, '▝', bg, field_bg);
     put(buf, x + 3, y + 1, '▘', bg, field_bg);
 
-    // 中央2列×2行は無地で塗りつぶした上に、既存の4分円グリフで楕円の輪郭を描く。
-    put(buf, x + 1, y, '◜', fg, bg);
-    put(buf, x + 2, y, '◝', fg, bg);
-    put(buf, x + 1, y + 1, '◟', fg, bg);
-    put(buf, x + 2, y + 1, '◞', fg, bg);
+    put(buf, x + 1, y, content[0][0], fg, bg);
+    put(buf, x + 2, y, content[0][1], fg, bg);
+    put(buf, x + 1, y + 1, content[1][0], fg, bg);
+    put(buf, x + 2, y + 1, content[1][1], fg, bg);
 }
 
 /// 岩ブロックのヒビ表現(spec.md 9.4)。固定順`[(0,0),(0,1),(1,0),(1,1)]`の先頭から
@@ -1815,7 +1826,7 @@ mod tests {
         // 確認する(中央2列×2行だけが酸素カプセルの地色`OXYGEN_BG`のまま残るはず)。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
-        draw_capsule_unit(&mut buf, 0, 0, colors::OXYGEN_FG, colors::OXYGEN_BG);
+        draw_rounded_unit(&mut buf, 0, 0, [['◜', '◝'], ['◟', '◞']], colors::OXYGEN_FG, colors::OXYGEN_BG);
 
         for &(x, y) in &[(0u16, 0u16), (3, 0), (0, 1), (3, 1)] {
             let bg = buf.cell(Position::new(x, y)).unwrap().bg;
@@ -1832,6 +1843,38 @@ mod tests {
                 colors::OXYGEN_BG,
                 "中央2列×2行({x},{y})はカプセル本体色のまま残るはず"
             );
+        }
+    }
+
+    #[test]
+    fn item_blocks_have_their_corners_cut_to_the_field_background_not_a_flat_square() {
+        // ユーザー指摘: 「C/R/Kアイテムもアイテムっぽい形状に変えよう」(#132)。
+        // AIR(#128)と同じく、C/R/Kアイテムも四隅がフィールド背景色まで欠き取られ、
+        // 単なる正方形の塗りつぶしでなくなっていることを確認する。
+        let items = [
+            ([['↑', '↑'], ['R', 'R']], colors::ITEM_CLEAR_ABOVE_FG, colors::ITEM_CLEAR_ABOVE_BG),
+            ([['◐', '◑'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG),
+            ([['☆', '☆'], ['K', 'K']], colors::ITEM_STARIFY_SCREEN_FG, colors::ITEM_STARIFY_SCREEN_BG),
+        ];
+        for (content, fg, bg) in items {
+            let inner = Rect::new(0, 0, 4, 2);
+            let mut buf = Buffer::empty(inner);
+            draw_rounded_unit(&mut buf, 0, 0, content, fg, bg);
+
+            for &(x, y) in &[(0u16, 0u16), (3, 0), (0, 1), (3, 1)] {
+                assert_eq!(
+                    buf.cell(Position::new(x, y)).unwrap().bg,
+                    colors::FIELD_EMPTY_BG,
+                    "四隅({x},{y})はフィールド背景色まで欠き取られているはず"
+                );
+            }
+            for &(x, y) in &[(1u16, 0u16), (2, 0), (1, 1), (2, 1)] {
+                assert_eq!(
+                    buf.cell(Position::new(x, y)).unwrap().bg,
+                    bg,
+                    "中央2列×2行({x},{y})はアイテム本体色のまま残るはず"
+                );
+            }
         }
     }
 
