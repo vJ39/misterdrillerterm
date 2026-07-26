@@ -8,7 +8,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::constants::{COLOR_COUNT_DEFAULT, FALL_TICK_MS, SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT};
+use crate::constants::{
+    COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
+};
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
 const SETTINGS_FILE_NAME: &str = "settings.json";
@@ -40,6 +42,9 @@ pub struct Settings {
     /// 出現する色ブロックの色数(1〜4、TERM独自拡張)。`ColorKind::ALL`の先頭から
     /// この数だけを使う。設定画面から調整する。
     pub color_count: u8,
+    /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms、
+    /// TERM独自拡張)。設定画面から調整する。
+    pub dodge_recovery_ms: u64,
 }
 
 impl Default for Settings {
@@ -55,6 +60,7 @@ impl Default for Settings {
             star_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             diamond_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             color_count: COLOR_COUNT_DEFAULT,
+            dodge_recovery_ms: DODGE_RECOVERY_MS_DEFAULT,
         }
     }
 }
@@ -102,6 +108,7 @@ impl Settings {
             color_count: parse_u64_field(&text, "color_count")
                 .map(|v| v as u8)
                 .unwrap_or(default.color_count),
+            dodge_recovery_ms: parse_u64_field(&text, "dodge_recovery_ms").unwrap_or(default.dodge_recovery_ms),
         }
     }
 
@@ -123,7 +130,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"color_count\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"color_count\": {},\n  \"dodge_recovery_ms\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
@@ -133,7 +140,8 @@ impl Settings {
             self.air_spawn_rate_percent,
             self.star_spawn_rate_percent,
             self.diamond_spawn_rate_percent,
-            self.color_count
+            self.color_count,
+            self.dodge_recovery_ms
         );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
@@ -186,6 +194,7 @@ mod tests {
         assert_eq!(settings.star_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.diamond_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.color_count, COLOR_COUNT_DEFAULT);
+        assert_eq!(settings.dodge_recovery_ms, DODGE_RECOVERY_MS_DEFAULT);
     }
 
     #[test]
@@ -242,6 +251,7 @@ mod tests {
             star_spawn_rate_percent: 0,
             diamond_spawn_rate_percent: 0,
             color_count: 1,
+            dodge_recovery_ms: 500,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -257,6 +267,7 @@ mod tests {
             star_spawn_rate_percent: 300,
             diamond_spawn_rate_percent: 300,
             color_count: 4,
+            dodge_recovery_ms: 2000,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

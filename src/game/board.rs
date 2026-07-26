@@ -10,7 +10,7 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
     depth_fraction, COLOR_CLUSTER_DEPTH_START_PROB, FIELD_WIDTH, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
-    STAR_MELT_TICKS,
+    STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS,
 };
 
 /// フィールド1マスの内容。
@@ -26,10 +26,13 @@ pub enum Cell {
     /// ダイヤブロック。TERM独自拡張(初代の確定事実には存在しない要素)。
     Diamond,
     /// スターブロック(TERM独自拡張。ユーザー指摘: 「画面内にきたら、溶けて自然と
-    /// 消えるスターブロックも欲しい」)。プレイヤーの可視範囲内に入ると自然に溶けて
-    /// 消える。`melting`は0(まだ画面外/入った直後)〜`STAR_MELT_TICKS`(消滅)の
-    /// カウンタで、掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
-    Star { melting: u8 },
+    /// 消えるスターブロックも欲しい」)。プレイヤーの可視範囲内に入ると、`STAR_VISIBLE_
+    /// GRACE_MS`(既定5秒、ユーザー指摘: 「画面内に見えてから5秒たったら消えはじめる
+    /// こと」)は無傷のまま、その後`STAR_MELT_DURATION_MS`かけて溶けて消える。
+    /// `visible_ms`は画面内に入ってからの経過時間(ms)。ブロック落下tickの間隔(深度
+    /// によって変わる、TERM独自拡張)とは独立した実時間で管理するため、tick数ではなく
+    /// 経過ミリ秒で持つ。掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
+    Star { visible_ms: u32 },
 }
 
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
@@ -284,7 +287,7 @@ fn overlay_rock_oxygen_diamond_with_rates(
     } else if r < t.rock + t.oxygen + t.diamond {
         Cell::Diamond
     } else if r < t.rock + t.oxygen + t.diamond + t.star {
-        Cell::Star { melting: 0 }
+        Cell::Star { visible_ms: 0 }
     } else {
         Cell::Color(base_color)
     }
@@ -926,24 +929,29 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
     outcome
 }
 
-/// プレイヤーの画面内(行±`STAR_VISIBLE_RANGE_ROWS`)にあるスターブロックを1ティック分
-/// 溶かし、`STAR_MELT_TICKS`に達したものは消す(TERM独自拡張。ユーザー指摘:
-/// 「画面内にきたら、溶けて自然と消えるスターブロックも欲しい」)。画面外のスター
-/// ブロックは溶解が進行しない。戻り値は消滅したスターブロックの個数。
-pub fn tick_star_melting(board: &mut Board, player_row: usize) -> usize {
+/// プレイヤーの画面内(行±`STAR_VISIBLE_RANGE_ROWS`)にあるスターブロックの表示経過
+/// 時間を実時間`delta_ms`ぶん進める。`STAR_VISIBLE_GRACE_MS`に達するまでは無傷のまま、
+/// その後`STAR_MELT_DURATION_MS`かけて溶けて消える(TERM独自拡張。ユーザー指摘:
+/// 「画面内にきたら、溶けて自然と消えるスターブロックも欲しい」「スターブロックは
+/// 画面内に見えてから5秒たったら消えはじめること」)。画面外のスターブロックは
+/// 経過時間が進まない(画面内に戻ってきたら残りの猶予から再開する)。戻り値は消滅した
+/// スターブロックの個数。
+pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) -> usize {
     let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
     let row_start = player_row.saturating_sub(range);
     let row_end = (player_row + range).min(board.depth_rows().saturating_sub(1));
     let mut melted = 0;
+    let vanish_at_ms = STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS;
 
     for r in row_start..=row_end {
         for c in 0..FIELD_WIDTH {
-            if let Cell::Star { melting } = board.cell(r, c) {
-                if melting + 1 >= STAR_MELT_TICKS {
+            if let Cell::Star { visible_ms } = board.cell(r, c) {
+                let updated = visible_ms.saturating_add(delta_ms);
+                if updated >= vanish_at_ms {
                     board.set(r, c, Cell::Empty);
                     melted += 1;
                 } else {
-                    board.set(r, c, Cell::Star { melting: melting + 1 });
+                    board.set(r, c, Cell::Star { visible_ms: updated });
                 }
             }
         }
@@ -999,7 +1007,7 @@ mod tests {
         let mut board = empty_board(1);
         board.rows[0][0] = Cell::Rock { hits: 3 };
         board.rows[0][1] = Cell::Oxygen;
-        board.rows[0][2] = Cell::Star { melting: 2 };
+        board.rows[0][2] = Cell::Star { visible_ms: 2000 };
         board.rows[0][3] = Cell::Diamond;
         board.rows[0][4] = Cell::Empty; // 既に掘削済み・対象外
 
@@ -1076,6 +1084,48 @@ mod tests {
 
         let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
         assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
+    }
+
+    // --- スターブロックの実時間溶解(TERM独自拡張) ---
+
+    #[test]
+    fn tick_star_melting_leaves_the_star_intact_within_the_grace_period() {
+        // ユーザー指摘: 「スターブロックは画面内に見えてから5秒たったら消えはじめる
+        // こと」。猶予時間(STAR_VISIBLE_GRACE_MS)未満しか経過していなければ、
+        // 画面内であっても溶解が始まらない(セルが残る)ことを確認する。
+        let mut board = empty_board(1);
+        board.rows[0][0] = Cell::Star { visible_ms: 0 };
+
+        let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS - 1);
+
+        assert_eq!(melted, 0, "猶予時間未満では消滅しないはず");
+        assert!(matches!(board.cell(0, 0), Cell::Star { .. }), "猶予時間未満ではまだスターのままのはず");
+    }
+
+    #[test]
+    fn tick_star_melting_vanishes_after_grace_period_plus_melt_duration_elapses() {
+        let mut board = empty_board(1);
+        board.rows[0][0] = Cell::Star { visible_ms: 0 };
+
+        let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS);
+
+        assert_eq!(melted, 1, "猶予時間+溶解時間が経過すれば1個消えるはず");
+        assert_eq!(board.cell(0, 0), Cell::Empty, "溶け切ったスターは消えているはず");
+    }
+
+    #[test]
+    fn tick_star_melting_ignores_stars_outside_the_visible_range() {
+        // プレイヤーの画面外(行±STAR_VISIBLE_RANGE_ROWS)にあるスターブロックは
+        // 経過時間が進まないことを確認する。
+        let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
+        let far_row = range + 10;
+        let mut board = empty_board(far_row + 1);
+        board.rows[far_row][0] = Cell::Star { visible_ms: 0 };
+
+        let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS + 1000);
+
+        assert_eq!(melted, 0, "画面外のスターは溶解が進まないはず");
+        assert_eq!(board.cell(far_row, 0), Cell::Star { visible_ms: 0 }, "経過時間が進んでいないはず");
     }
 
     #[test]

@@ -22,11 +22,11 @@ pub struct ColorTriple {
 }
 
 pub const RED: ColorTriple = ColorTriple {
-    base: Color::Rgb(220, 40, 40),
+    base: Color::Rgb(220, 80, 80),
     highlight: Color::Rgb(255, 120, 110),
 };
 pub const BLUE: ColorTriple = ColorTriple {
-    base: Color::Rgb(40, 90, 220),
+    base: Color::Rgb(80, 120, 220),
     highlight: Color::Rgb(110, 170, 255),
 };
 pub const GREEN: ColorTriple = ColorTriple {
@@ -74,21 +74,26 @@ pub const ROCK_X_FG: Color = Color::Rgb(240, 225, 200);
 pub const OXYGEN_BG: Color = Color::Rgb(20, 190, 200);
 pub const OXYGEN_FG: Color = Color::Rgb(255, 255, 255);
 
-pub const DIAMOND_BG: Color = Color::Rgb(200, 225, 235);
-pub const DIAMOND_FG: Color = Color::Rgb(255, 255, 255);
+/// ダイヤブロックはXブロック(岩ブロック)系統の代物という位置づけ(TERM独自拡張。
+/// ユーザー指摘: 「ダイヤブロックはXブロック系の代物なので、色味は白じゃなくて
+/// 黄土色がいい」)のため、白系ではなく黄土色系にする。
+pub const DIAMOND_BG: Color = Color::Rgb(196, 149, 60);
+pub const DIAMOND_FG: Color = Color::Rgb(255, 244, 214);
 
 /// スターブロックの背景色(無傷時)。
 pub const STAR_BG: Color = Color::Rgb(230, 200, 40);
 /// スターブロックの前景色。
 pub const STAR_FG: Color = Color::Rgb(255, 250, 210);
 
-/// スターブロックの背景色を溶解の進行度(`melting / STAR_MELT_TICKS`)から、
-/// フィールド背景色(`FIELD_EMPTY_BG`)へ向けて補間する。
-pub fn star_bg(melting: u8, melt_ticks: u8) -> Color {
-    let t = if melt_ticks == 0 {
+/// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
+/// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、
+/// その後`melt_duration_ms`かけて進行度が1.0(消滅)まで進む。
+pub fn star_bg(visible_ms: u32, grace_ms: u32, melt_duration_ms: u32) -> Color {
+    let melt_elapsed = visible_ms.saturating_sub(grace_ms);
+    let t = if melt_duration_ms == 0 {
         0.0
     } else {
-        (melting as f32 / melt_ticks as f32).clamp(0.0, 1.0)
+        (melt_elapsed as f32 / melt_duration_ms as f32).clamp(0.0, 1.0)
     };
     let Color::Rgb(ar, ag, ab) = STAR_BG else {
         unreachable!("STAR_BGは常にColor::Rgb")
@@ -111,7 +116,9 @@ pub const PANEL_BORDER: Color = Color::Rgb(90, 90, 100);
 pub const PANEL_TEXT: Color = Color::Rgb(230, 230, 230);
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * t).round().clamp(0.0, 255.0) as u8
+    (a as f32 + (b as f32 - a as f32) * t)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// 岩ブロックの背景色を残りヒット数から補間する(spec.md 9.4・9.6、`hits / 4.0`で線形補間)。

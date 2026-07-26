@@ -13,9 +13,10 @@ use std::time::Duration;
 use crate::constants::{
     depth_fraction, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
-    DEBUG_UNIFY_COLORS_RANGE_ROWS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH,
-    INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
-    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
+    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
+    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP,
+    FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX,
+    MOVE_ANIM_DURATION_MS, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
 };
 use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
@@ -85,6 +86,19 @@ pub enum GameStatus {
     Paused,
     GameOver,
     Cleared,
+}
+
+/// 「わ〜!」スライダー演出(TERM独自拡張)の段階。ブロックが落ち始める直前に
+/// 移動して間一髪回避した際、まずスライダー(横滑り)で見せてから、短い硬直
+/// (`dodge_recovery_ms`)を挟んで通常操作へ戻る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DodgeStage {
+    /// 演出無し(通常プレイ中)。
+    None,
+    /// スライダー(横滑り)演出中。
+    Sliding,
+    /// スライダー後、起き上がるまでの短い硬直中。
+    Recovering,
 }
 
 /// GameOverダイアログの選択肢(TERM独自拡張。ユーザー指摘: 「全部死んだら、タイトルに
@@ -165,6 +179,19 @@ pub struct Game {
     /// 死んで、一度天に召される演出をして、ブロックが消える処理されてから、元の位置に
     /// 復活」)。ライフが0になる場合はこの演出を行わず、即座にGameOverへ進む。
     ascending_remaining: Option<Duration>,
+    /// 掘削入力(Space)を押した直後、方向別の掘削アニメーションを表示し続ける残り時間
+    /// (TERM独自拡張、9章。ユーザー指摘: 「上に掘る時、上向きながらピヨンピヨン跳ねる」
+    /// 「左右に掘る時、横にドリルをぐいぐい」「下に掘る時、下向きながらドリルを
+    /// ぐいぐい」)。描画専用で、ロジックには一切影響しない。
+    drill_flash_remaining: Duration,
+    /// 「わ〜!」スライダー演出(ブロックが落ち始める直前に移動して間一髪回避した際、
+    /// TERM独自拡張)の現在の段階。`None`なら演出無し。
+    dodge_stage: DodgeStage,
+    /// 現在の段階(スライダー/硬直)の残り時間。
+    dodge_stage_remaining: Duration,
+    /// 「わ〜!」スライダー直後の硬直インターバル(ms、TERM独自拡張)。設定画面/
+    /// デバッグショートカットで調整できる(ユーザー指摘: 「この設定値も作る」)。
+    dodge_recovery_ms: u64,
     /// 描画専用: プレイヤーの直前の論理位置(移動の見た目補間アニメーション用、
     /// TERM独自拡張、9章)。ロジック上の当たり判定・掘削・落下判定には一切使わない。
     render_prev_position: (usize, usize),
@@ -211,6 +238,10 @@ impl Game {
             last_level_reported,
             crush_flash_remaining: Duration::ZERO,
             ascending_remaining: None,
+            drill_flash_remaining: Duration::ZERO,
+            dodge_stage: DodgeStage::None,
+            dodge_stage_remaining: Duration::ZERO,
+            dodge_recovery_ms: DODGE_RECOVERY_MS_DEFAULT,
             render_prev_position: start_position,
             // 開始時点では補間の必要が無いため、既に完了した扱いにしておく
             // (さもないと初期表示が(0,0)相当からアニメーションしてしまう)。
@@ -303,7 +334,7 @@ impl Game {
     /// Left/Rightの2ステップ段差登り(TERM独自拡張)における「ぶつかって停止中」の
     /// 状態もリセットする(方向キーを挟んだ場合の扱い)。
     pub fn face_up(&mut self) {
-        if self.status == GameStatus::Playing && !self.is_dying() {
+        if self.status == GameStatus::Playing && !self.is_input_frozen() {
             self.player.facing = Direction::Up;
             self.player.bumped_direction = None;
         }
@@ -314,7 +345,7 @@ impl Game {
     /// Left/Rightの2ステップ段差登り(TERM独自拡張)における「ぶつかって停止中」の
     /// 状態もリセットする(方向キーを挟んだ場合の扱い)。
     pub fn face_down(&mut self) {
-        if self.status == GameStatus::Playing && !self.is_dying() {
+        if self.status == GameStatus::Playing && !self.is_input_frozen() {
             self.player.facing = Direction::Down;
             self.player.bumped_direction = None;
         }
@@ -326,6 +357,10 @@ impl Game {
         if !self.consume_drill_cooldown() {
             return events;
         }
+
+        // 掘削入力そのものに反応して、方向別のアニメーション(TERM独自拡張、9章)を
+        // 開始する。命中/空振りを問わず、入力があった事実に対して反応する。
+        self.drill_flash_remaining = Duration::from_millis(DRILL_ANIM_MS);
 
         let before = self.player.position();
         let outcome = physics::drill_facing(&mut self.board, &mut self.player, &self.gravity_state);
@@ -343,7 +378,7 @@ impl Game {
     /// 掘削(Drill)とは独立したクールダウンなので、同一フレームで両方の入力が来ても
     /// 互いをブロックしない(TERM独自拡張。ユーザー指摘対応)。
     fn consume_move_cooldown(&mut self) -> bool {
-        if self.status != GameStatus::Playing || self.is_dying() {
+        if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
         }
         if self.move_cooldown_remaining > Duration::ZERO {
@@ -356,7 +391,7 @@ impl Game {
     /// 掘削系入力(Drill)のクールダウンが明けているかを確認し、明けていればリセットする。
     /// 移動(MoveLeft/MoveRight)とは独立したクールダウン(TERM独自拡張)。
     fn consume_drill_cooldown(&mut self) -> bool {
-        if self.status != GameStatus::Playing || self.is_dying() {
+        if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
         }
         if self.drill_cooldown_remaining > Duration::ZERO {
@@ -466,6 +501,34 @@ impl Game {
         true
     }
 
+    /// 「わ〜!」スライダー演出(TERM独自拡張)の進行を1フレームぶん進める。演出中
+    /// (スライダー/硬直のいずれか)は`true`を返し、呼び出し側は通常の入力・重力を
+    /// このフレームだけ凍結する。
+    fn tick_dodge(&mut self, delta: Duration) -> bool {
+        match self.dodge_stage {
+            DodgeStage::None => false,
+            DodgeStage::Sliding => {
+                let remaining = self.dodge_stage_remaining.saturating_sub(delta);
+                if remaining == Duration::ZERO {
+                    self.dodge_stage = DodgeStage::Recovering;
+                    self.dodge_stage_remaining = Duration::from_millis(self.dodge_recovery_ms);
+                } else {
+                    self.dodge_stage_remaining = remaining;
+                }
+                true
+            }
+            DodgeStage::Recovering => {
+                let remaining = self.dodge_stage_remaining.saturating_sub(delta);
+                if remaining == Duration::ZERO {
+                    self.dodge_stage = DodgeStage::None;
+                } else {
+                    self.dodge_stage_remaining = remaining;
+                }
+                true
+            }
+        }
+    }
+
     /// プレイヤーの現在列を中心に左右1列ずつ(=3列分)、プレイヤーより浅い
     /// (画面上で上にある)行を全てEmptyにする(TERM独自拡張)。
     fn clear_three_columns_above_player(&mut self) {
@@ -514,6 +577,11 @@ impl Game {
             return events;
         }
 
+        // 「わ〜!」スライダー演出中(TERM独自拡張)も、ゲームプレイ全体を凍結する。
+        if self.tick_dodge(delta) {
+            return events;
+        }
+
         self.player.elapsed_seconds += delta.as_secs_f32();
 
         if self.move_cooldown_remaining > Duration::ZERO {
@@ -522,6 +590,7 @@ impl Game {
         if self.drill_cooldown_remaining > Duration::ZERO {
             self.drill_cooldown_remaining = self.drill_cooldown_remaining.saturating_sub(delta);
         }
+        self.drill_flash_remaining = self.drill_flash_remaining.saturating_sub(delta);
 
         // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
         // 「進むにつれてAIRの減る速度が早い」)。経過時間そのものを実効倍率ぶん
@@ -571,6 +640,25 @@ impl Game {
                 self.invulnerability_ticks_remaining -= 1;
             }
 
+            // ブロックが落ち始める直前に移動して間一髪回避した場合、「わ〜!」スライダー
+            // 演出を発火する(TERM独自拡張。ユーザー指摘: 「ブロックが落ち始める直前に
+            // 移動してにげたとき、「わ〜!」ってスライダー(アニメーションしてねキャラ)
+            // して切り間に合う感じ」)。直前にプレイヤーがいたマスへちょうど今ブロックが
+            // 着地し、かつその移動がまだ新しい(`DODGE_DETECT_WINDOW_MS`以内)場合のみ
+            // 発火する(押し潰された場合や、既に演出中の場合は対象外)。
+            if !result.life_lost_to_crush
+                && !self.is_dying()
+                && self.dodge_stage == DodgeStage::None
+                && self.render_anim_elapsed < DODGE_DETECT_WINDOW_MS as f32 / 1000.0
+                && result
+                    .moved_cells
+                    .iter()
+                    .any(|&(to, _)| to == self.render_prev_position && to != self.player.position())
+            {
+                self.dodge_stage = DodgeStage::Sliding;
+                self.dodge_stage_remaining = Duration::from_millis(DODGE_SLIDE_MS);
+            }
+
             self.last_block_moves = result.moved_cells;
 
             if result.oxygen_collected > 0 {
@@ -593,14 +681,19 @@ impl Game {
                 self.apply_miss(&mut events, true);
             }
 
-            let melted = tick_star_melting(&mut self.board, self.player.row);
-            if melted > 0 {
-                events.push(GameEvent::BlockDestroyed { blocks: melted });
-            }
-
             if self.status != GameStatus::Playing {
                 return events;
             }
+        }
+
+        // スターブロックの溶解は実時間(ms)で進む(TERM独自拡張。ユーザー指摘:
+        // 「スターブロックは画面内に見えてから5秒たったら消えはじめること」)。
+        // ブロック落下tick(深度に応じて間隔が変わる`effective_tick_ms`)とは切り離し、
+        // このフレームの実経過時間`delta`そのもので進行させることで、深度によらず
+        // 常に一定の猶予時間になる。
+        let melted = tick_star_melting(&mut self.board, self.player.row, delta.as_millis() as u32);
+        if melted > 0 {
+            events.push(GameEvent::BlockDestroyed { blocks: melted });
         }
 
         // プレイヤー自身の自由落下(spec.md 1章、TERM独自拡張)。ブロックの重力とは
@@ -703,9 +796,46 @@ impl Game {
         self.ascending_remaining.is_some()
     }
 
+    /// 「天に召される」演出中、または「わ〜!」スライダー演出中(TERM独自拡張)かどうか。
+    /// この間は移動・掘削入力を無視する。
+    fn is_input_frozen(&self) -> bool {
+        self.is_dying() || self.dodge_stage != DodgeStage::None
+    }
+
     /// 押し潰しの「潰れた」演出が表示中かどうか(GameOverオーバーレイの表示可否判定にも使う)。
     pub fn crush_flash_active(&self) -> bool {
         self.crush_flash_remaining > Duration::ZERO || self.ascending_remaining.is_some()
+    }
+
+    /// 掘削アニメーション中の描画フレーム(TERM独自拡張、9章)。掘削演出中でなければ
+    /// `None`、演出中は`DRILL_ANIM_FRAME_MS`ごとに`true`/`false`を切り替えて返す
+    /// (方向別のアニメーション用に描画側が2フレームを交互に選ぶ)。
+    pub fn drilling_frame(&self) -> Option<bool> {
+        if self.drill_flash_remaining <= Duration::ZERO {
+            return None;
+        }
+        let elapsed_ms = DRILL_ANIM_MS.saturating_sub(self.drill_flash_remaining.as_millis() as u64);
+        Some((elapsed_ms / DRILL_ANIM_FRAME_MS.max(1)).is_multiple_of(2))
+    }
+
+    /// 「わ〜!」スライダー演出中(横滑り段階のみ、TERM独自拡張)かどうか。描画側が
+    /// スプライトを横滑りさせる判断に使う。硬直(Recovering)段階では滑りは止まっている
+    /// ため`false`を返すが、`is_input_frozen`相当のフリーズ自体はそちらも継続する。
+    pub fn is_dodge_sliding(&self) -> bool {
+        self.dodge_stage == DodgeStage::Sliding
+    }
+
+    /// 「わ〜!」スライダー演出の横滑り進捗(0.0=開始直後、1.0=スライダー完了直前。
+    /// TERM独自拡張)。スライダー中でなければ0.0を返す。
+    pub fn dodge_slide_progress(&self) -> f32 {
+        if self.dodge_stage != DodgeStage::Sliding {
+            return 0.0;
+        }
+        let total = DODGE_SLIDE_MS as f32 / 1000.0;
+        if total <= 0.0 {
+            return 1.0;
+        }
+        (1.0 - self.dodge_stage_remaining.as_secs_f32() / total).clamp(0.0, 1.0)
     }
 
     /// 「天に召される」演出の進捗(0.0=演出開始直後、1.0=演出完了直前。TERM独自拡張)。
@@ -763,6 +893,12 @@ impl Game {
     /// 揺れ時間を直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。
     pub fn set_shake_duration_ms(&mut self, ms: u64) {
         self.shake_duration_ms = ms.clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
+    }
+
+    /// 硬直インターバルを直接指定する(起動時、Settingsから読み込んだ値を適用する用途。
+    /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」)。
+    pub fn set_dodge_recovery_ms(&mut self, ms: u64) {
+        self.dodge_recovery_ms = ms.clamp(DODGE_RECOVERY_MS_MIN, DODGE_RECOVERY_MS_MAX);
     }
 
     /// `from_row`以降の岩(X)/AIR/スター/ダイヤブロック出現率を、指定の配分率(%、
@@ -1623,6 +1759,96 @@ mod tests {
         // 演出が終わるとライフが減る。
         game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
         assert_eq!(game.player.lives, LIVES_DEFAULT - 1, "演出後に押し潰されるはず");
+    }
+
+    // --- 掘削アニメーション(TERM独自拡張、9章) ---
+
+    #[test]
+    fn drilling_frame_is_none_before_any_drill_input() {
+        let game = Game::new(60);
+        assert_eq!(game.drilling_frame(), None, "掘削していなければアニメーションフレームは無いはず");
+    }
+
+    #[test]
+    fn drilling_frame_alternates_then_clears_after_drill_anim_duration() {
+        // ユーザー指摘: 「上に掘る時、上向きながらピヨンピヨン跳ねる。左右に掘る時、
+        // 横にドリルをぐいぐい。下に掘る時、下向きながらドリルをぐいぐい」。掘削入力
+        // 直後はアニメーションフレームが交互に切り替わり、DRILL_ANIM_MS経過後は
+        // 通常表示(None)に戻ることを確認する。
+        let mut game = Game::new(61);
+        clear_board(&mut game);
+        game.player.row = 5;
+        game.player.col = 5;
+
+        game.try_drill();
+        assert_eq!(game.drilling_frame(), Some(true), "掘削直後は最初のフレームのはず");
+
+        game.update(Duration::from_millis(DRILL_ANIM_FRAME_MS));
+        assert_eq!(game.drilling_frame(), Some(false), "1フレーム経過で切り替わるはず");
+
+        game.update(Duration::from_millis(DRILL_ANIM_MS - DRILL_ANIM_FRAME_MS + 10));
+        assert_eq!(game.drilling_frame(), None, "DRILL_ANIM_MS経過後は通常表示に戻るはず");
+    }
+
+    // --- ヒヤリ回避スライダー演出(TERM独自拡張、9章) ---
+
+    #[test]
+    fn dodge_slide_triggers_when_a_block_lands_on_the_position_the_player_just_left() {
+        // ユーザー指摘: 「ブロックが落ち始める直前に移動してにげたとき、「わ〜!」って
+        // スライダー(アニメーションしてねキャラ)して切り抜ける感じ」。プレイヤーが
+        // 直前まで居たマスへ、移動直後にブロックが着地した場合にスライダー演出が
+        // 発火することを確認する。
+        let mut game = Game::new(62);
+        clear_board(&mut game);
+        game.set_shake_duration_ms(0); // 揺れ無しで即座に落下させ、シナリオを単純化する
+        game.player.row = 5;
+        game.player.col = 5;
+        game.board.rows[6][4] = Cell::Rock { hits: 0 }; // 移動先(5,4)の真下=足場(player_is_grounded用)
+        game.board.rows[6][5] = Cell::Rock { hits: 0 }; // 現在地(5,5)の真下=足場
+
+        game.try_move_left(); // (5,5) -> (5,4)へ移動。旧位置(5,5)がrender_prev_positionになる
+        assert_eq!(game.player.position(), (5, 4), "左へ1マス移動しているはず");
+
+        game.board.rows[4][5] = Cell::Color(ColorKind::Red); // 旧位置の真上、支えなしで即落下
+
+        assert!(!game.is_dodge_sliding(), "落下前はまだスライダー演出は発火していないはず");
+        game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert!(game.is_dodge_sliding(), "旧位置へブロックが着地したのでスライダー演出が発火するはず");
+        assert_eq!(game.board.cell(5, 5), Cell::Color(ColorKind::Red), "ブロックは旧位置(5,5)へ着地しているはず");
+        assert_eq!(game.status, GameStatus::Playing, "プレイヤー自身は無事なはず");
+    }
+
+    #[test]
+    fn dodge_freeze_lifts_after_dodge_slide_ms_and_dodge_recovery_ms_elapse() {
+        // スライダー演出(Sliding)→硬直(Recovering)の間は入力を凍結し、両方経過すれば
+        // 通常通り入力が通ることを確認する(ユーザー指摘: 「スライダー直後その状態で
+        // 起き上がるまでに1秒インターバル=この設定値も作る」)。
+        let mut game = Game::new(63);
+        clear_board(&mut game);
+        game.set_shake_duration_ms(0);
+        game.set_dodge_recovery_ms(300);
+        game.player.row = 5;
+        game.player.col = 5;
+        game.board.rows[6][4] = Cell::Rock { hits: 0 }; // 移動先(5,4)の真下=足場(player_is_grounded用)
+        game.board.rows[6][5] = Cell::Rock { hits: 0 }; // 現在地(5,5)の真下=足場
+        game.try_move_left();
+        game.board.rows[4][5] = Cell::Color(ColorKind::Red);
+        game.update(Duration::from_millis(FALL_TICK_MS));
+        assert!(game.is_dodge_sliding(), "スライダー演出が発火しているはず");
+
+        game.player.facing = Direction::Down; // 目印としてfacingを固定しておく
+        game.face_up(); // フリーズ中はfacingが変わらないはず
+        assert_eq!(game.player.facing, Direction::Down, "スライダー中は入力を凍結しているはず");
+
+        // tick_dodgeは呼び出しごとにSliding/Recoveringのどちらか一方の残時間しか消費しない
+        // (超過分は次の段階へ繰り越さない)ため、Sliding→Recoveringの遷移をまず1回、
+        // その後Recovering→Noneの遷移をもう1回、と分けて経過させる。
+        game.update(Duration::from_millis(DODGE_SLIDE_MS + 20)); // Sliding -> Recovering
+        game.update(Duration::from_millis(300 + 20)); // Recovering -> None
+
+        game.face_up();
+        assert_eq!(game.player.facing, Direction::Up, "硬直が明ければ再び入力が通るはず");
     }
 
     // --- 移動の見た目補間アニメーション(TERM独自拡張、9章) ---

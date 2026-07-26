@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_TICKS};
+use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS};
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, Pos};
 use crate::game::player::Direction;
 use crate::game::{Game, GameOverChoice, GameStatus};
@@ -345,6 +345,9 @@ pub enum SettingsChoice {
     /// ([ ])でのみ調整可能だったが、ユーザー指摘: 「ブロックが落ちるスピードの
     /// 設定値がないよね」を受け、設定画面からも調整できるようにした。
     BlockFallSpeed,
+    /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms)。
+    /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」。
+    DodgeRecoveryMs,
 }
 
 impl SettingsChoice {
@@ -358,7 +361,8 @@ impl SettingsChoice {
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
             SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
             SettingsChoice::ColorCount => SettingsChoice::BlockFallSpeed,
-            SettingsChoice::BlockFallSpeed => SettingsChoice::Music,
+            SettingsChoice::BlockFallSpeed => SettingsChoice::DodgeRecoveryMs,
+            SettingsChoice::DodgeRecoveryMs => SettingsChoice::Music,
         }
     }
 
@@ -367,7 +371,7 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::BlockFallSpeed,
+            SettingsChoice::Music => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::Se => SettingsChoice::Music,
             SettingsChoice::RockRate => SettingsChoice::Se,
             SettingsChoice::AirRate => SettingsChoice::RockRate,
@@ -375,6 +379,7 @@ impl SettingsChoice {
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
             SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
             SettingsChoice::BlockFallSpeed => SettingsChoice::ColorCount,
+            SettingsChoice::DodgeRecoveryMs => SettingsChoice::BlockFallSpeed,
         }
     }
 }
@@ -393,6 +398,7 @@ pub fn draw_settings(
     diamond_rate_percent: u32,
     color_count: u8,
     block_fall_tick_ms: u64,
+    dodge_recovery_ms: u64,
 ) {
     let area = frame.area();
 
@@ -446,6 +452,11 @@ pub fn draw_settings(
             "ブロック落下速度(小さいほど速い)",
             block_fall_tick_ms,
             selection == SettingsChoice::BlockFallSpeed,
+        ),
+        ms_line(
+            "回避後の硬直時間",
+            dodge_recovery_ms,
+            selection == SettingsChoice::DodgeRecoveryMs,
         ),
         Line::from(""),
         Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
@@ -619,7 +630,17 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
         return; // スクロール範囲外(補間中に上端を跨ぐ極端なケースの防御)
     }
 
-    let px = inner.x as f32 + interp_col * CELL_W as f32;
+    // 「わ〜!」スライダー演出中(TERM独自拡張)は、直前の移動方向へさらに滑り込み、
+    // 進捗が進むにつれ本来の位置へ戻ってくる(ユーザー指摘: 「ブロックが落ち始める
+    // 直前に移動してにげたとき、「わ〜!」ってスライダー(アニメーションしてねキャラ)
+    // して切り間に合う感じ」)。
+    let dodge_offset_cells = if game.is_dodge_sliding() {
+        let dir_col = (cur_col as f32 - prev_col as f32).signum();
+        (1.0 - game.dodge_slide_progress()) * DODGE_SLIDE_OFFSET_CELLS * dir_col
+    } else {
+        0.0
+    };
+    let px = inner.x as f32 + interp_col * CELL_W as f32 + dodge_offset_cells * CELL_W as f32;
     // 「天に召される」演出中(TERM独自拡張)は、進捗に応じてスプライトを上へ
     // ドリフトさせる(ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、
     // 一度天に召される演出をして」)。
@@ -646,10 +667,15 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
 
     if game.crush_flash_active() {
         draw_crushed_sprite(buf, x, y, bg);
+    } else if game.is_dodge_sliding() {
+        draw_player_sprite(buf, x, y, DODGE_SPRITE, bg);
     } else {
-        draw_player_sprite(buf, x, y, game.player.facing, bg);
+        draw_player_sprite(buf, x, y, player_sprite(game.player.facing, game.drilling_frame()), bg);
     }
 }
+
+/// 「わ〜!」スライダー演出で最大どれだけ滑らせるか(論理セル単位、TERM独自拡張)。
+const DODGE_SLIDE_OFFSET_CELLS: f32 = 0.6;
 
 /// 「天に召される」演出でスプライトが上へ昇る距離(論理セル単位、TERM独自拡張)。
 const ASCEND_RISE_CELLS: f32 = 2.0;
@@ -662,13 +688,13 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
         BoardCell::Rock { hits } => draw_rock_block(buf, x, y, board, row, col, hits),
         BoardCell::Oxygen => draw_fixed_unit(buf, x, y, [['○', '○'], ['○', '○']], colors::OXYGEN_FG, colors::OXYGEN_BG),
         BoardCell::Diamond => draw_fixed_unit(buf, x, y, [['◆', '◆'], ['◆', '◆']], colors::DIAMOND_FG, colors::DIAMOND_BG),
-        BoardCell::Star { melting } => draw_fixed_unit(
+        BoardCell::Star { visible_ms } => draw_fixed_unit(
             buf,
             x,
             y,
             [['☆', '☆'], ['☆', '☆']],
             colors::STAR_FG,
-            colors::star_bg(melting, STAR_MELT_TICKS),
+            colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         ),
     }
 }
@@ -818,26 +844,40 @@ fn natural_cell_bg(cell: BoardCell) -> Color {
         BoardCell::Rock { hits } => colors::rock_bg(hits),
         BoardCell::Oxygen => colors::OXYGEN_BG,
         BoardCell::Diamond => colors::DIAMOND_BG,
-        BoardCell::Star { melting } => colors::star_bg(melting, STAR_MELT_TICKS),
+        BoardCell::Star { visible_ms } => colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
     }
 }
 
-fn draw_player_sprite(buf: &mut Buffer, x: u16, y: u16, facing: Direction, bg: Color) {
-    for (dy, line) in player_sprite(facing).iter().enumerate() {
+fn draw_player_sprite(buf: &mut Buffer, x: u16, y: u16, lines: [&str; 2], bg: Color) {
+    for (dy, line) in lines.iter().enumerate() {
         for (dx, ch) in line.chars().enumerate() {
             put(buf, x + dx as u16, y + dy as u16, ch, colors::PLAYER_FG, bg);
         }
     }
 }
 
-fn player_sprite(facing: Direction) -> [&'static str; 2] {
-    match facing {
-        Direction::Down => [" oo ", " \\/ "],
-        Direction::Up => [" /\\ ", " oo "],
-        Direction::Left => ["<oo ", "<== "],
-        Direction::Right => [" oo>", " ==>"],
+/// プレイヤーの向き・掘削演出フレームに応じたスプライト(4文字×2行)を返す(TERM独自
+/// 拡張。ユーザー指摘: 「上に掘る時、上向きながらピヨンピヨン跳ねる。左右に掘る時、
+/// 横にドリルをぐいぐい。下に掘る時、下向きながらドリルをぐいぐい」)。`drilling_frame`が
+/// `None`なら静止スプライト、`Some(_)`なら`DRILL_ANIM_FRAME_MS`ごとに交互する方向別の
+/// 2フレームを返す(掘削は常にfacing方向に対して行われるため、facingがそのまま
+/// 掘削方向になる)。
+fn player_sprite(facing: Direction, drilling_frame: Option<bool>) -> [&'static str; 2] {
+    match (facing, drilling_frame) {
+        (Direction::Down, Some(true)) => [" oo ", " || "],
+        (Direction::Down, _) => [" oo ", " \\/ "],
+        (Direction::Up, Some(true)) => [" /\\ ", " OO "],
+        (Direction::Up, _) => [" /\\ ", " oo "],
+        (Direction::Left, Some(true)) => ["<oo ", "<==="],
+        (Direction::Left, _) => ["<oo ", "<== "],
+        (Direction::Right, Some(true)) => [" oo>", "===>"],
+        (Direction::Right, _) => [" oo>", " ==>"],
     }
 }
+
+/// 「わ〜!」スライダー演出中(TERM独自拡張)のプレイヤースプライト。方向によらず
+/// 常にこの驚き顔で表示する。
+const DODGE_SPRITE: [&str; 2] = ["!OO!", " /\\ "];
 
 /// 落下ブロックに押し潰された際の「潰れた」演出用スプライト(TERM独自拡張、9章)。
 /// GameOverオーバーレイの表示前に一呼吸`CRUSH_FLASH_MS`ぶんだけ表示する。1行目に
@@ -1032,6 +1072,7 @@ mod tests {
             SettingsChoice::DiamondRate,
             SettingsChoice::ColorCount,
             SettingsChoice::BlockFallSpeed,
+            SettingsChoice::DodgeRecoveryMs,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);

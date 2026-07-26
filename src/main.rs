@@ -18,8 +18,9 @@ use rodio::mixer::Mixer;
 
 use constants::{
     COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
-    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
+    SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
+    STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -168,25 +169,38 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
-                            // 配分率・色数・落下速度は←→で調整するので、Spaceは無効(トグル対象ではない)。
+                            // 配分率・色数・落下速度・回避硬直時間は←→で調整するので、Spaceは無効(トグル対象ではない)。
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
-                            | ui::render::SettingsChoice::BlockFallSpeed => {}
+                            | ui::render::SettingsChoice::BlockFallSpeed
+                            | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
-                    // ブロック落下速度の調整(TERM独自拡張)。配分率・色数と異なり盤面の
-                    // 書き換えを伴わないため、即座にgameへ反映してよい。
+                    // ブロック落下速度・回避硬直時間の調整(TERM独自拡張)。配分率・色数と異なり
+                    // 盤面の書き換えを伴わないため、即座にgameへ反映してよい。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
-                            && settings_selection == ui::render::SettingsChoice::BlockFallSpeed =>
+                            && matches!(
+                                settings_selection,
+                                ui::render::SettingsChoice::BlockFallSpeed | ui::render::SettingsChoice::DodgeRecoveryMs
+                            ) =>
                     {
                         let increase = action == InputAction::MoveRight;
-                        settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                        match settings_selection {
+                            ui::render::SettingsChoice::BlockFallSpeed => {
+                                settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                                game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
+                            }
+                            ui::render::SettingsChoice::DodgeRecoveryMs => {
+                                settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
+                                game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
+                            }
+                            _ => {}
+                        }
                         settings.save();
-                        game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                     }
                     // Xブロック/AIR/スター/ダイヤの配分率・色数調整(TERM独自拡張)。プレイ中なので、
                     // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映
@@ -329,6 +343,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
                             settings.block_fall_tick_ms,
+                            settings.dodge_recovery_ms,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -349,6 +364,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.diamond_spawn_rate_percent,
                     settings.color_count,
                     settings.block_fall_tick_ms,
+                    settings.dodge_recovery_ms,
                 )
             })?;
 
@@ -382,7 +398,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
-                            | ui::render::SettingsChoice::BlockFallSpeed => {}
+                            | ui::render::SettingsChoice::BlockFallSpeed
+                            | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -394,6 +411,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::DiamondRate
                                 | ui::render::SettingsChoice::ColorCount
                                 | ui::render::SettingsChoice::BlockFallSpeed
+                                | ui::render::SettingsChoice::DodgeRecoveryMs
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -422,6 +440,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::BlockFallSpeed => {
                                 settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                            }
+                            ui::render::SettingsChoice::DodgeRecoveryMs => {
+                                settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                             }
                             _ => {}
                         }
@@ -456,6 +477,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                         game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                         game.set_shake_duration_ms(settings.shake_duration_ms);
+                        game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
                         // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
                         // 安全地帯明け(行2)以降の全体へ反映する(TERM独自拡張)。
                         game.reroll_spawn_rates_from(
@@ -534,6 +556,19 @@ fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
         (current + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
     } else {
         current.saturating_sub(DEBUG_FALL_TICK_STEP_MS).max(DEBUG_FALL_TICK_MS_MIN)
+    }
+}
+
+/// ヒヤリ回避スライダー後の硬直時間(ms)を`DODGE_RECOVERY_MS_STEP`ぶん増減する
+/// (TERM独自拡張。ユーザー指摘: 「スライダー直後その状態で起き上がるまでに1秒
+/// インターバル=この設定値も作る」)。
+fn adjust_dodge_recovery_ms(current: u64, increase: bool) -> u64 {
+    if increase {
+        (current + DODGE_RECOVERY_MS_STEP).min(DODGE_RECOVERY_MS_MAX)
+    } else {
+        // DODGE_RECOVERY_MS_MINは0固定のため、saturating_subの結果に対する.max()は不要
+        // (clippy::unnecessary_min_or_max)。
+        current.saturating_sub(DODGE_RECOVERY_MS_STEP)
     }
 }
 
