@@ -346,6 +346,9 @@ pub enum SettingsChoice {
     /// 出現する色ブロックの色数(1〜4)。TERM独自拡張。ユーザー指摘: 「出現する色
     /// ブロックの色数を設定で選べるようにしたい(1〜4)」
     ColorCount,
+    /// 色ブロックの結合しやすさ(%、0まで下げられる)。TERM独自拡張。
+    /// ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」
+    ColorClusterRate,
     /// ブロック落下速度(tick間隔, ms)。TERM独自拡張。従来はデバッグショートカット
     /// ([ ])でのみ調整可能だったが、ユーザー指摘: 「ブロックが落ちるスピードの
     /// 設定値がないよね」を受け、設定画面からも調整できるようにした。
@@ -370,7 +373,8 @@ impl SettingsChoice {
             SettingsChoice::AirRate => SettingsChoice::StarRate,
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
             SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
-            SettingsChoice::ColorCount => SettingsChoice::BlockFallSpeed,
+            SettingsChoice::ColorCount => SettingsChoice::ColorClusterRate,
+            SettingsChoice::ColorClusterRate => SettingsChoice::BlockFallSpeed,
             SettingsChoice::BlockFallSpeed => SettingsChoice::PlayerFallSpeed,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::Music,
@@ -389,7 +393,8 @@ impl SettingsChoice {
             SettingsChoice::StarRate => SettingsChoice::AirRate,
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
             SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
-            SettingsChoice::BlockFallSpeed => SettingsChoice::ColorCount,
+            SettingsChoice::ColorClusterRate => SettingsChoice::ColorCount,
+            SettingsChoice::BlockFallSpeed => SettingsChoice::ColorClusterRate,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::BlockFallSpeed,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::PlayerFallSpeed,
         }
@@ -409,6 +414,7 @@ pub fn draw_settings(
     star_rate_percent: u32,
     diamond_rate_percent: u32,
     color_count: u8,
+    color_cluster_rate_percent: u32,
     block_fall_tick_ms: u64,
     player_fall_tick_ms: u64,
     dodge_recovery_ms: u64,
@@ -461,6 +467,11 @@ pub fn draw_settings(
         rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
         rate_line("ダイヤ配分", diamond_rate_percent, selection == SettingsChoice::DiamondRate),
         count_line("色数", color_count, selection == SettingsChoice::ColorCount),
+        rate_line(
+            "色ブロック結合割合",
+            color_cluster_rate_percent,
+            selection == SettingsChoice::ColorClusterRate,
+        ),
         ms_line(
             "ブロック落下速度(小さいほど速い)",
             block_fall_tick_ms,
@@ -1155,6 +1166,7 @@ mod tests {
             SettingsChoice::StarRate,
             SettingsChoice::DiamondRate,
             SettingsChoice::ColorCount,
+            SettingsChoice::ColorClusterRate,
             SettingsChoice::BlockFallSpeed,
             SettingsChoice::PlayerFallSpeed,
             SettingsChoice::DodgeRecoveryMs,

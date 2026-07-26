@@ -388,6 +388,11 @@ impl Board {
     /// 出現確率にボーナスが乗る)(TERM独自拡張の難易度カーブ。ユーザー指摘: 「初期
     /// 配置されるブロックがあまり結合状態になく、個別でばらばらであり、Xブロックが
     /// 結合で大量にあったりするように」)。
+    ///
+    /// `color_cluster_rate_percent`(%、100=通常のまま)は色ブロックの結合しやすさ
+    /// (深度カーブの起点値`COLOR_CLUSTER_DEPTH_START_PROB`)に乗算する係数(TERM独自
+    /// 拡張。ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」)。
+    /// 0%なら深度に関わらず常に完全ランダム抽選(結合ゼロ)になる。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
@@ -397,6 +402,7 @@ impl Board {
         star_rate_percent: u32,
         diamond_rate_percent: u32,
         color_count: u8,
+        color_cluster_rate_percent: u32,
         gravity: &GravityState,
     ) {
         use rand::RngExt;
@@ -406,7 +412,10 @@ impl Board {
 
         for row in from_row..self.rows.len() {
             let fraction = depth_fraction(row);
-            let color_cluster_prob = COLOR_CLUSTER_DEPTH_START_PROB * (1.0 - fraction);
+            let color_cluster_prob = (COLOR_CLUSTER_DEPTH_START_PROB
+                * (1.0 - fraction)
+                * (color_cluster_rate_percent as f32 / 100.0))
+                .clamp(0.0, 1.0);
             let rock_cluster_bonus_if_adjacent = ROCK_CLUSTER_DEPTH_MAX_BONUS * fraction;
 
             for col in 0..FIELD_WIDTH {
@@ -1040,7 +1049,7 @@ mod tests {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 4, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 4, 100, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -1062,7 +1071,7 @@ mod tests {
 
         // 岩/AIR/スター/ダイヤの配分率を全て0にすれば、Empty以外の全セルは必ず
         // Color(通常の色ブロック)へ再抽選される。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         for col in 0..4 {
             assert!(
@@ -1090,9 +1099,9 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 4, &GravityState::new());
+        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 4, 100, &GravityState::new());
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 4, &GravityState::new());
+        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 4, 100, &GravityState::new());
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
@@ -1112,7 +1121,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4, 100, &GravityState::new());
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
@@ -1130,7 +1139,7 @@ mod tests {
             board.rows[2][col] = Cell::Oxygen;
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &GravityState::new());
 
         for row in 0..3 {
             for col in 0..FIELD_WIDTH {
@@ -1155,7 +1164,7 @@ mod tests {
             gravity.shaking_cells.insert((0, col));
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, &gravity);
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &gravity);
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "揺れ中のセルはスターへ変わらないはず");
@@ -1172,7 +1181,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 4, 100, &GravityState::new());
 
         let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
         assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
@@ -1233,7 +1242,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 2, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 2, 100, &GravityState::new());
 
         let mut colors_seen: Vec<ColorKind> = Vec::new();
         for cell in board.rows.iter().flatten() {
@@ -1260,7 +1269,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1, 100, &GravityState::new());
 
         for cell in board.rows.iter().flatten() {
             assert_eq!(*cell, Cell::Color(ColorKind::Red), "color_count=1なら常にColorKind::ALLの先頭色のみ");
@@ -1310,7 +1319,7 @@ mod tests {
             }
         }
         // 岩/AIR/スター/ダイヤは無しにして、純粋に色の連結だけを観測する。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         let shallow_avg = avg_run_length_in_range(&board, 2..200);
         let deep_avg = avg_run_length_in_range(&board, 800..1000);
@@ -1318,6 +1327,66 @@ mod tests {
         assert!(
             shallow_avg > deep_avg + 0.1,
             "浅い深度の方が横方向のまとまりが強いはず: shallow={shallow_avg}, deep={deep_avg}"
+        );
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_color_cluster_rate_percent_scales_clustering_strength() {
+        // ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」。
+        // 同じ浅い深度帯でも、color_cluster_rate_percentを0%にすると常に均等
+        // ランダム抽選になり、100%(既定)時より横方向のまとまりが明確に弱くなる
+        // ことを確認する。
+        fn avg_run_length_in_range(board: &Board, rows: std::ops::Range<usize>) -> f64 {
+            let mut total_len = 0u64;
+            let mut total_runs = 0u64;
+            for row in rows {
+                let mut run_color: Option<ColorKind> = None;
+                let mut run_len = 0u64;
+                for col in 0..FIELD_WIDTH {
+                    let c = match board.cell(row, col) {
+                        Cell::Color(k) => Some(k),
+                        _ => None,
+                    };
+                    if c.is_some() && c == run_color {
+                        run_len += 1;
+                    } else {
+                        if run_color.is_some() {
+                            total_len += run_len;
+                            total_runs += 1;
+                        }
+                        run_color = c;
+                        run_len = if c.is_some() { 1 } else { 0 };
+                    }
+                }
+                if run_color.is_some() {
+                    total_len += run_len;
+                    total_runs += 1;
+                }
+            }
+            if total_runs == 0 { 0.0 } else { total_len as f64 / total_runs as f64 }
+        }
+
+        fn make_board() -> Board {
+            let mut board = empty_board(200);
+            for row in 0..200 {
+                for col in 0..FIELD_WIDTH {
+                    board.rows[row][col] = Cell::Color(ColorKind::Red);
+                }
+            }
+            board
+        }
+
+        let mut zero_rate = make_board();
+        zero_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 0, &GravityState::new());
+        let mut default_rate = make_board();
+        default_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+
+        let zero_avg = avg_run_length_in_range(&zero_rate, 2..200);
+        let default_avg = avg_run_length_in_range(&default_rate, 2..200);
+
+        assert!(
+            default_avg > zero_avg + 0.1,
+            "100%設定の方が0%設定よりまとまりが強いはず: zero={zero_avg}, default={default_avg}"
         );
     }
 
@@ -1357,7 +1426,7 @@ mod tests {
             }
         }
         // 岩の出現率を上限(300%)にして、隣接ボーナスの効果を観測しやすくする。
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, 100, &GravityState::new());
 
         let shallow_avg = avg_rock_group_size_in_range(&board, 2..200);
         let deep_avg = avg_rock_group_size_in_range(&board, 800..1000);
@@ -1405,7 +1474,7 @@ mod tests {
                 board.rows[row][col] = Cell::Color(ColorKind::Red);
             }
         }
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, &GravityState::new());
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, 100, &GravityState::new());
 
         for row in 800..1000 {
             let all_rock = (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }));

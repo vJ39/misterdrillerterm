@@ -493,7 +493,9 @@ impl Game {
     /// 演出をして、ブロックが消える処理されてから、元の位置に復活」)。ライフが0になる
     /// 場合はこの演出を行わず、従来通り即座にGameOverダイアログへ進む(ユーザー指摘:
     /// 「livesが0になったときはただちにゲームオーバーのダイアログ出てOK」)。
-    /// 酸素切れ由来のミスはどちらの演出も行わず即座に処理する。
+    /// 酸素切れ由来のミスは演出こそ行わず即座に処理するが、3列クリア自体は押し潰し死亡
+    /// と同様に行う(TERM独自拡張。ユーザー指摘: 「死んだら[r]を発動させたようなものを
+    /// キャラの列と左右の列(3列)をクリアしてほしい」)。
     fn apply_miss(&mut self, events: &mut Vec<GameEvent>, is_crush: bool) {
         if is_crush {
             self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
@@ -517,6 +519,7 @@ impl Game {
             return;
         }
 
+        self.clear_three_columns_above_player();
         let game_over = self.player.lose_life();
         if game_over {
             self.status = GameStatus::GameOver;
@@ -1030,6 +1033,10 @@ impl Game {
     /// 行を渡せば盤面全体に反映され、プレイ中に呼ぶ場合は呼び出し側が
     /// `player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`のような画面外の行を渡すことで、
     /// 既に見えている地形を変えてしまわないようにする。
+    ///
+    /// `color_cluster_rate_percent`(%、100=通常のまま)は色ブロックの結合しやすさを
+    /// 調整する(TERM独自拡張。ユーザー指摘: 「ブロック配置の結合関係の割合を設定
+    /// できるようにして」)。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_spawn_rates_from(
         &mut self,
@@ -1039,6 +1046,7 @@ impl Game {
         star_rate_percent: u32,
         diamond_rate_percent: u32,
         color_count: u8,
+        color_cluster_rate_percent: u32,
     ) {
         self.board.reroll_overlays_from_row(
             from_row,
@@ -1047,6 +1055,7 @@ impl Game {
             star_rate_percent,
             diamond_rate_percent,
             color_count,
+            color_cluster_rate_percent,
             &self.gravity_state,
         );
     }
@@ -1884,6 +1893,36 @@ mod tests {
         game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
 
         assert_eq!(game.player.lives, 1, "押し潰されてライフを1つ失っているはず");
+        for row in 0..999 {
+            assert_eq!(game.board.cell(row, 4), Cell::Empty, "row={row} col=4はクリアされているはず");
+            assert_eq!(game.board.cell(row, 5), Cell::Empty, "row={row} col=5はクリアされているはず");
+            assert_eq!(game.board.cell(row, 6), Cell::Empty, "row={row} col=6はクリアされているはず");
+        }
+        assert_eq!(game.board.cell(999, 3), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+        assert_eq!(game.board.cell(999, 7), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+    }
+
+    #[test]
+    fn oxygen_death_also_clears_three_columns_above_the_player() {
+        // ユーザー指摘: 「死んだら[r]を発動させたようなものをキャラの列と左右の列
+        // (3列)をクリアしてほしい」。押し潰し死亡だけでなく、酸素切れ死亡でも
+        // 同様に3列クリアが行われることを確認する。
+        let mut game = Game::new_with_lives(34, 2); // ライフ2、酸素切れでも即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        for row in 990..999 {
+            game.board.rows[row][4] = Cell::Color(ColorKind::Blue);
+            game.board.rows[row][5] = Cell::Color(ColorKind::Blue);
+            game.board.rows[row][6] = Cell::Color(ColorKind::Blue);
+        }
+        game.board.rows[999][3] = Cell::Color(ColorKind::Green);
+        game.board.rows[999][7] = Cell::Color(ColorKind::Green);
+        game.player.oxygen = 1.0;
+
+        game.update(Duration::from_secs(1)); // 酸素切れでミス(押し潰しではない)
+
+        assert_eq!(game.player.lives, 1, "酸素切れでライフを1つ失っているはず");
         for row in 0..999 {
             assert_eq!(game.board.cell(row, 4), Cell::Empty, "row={row} col=4はクリアされているはず");
             assert_eq!(game.board.cell(row, 5), Cell::Empty, "row={row} col=5はクリアされているはず");

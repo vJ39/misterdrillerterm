@@ -191,6 +191,12 @@ pub const STAR_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 /// 出現させない(0%)設定も許可する。ユーザー指摘: 「ダイヤブロック0%設定」。
 pub const DIAMOND_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 
+/// 色ブロックの結合しやすさ(隣接色を継承する確率、`COLOR_CLUSTER_DEPTH_START_PROB`に
+/// 乗算する係数%)の設定の下限(TERM独自拡張)。スター/ダイヤと同様、完全にバラバラ
+/// (0%、常に均等ランダム抽選)にする設定も許可する。ユーザー指摘: 「ブロック配置の
+/// 結合関係の割合を設定できるようにして」。
+pub const COLOR_CLUSTER_RATE_PERCENT_MIN: u32 = 0;
+
 /// 出現する色ブロックの色数設定(TERM独自拡張)。`ColorKind::ALL`の先頭からこの数だけを
 /// 使う。ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい(1〜4)」。
 pub const COLOR_COUNT_MIN: u8 = 1;

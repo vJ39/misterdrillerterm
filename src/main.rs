@@ -20,8 +20,8 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
+    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
+    DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
     SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
     STAR_SPAWN_RATE_PERCENT_MIN,
 };
@@ -198,6 +198,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
+                            | ui::render::SettingsChoice::ColorClusterRate
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
@@ -244,6 +245,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::StarRate
                                     | ui::render::SettingsChoice::DiamondRate
                                     | ui::render::SettingsChoice::ColorCount
+                                    | ui::render::SettingsChoice::ColorClusterRate
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -270,6 +272,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::ColorCount => {
                                 settings.color_count = adjust_color_count(settings.color_count, increase);
                             }
+                            ui::render::SettingsChoice::ColorClusterRate => {
+                                settings.color_cluster_rate_percent = adjust_rate_percent(
+                                    settings.color_cluster_rate_percent,
+                                    increase,
+                                    COLOR_CLUSTER_RATE_PERCENT_MIN,
+                                );
+                            }
                             _ => {}
                         }
                         settings.save();
@@ -281,6 +290,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
+                            settings.color_cluster_rate_percent,
                         );
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
@@ -372,6 +382,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
+                            settings.color_cluster_rate_percent,
                             settings.block_fall_tick_ms,
                             settings.player_fall_tick_ms,
                             settings.dodge_recovery_ms,
@@ -394,6 +405,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.star_spawn_rate_percent,
                     settings.diamond_spawn_rate_percent,
                     settings.color_count,
+                    settings.color_cluster_rate_percent,
                     settings.block_fall_tick_ms,
                     settings.player_fall_tick_ms,
                     settings.dodge_recovery_ms,
@@ -430,6 +442,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
+                            | ui::render::SettingsChoice::ColorClusterRate
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
@@ -443,6 +456,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::StarRate
                                 | ui::render::SettingsChoice::DiamondRate
                                 | ui::render::SettingsChoice::ColorCount
+                                | ui::render::SettingsChoice::ColorClusterRate
                                 | ui::render::SettingsChoice::BlockFallSpeed
                                 | ui::render::SettingsChoice::PlayerFallSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
@@ -471,6 +485,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::ColorCount => {
                                 settings.color_count = adjust_color_count(settings.color_count, increase);
+                            }
+                            ui::render::SettingsChoice::ColorClusterRate => {
+                                settings.color_cluster_rate_percent = adjust_rate_percent(
+                                    settings.color_cluster_rate_percent,
+                                    increase,
+                                    COLOR_CLUSTER_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::BlockFallSpeed => {
                                 settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
@@ -524,6 +545,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
+                            settings.color_cluster_rate_percent,
                         );
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
