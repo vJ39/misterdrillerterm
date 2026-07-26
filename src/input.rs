@@ -19,7 +19,12 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Right => InputAction::MoveRight,
         KeyCode::Up => InputAction::FaceUp,
         KeyCode::Down => InputAction::FaceDown,
-        KeyCode::Char(' ') => InputAction::Drill,
+        // 掘削キー(TERM独自拡張。ユーザー指摘: 「掘るボタンはXとZキー(どちらも
+        // 掘れる)」)。どちらのキーでも同じ掘削として扱う。
+        KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('z') | KeyCode::Char('Z') => InputAction::Drill,
+        // 一時停止(TERM独自拡張。ユーザー指摘: 「スペースはポーズ」)。既存のPキーも
+        // 引き続き有効(併用)。
+        KeyCode::Char(' ') => InputAction::TogglePause,
         KeyCode::Char('p') | KeyCode::Char('P') => InputAction::TogglePause,
         KeyCode::Char('q') | KeyCode::Char('Q') => InputAction::Quit,
         // 一時停止中のみ意味を持つ、MUSIC/SE個別トグル(TERM独自拡張。ユーザー指摘:
@@ -32,7 +37,8 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // デバッグショートカット(TERM独自拡張、動作確認用)。
         KeyCode::Char('c') | KeyCode::Char('C') => InputAction::DebugUnifyNearbyColors,
         KeyCode::Char('l') | KeyCode::Char('L') => InputAction::DebugAddLife,
-        KeyCode::Char('x') | KeyCode::Char('X') => InputAction::DebugClearAbovePlayer,
+        // 元はXキーだったが、掘削キー(X/Z)と衝突するためRキーへ変更した。
+        KeyCode::Char('r') | KeyCode::Char('R') => InputAction::DebugClearAbovePlayer,
         KeyCode::Char('[') => InputAction::DebugBlockFallSlower,
         KeyCode::Char(']') => InputAction::DebugBlockFallFaster,
         KeyCode::Char('-') => InputAction::DebugPlayerFallSlower,
@@ -117,7 +123,13 @@ mod tests {
     fn action_from_key_code_maps_known_shortcuts() {
         assert_eq!(action_from_key_code(KeyCode::Left), InputAction::MoveLeft);
         assert_eq!(action_from_key_code(KeyCode::Char('p')), InputAction::TogglePause);
-        assert_eq!(action_from_key_code(KeyCode::Char(' ')), InputAction::Drill);
+        // ユーザー指摘: 「掘るボタンはXとZキー(どちらも掘れる)」「スペースはポーズ」。
+        assert_eq!(action_from_key_code(KeyCode::Char('x')), InputAction::Drill);
+        assert_eq!(action_from_key_code(KeyCode::Char('X')), InputAction::Drill);
+        assert_eq!(action_from_key_code(KeyCode::Char('z')), InputAction::Drill);
+        assert_eq!(action_from_key_code(KeyCode::Char('Z')), InputAction::Drill);
+        assert_eq!(action_from_key_code(KeyCode::Char(' ')), InputAction::TogglePause);
+        assert_eq!(action_from_key_code(KeyCode::Char('r')), InputAction::DebugClearAbovePlayer);
     }
 
     #[test]
@@ -127,6 +139,6 @@ mod tests {
         // いないキーはUnboundKeyになる(main.rs側で一時停止中の再開トリガーに使う)。
         assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::UnboundKey);
         assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::UnboundKey);
-        assert_eq!(action_from_key_code(KeyCode::Char('z')), InputAction::UnboundKey);
+        assert_eq!(action_from_key_code(KeyCode::Char('y')), InputAction::UnboundKey);
     }
 }

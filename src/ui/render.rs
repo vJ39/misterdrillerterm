@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS};
+use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS};
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, Pos};
 use crate::game::player::Direction;
 use crate::game::{Game, GameOverChoice, GameStatus};
@@ -293,7 +293,7 @@ pub fn draw_help(frame: &mut Frame) {
     let paragraph = Paragraph::new(vec![
         heading("== 操作 =="),
         line("←/→: 移動(掘削を伴う)      ↑/↓: 向きを変える(掘削なし)"),
-        line("Space: 掘削(向いている方向) P: 一時停止"),
+        line("X/Z: 掘削(向いている方向)   Space/P: 一時停止"),
         line("Q: タイトルへ戻る/終了"),
         line("S: 設定画面   H: このヘルプ (プレイ中に押すと自動で一時停止する)"),
         line(""),
@@ -303,7 +303,7 @@ pub fn draw_help(frame: &mut Frame) {
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1"),
-        line("X: 自分より上のブロックを全削除"),
+        line("R: 自分より上のブロックを全削除"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
         line(", / .: 揺れ時間 長く/短く"),
@@ -345,6 +345,11 @@ pub enum SettingsChoice {
     /// ([ ])でのみ調整可能だったが、ユーザー指摘: 「ブロックが落ちるスピードの
     /// 設定値がないよね」を受け、設定画面からも調整できるようにした。
     BlockFallSpeed,
+    /// キャラ自身の自由落下速度(tick間隔, ms)。TERM独自拡張。従来はデバッグ
+    /// ショートカット(-/=)でのみ調整可能だったが、ユーザー指摘: 「設定画面から、
+    /// キャラに関する落下などの設定がなくなってる」を受け、設定画面からも
+    /// 調整できるようにした。
+    PlayerFallSpeed,
     /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms)。
     /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」。
     DodgeRecoveryMs,
@@ -361,7 +366,8 @@ impl SettingsChoice {
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
             SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
             SettingsChoice::ColorCount => SettingsChoice::BlockFallSpeed,
-            SettingsChoice::BlockFallSpeed => SettingsChoice::DodgeRecoveryMs,
+            SettingsChoice::BlockFallSpeed => SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::PlayerFallSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::Music,
         }
     }
@@ -379,7 +385,8 @@ impl SettingsChoice {
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
             SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
             SettingsChoice::BlockFallSpeed => SettingsChoice::ColorCount,
-            SettingsChoice::DodgeRecoveryMs => SettingsChoice::BlockFallSpeed,
+            SettingsChoice::PlayerFallSpeed => SettingsChoice::BlockFallSpeed,
+            SettingsChoice::DodgeRecoveryMs => SettingsChoice::PlayerFallSpeed,
         }
     }
 }
@@ -398,6 +405,7 @@ pub fn draw_settings(
     diamond_rate_percent: u32,
     color_count: u8,
     block_fall_tick_ms: u64,
+    player_fall_tick_ms: u64,
     dodge_recovery_ms: u64,
 ) {
     let area = frame.area();
@@ -452,6 +460,11 @@ pub fn draw_settings(
             "ブロック落下速度(小さいほど速い)",
             block_fall_tick_ms,
             selection == SettingsChoice::BlockFallSpeed,
+        ),
+        ms_line(
+            "キャラの落下速度(小さいほど速い)",
+            player_fall_tick_ms,
+            selection == SettingsChoice::PlayerFallSpeed,
         ),
         ms_line(
             "回避後の硬直時間",
@@ -692,10 +705,21 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
             buf,
             x,
             y,
-            [['☆', '☆'], ['☆', '☆']],
+            [[star_glyph(visible_ms); 2]; 2],
             colors::STAR_FG,
             colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         ),
+    }
+}
+
+/// スターブロックのキラキラ点滅グリフ(TERM独自拡張。ユーザー指摘: 「スターブロックは
+/// 消えるまえからキラキラしてほしい」)。画面内に入ってから消えるまでの間ずっと、
+/// `STAR_SPARKLE_PERIOD_MS`ごとに☆/★を交互に切り替える。
+fn star_glyph(visible_ms: u32) -> char {
+    if (visible_ms / STAR_SPARKLE_PERIOD_MS).is_multiple_of(2) {
+        '☆'
+    } else {
+        '★'
     }
 }
 
@@ -1051,6 +1075,18 @@ fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoi
 mod tests {
     use super::*;
 
+    #[test]
+    fn star_glyph_toggles_every_sparkle_period_starting_from_visible() {
+        // ユーザー指摘: 「スターブロックは消えるまえからキラキラしてほしい」。
+        // 画面内に入った直後(visible_ms=0)から既にキラキラの切り替えが起きている
+        // ことを確認する。
+        assert_eq!(star_glyph(0), '☆');
+        assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS - 1), '☆');
+        assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS), '★');
+        assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS * 2 - 1), '★');
+        assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS * 2), '☆');
+    }
+
     fn board_with(rows: usize) -> Board {
         Board {
             rows: vec![[BoardCell::Empty; FIELD_WIDTH]; rows],
@@ -1072,6 +1108,7 @@ mod tests {
             SettingsChoice::DiamondRate,
             SettingsChoice::ColorCount,
             SettingsChoice::BlockFallSpeed,
+            SettingsChoice::PlayerFallSpeed,
             SettingsChoice::DodgeRecoveryMs,
         ];
         for choice in all {

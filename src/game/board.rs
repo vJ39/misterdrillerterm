@@ -251,6 +251,7 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         0.0,
+        true, // 初期生成の候補は常に「まだ色ブロック」なのでスター抽選の対象
     )
 }
 
@@ -262,6 +263,12 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
 /// ユーザー指摘: 「Xブロックが結合で大量にあったりするように」)。呼び出し側が
 /// 隣接セルが岩かどうか・深度に応じて算出する。`Board::generate`(初期生成、後で
 /// `reroll_overlays_from_row`により上書きされる)では常に0.0を渡し無効化する。
+///
+/// `allow_star`がfalseの場合、スターへの抽選そのものを無効化する(TERM独自拡張。
+/// ユーザー指摘: 「スターブロックに変わる対象ブロックは色ブロックのみで、Xブロック、
+/// ダイヤブロック、AIRは対象外とする」「ぐらぐら/落下中のブロックはスターブロックへの
+/// 変化対象外とする」)。呼び出し側(`reroll_overlays_from_row`)が、再抽選対象セルが
+/// 元々色ブロック(またはスター自身)だったか、揺れ中/落下中でないかを判定して渡す。
 #[allow(clippy::too_many_arguments)]
 fn overlay_rock_oxygen_diamond_with_rates(
     rng: &mut ChaCha8Rng,
@@ -272,11 +279,16 @@ fn overlay_rock_oxygen_diamond_with_rates(
     star_rate_percent: u32,
     diamond_rate_percent: u32,
     rock_cluster_bonus: f32,
+    allow_star: bool,
 ) -> Cell {
     let mut t = band_table(row);
     t.rock = (t.rock * rock_rate_percent as f32 / 100.0 + rock_cluster_bonus).clamp(0.0, 0.9);
     t.oxygen = (t.oxygen * air_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
-    t.star = (t.star * star_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    t.star = if allow_star {
+        (t.star * star_rate_percent as f32 / 100.0).clamp(0.0, 0.9)
+    } else {
+        0.0
+    };
     t.diamond = (t.diamond * diamond_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
 
     let r: f32 = rng.random_range(0.0..1.0);
@@ -385,6 +397,7 @@ impl Board {
         star_rate_percent: u32,
         diamond_rate_percent: u32,
         color_count: u8,
+        gravity: &GravityState,
     ) {
         use rand::RngExt;
         let seed: u64 = rand::rng().random();
@@ -397,7 +410,8 @@ impl Board {
             let rock_cluster_bonus_if_adjacent = ROCK_CLUSTER_DEPTH_MAX_BONUS * fraction;
 
             for col in 0..FIELD_WIDTH {
-                if self.rows[row][col] == Cell::Empty {
+                let current = self.rows[row][col];
+                if current == Cell::Empty {
                     continue;
                 }
 
@@ -412,6 +426,14 @@ impl Board {
                     matches!(left, Some(Cell::Rock { .. })) || matches!(top, Some(Cell::Rock { .. }));
                 let rock_cluster_bonus = if adjacent_is_rock { rock_cluster_bonus_if_adjacent } else { 0.0 };
 
+                // スターへの再抽選は、元が色ブロック(またはスター自身)だったセルに限る
+                // (TERM独自拡張。ユーザー指摘: 「スターブロックに変わる対象ブロックは
+                // 色ブロックのみで、Xブロック、ダイヤブロック、AIRは対象外とする」)。
+                // 揺れ中/落下中のセルも対象外にする(ユーザー指摘: 「ぐらぐら/落下中の
+                // ブロックはスターブロックへの変化対象外とする」)。
+                let was_rock_diamond_or_oxygen = matches!(current, Cell::Rock { .. } | Cell::Diamond | Cell::Oxygen);
+                let allow_star = !was_rock_diamond_or_oxygen && !gravity.is_shaking((row, col));
+
                 self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
                     &mut rng,
                     fresh_color,
@@ -421,6 +443,7 @@ impl Board {
                     star_rate_percent,
                     diamond_rate_percent,
                     rock_cluster_bonus,
+                    allow_star,
                 );
             }
 
@@ -1011,7 +1034,7 @@ mod tests {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 4); // 岩/AIR/スター/ダイヤの確率を0に
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 4, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -1033,7 +1056,7 @@ mod tests {
 
         // 岩/AIR/スター/ダイヤの配分率を全て0にすれば、Empty以外の全セルは必ず
         // Color(通常の色ブロック)へ再抽選される。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4);
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, &GravityState::new());
 
         for col in 0..4 {
             assert!(
@@ -1061,9 +1084,9 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 4);
+        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 4, &GravityState::new());
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 4);
+        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 4, &GravityState::new());
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
@@ -1083,10 +1106,53 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4);
+        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4, &GravityState::new());
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_never_converts_existing_rock_diamond_or_oxygen_cells_into_stars() {
+        // ユーザー指摘: 「スターブロックに変わる対象ブロックは色ブロックのみで、Xブロック、
+        // ダイヤブロック、AIRは対象外とする」。既存のRock/Diamond/Oxygenセルは、岩/ダイヤ/AIR
+        // 配分率を0%にしてスター配分率を上限にしても、スターへは変わらないことを確認する。
+        let mut board = empty_board(3);
+        for col in 0..FIELD_WIDTH {
+            board.rows[0][col] = Cell::Rock { hits: 0 };
+            board.rows[1][col] = Cell::Diamond;
+            board.rows[2][col] = Cell::Oxygen;
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, &GravityState::new());
+
+        for row in 0..3 {
+            for col in 0..FIELD_WIDTH {
+                assert!(
+                    !matches!(board.cell(row, col), Cell::Star { .. }),
+                    "row={row} col={col}は元がRock/Diamond/Oxygenなのでスターへ変わらないはず: {:?}",
+                    board.cell(row, col)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_never_converts_shaking_cells_into_stars() {
+        // ユーザー指摘: 「ぐらぐら/落下中のブロックはスターブロックへの変化対象外とする」。
+        let mut board = empty_board(1);
+        for col in 0..FIELD_WIDTH {
+            board.rows[0][col] = Cell::Color(ColorKind::Red);
+        }
+        let mut gravity = GravityState::new();
+        for col in 0..FIELD_WIDTH {
+            gravity.shaking_cells.insert((0, col));
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, &gravity);
+
+        let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
+        assert_eq!(star_count, 0, "揺れ中のセルはスターへ変わらないはず");
     }
 
     #[test]
@@ -1100,7 +1166,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 4);
+        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 4, &GravityState::new());
 
         let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
         assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
@@ -1161,7 +1227,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 2);
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 2, &GravityState::new());
 
         let mut colors_seen: Vec<ColorKind> = Vec::new();
         for cell in board.rows.iter().flatten() {
@@ -1188,7 +1254,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1);
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1, &GravityState::new());
 
         for cell in board.rows.iter().flatten() {
             assert_eq!(*cell, Cell::Color(ColorKind::Red), "color_count=1なら常にColorKind::ALLの先頭色のみ");
@@ -1238,7 +1304,7 @@ mod tests {
             }
         }
         // 岩/AIR/スター/ダイヤは無しにして、純粋に色の連結だけを観測する。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4);
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, &GravityState::new());
 
         let shallow_avg = avg_run_length_in_range(&board, 2..200);
         let deep_avg = avg_run_length_in_range(&board, 800..1000);
@@ -1285,7 +1351,7 @@ mod tests {
             }
         }
         // 岩の出現率を上限(300%)にして、隣接ボーナスの効果を観測しやすくする。
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4);
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, &GravityState::new());
 
         let shallow_avg = avg_rock_group_size_in_range(&board, 2..200);
         let deep_avg = avg_rock_group_size_in_range(&board, 800..1000);
@@ -1333,7 +1399,7 @@ mod tests {
                 board.rows[row][col] = Cell::Color(ColorKind::Red);
             }
         }
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4);
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, &GravityState::new());
 
         for row in 800..1000 {
             let all_rock = (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }));

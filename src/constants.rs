@@ -152,6 +152,10 @@ pub const STAR_SPAWN_PROB: f32 = 0.015;
 pub const STAR_VISIBLE_GRACE_MS: u32 = 5000;
 /// 猶予時間経過後、スターブロックが完全に溶けて消えるまでの所要時間(ms、実時間)。
 pub const STAR_MELT_DURATION_MS: u32 = 1000;
+/// スターブロックが画面内にある間ずっと(消える前から)キラキラ点滅する周期(ms、
+/// 実時間。TERM独自拡張。ユーザー指摘: 「スターブロックは消えるまえからキラキラ
+/// してほしい」)。`visible_ms`をこの値で割った商の偶奇で☆/★を切り替える。
+pub const STAR_SPARKLE_PERIOD_MS: u32 = 400;
 /// 「画面内」とみなす、プレイヤー位置からの行範囲(上下±この値、TERM独自拡張)。
 /// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数)に合わせている。
 pub const STAR_VISIBLE_RANGE_ROWS: usize = 14;

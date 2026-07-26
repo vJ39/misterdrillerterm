@@ -80,10 +80,11 @@ pub const OXYGEN_FG: Color = Color::Rgb(255, 255, 255);
 pub const DIAMOND_BG: Color = Color::Rgb(196, 149, 60);
 pub const DIAMOND_FG: Color = Color::Rgb(255, 244, 214);
 
-/// スターブロックの背景色(無傷時)。
-pub const STAR_BG: Color = Color::Rgb(230, 200, 40);
-/// スターブロックの前景色。
-pub const STAR_FG: Color = Color::Rgb(255, 250, 210);
+/// スターブロックの背景色(無傷時、TERM独自拡張。ユーザー指摘: 「スターブロックって、
+/// 白い見た目の独立したブロックだよ」)。
+pub const STAR_BG: Color = Color::Rgb(245, 245, 245);
+/// スターブロックの前景色(☆/★マークの色)。
+pub const STAR_FG: Color = Color::Rgb(255, 210, 60);
 
 /// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
 /// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、

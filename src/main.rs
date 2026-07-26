@@ -176,16 +176,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
                             | ui::render::SettingsChoice::BlockFallSpeed
+                            | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
-                    // ブロック落下速度・回避硬直時間の調整(TERM独自拡張)。配分率・色数と異なり
-                    // 盤面の書き換えを伴わないため、即座にgameへ反映してよい。
+                    // ブロック落下速度・キャラ落下速度・回避硬直時間の調整(TERM独自拡張)。
+                    // 配分率・色数と異なり盤面の書き換えを伴わないため、即座にgameへ反映してよい。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
                             && matches!(
                                 settings_selection,
-                                ui::render::SettingsChoice::BlockFallSpeed | ui::render::SettingsChoice::DodgeRecoveryMs
+                                ui::render::SettingsChoice::BlockFallSpeed
+                                    | ui::render::SettingsChoice::PlayerFallSpeed
+                                    | ui::render::SettingsChoice::DodgeRecoveryMs
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -193,6 +196,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::BlockFallSpeed => {
                                 settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
                                 game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
+                            }
+                            ui::render::SettingsChoice::PlayerFallSpeed => {
+                                settings.player_fall_tick_ms = adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
+                                game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                             }
                             ui::render::SettingsChoice::DodgeRecoveryMs => {
                                 settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
@@ -343,6 +350,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
                             settings.block_fall_tick_ms,
+                            settings.player_fall_tick_ms,
                             settings.dodge_recovery_ms,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
@@ -364,6 +372,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.diamond_spawn_rate_percent,
                     settings.color_count,
                     settings.block_fall_tick_ms,
+                    settings.player_fall_tick_ms,
                     settings.dodge_recovery_ms,
                 )
             })?;
@@ -399,6 +408,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
                             | ui::render::SettingsChoice::BlockFallSpeed
+                            | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
@@ -411,6 +421,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::DiamondRate
                                 | ui::render::SettingsChoice::ColorCount
                                 | ui::render::SettingsChoice::BlockFallSpeed
+                                | ui::render::SettingsChoice::PlayerFallSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                         ) =>
                     {
@@ -440,6 +451,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::BlockFallSpeed => {
                                 settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                            }
+                            ui::render::SettingsChoice::PlayerFallSpeed => {
+                                settings.player_fall_tick_ms = adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
                             }
                             ui::render::SettingsChoice::DodgeRecoveryMs => {
                                 settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);

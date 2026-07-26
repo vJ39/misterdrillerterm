@@ -986,6 +986,7 @@ impl Game {
             star_rate_percent,
             diamond_rate_percent,
             color_count,
+            &self.gravity_state,
         );
     }
 
