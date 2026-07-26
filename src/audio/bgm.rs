@@ -1,636 +1,220 @@
-//! BGM: 90年代後半のアーケードゲーム感を狙った完全オリジナルの8小節ループ。
-//! 矩形波リード、矩形波の対旋律、三角波ベース、サイン波コードの4チャンネル構成。
+//! BGM: 「地底のダンス」を6トラックのノートイベントデータ(`bgm_data`)から
+//! 再生する(TERM独自拡張。#131)。従来は手動で調律・和声修正した16小節ループの
+//! 4声ステップシーケンサーだったが、ユーザーが原曲から生成した6ステム
+//! (vocals/bass/other_voice1/other_voice2/percussion_low/percussion_high)を
+//! ピッチ検出ツール`mp3tobeep`でノートイベント化した実測データへ差し替えた。
+//! 各トラックの開始秒に合わせて絶対時刻ベースで鳴らし分け、原曲の全長
+//! (`bgm_data::DURATION_SEC`)が経過したら先頭へループする。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use rodio::Player;
 use rodio::mixer::Mixer;
+use rodio::Player;
 
-use crate::audio::sfx::{sine_chord, square_tone_enveloped, triangle_tone_enveloped};
+use crate::audio::bgm_data::{self, NoteEvent};
+use crate::audio::sfx::{square_tone_enveloped, triangle_tone_enveloped};
 
-const LEAD_VOLUME: f32 = 0.17;
-const COUNTER_VOLUME: f32 = 0.09;
+/// 各トラックの再生カーソルを進める間隔。ノートの最短の長さ(打楽器で約80ms)
+/// より十分細かく、かつCPU負荷を抑えられる粒度にしている。
+const TICK_MS: u64 = 10;
+
+const VOCALS_VOLUME: f32 = 0.17;
+const VOCALS_AMPLITUDE: f32 = 0.50;
+const VOCALS_ATTACK_MS: u64 = 3;
+const VOCALS_DECAY_MS: u64 = 30;
+const VOCALS_SUSTAIN: f32 = 0.55;
+
+const VOICE1_VOLUME: f32 = 0.09;
+const VOICE1_AMPLITUDE: f32 = 0.34;
+const VOICE1_ATTACK_MS: u64 = 2;
+const VOICE1_DECAY_MS: u64 = 20;
+const VOICE1_SUSTAIN: f32 = 0.42;
+
+const VOICE2_VOLUME: f32 = 0.08;
+const VOICE2_AMPLITUDE: f32 = 0.30;
+const VOICE2_ATTACK_MS: u64 = 2;
+const VOICE2_DECAY_MS: u64 = 22;
+const VOICE2_SUSTAIN: f32 = 0.40;
+
 const BASS_VOLUME: f32 = 0.17;
-const CHORD_VOLUME: f32 = 0.11;
-
-const BPM: u64 = 156;
-const STEP_MS: u64 = 60_000 / BPM / 4;
-const FOUR_STEPS_MS: u64 = STEP_MS * 4;
-
-const LEAD_AMPLITUDE: f32 = 0.48;
-const COUNTER_AMPLITUDE: f32 = 0.34;
 const BASS_AMPLITUDE: f32 = 0.58;
-const CHORD_AMPLITUDE: f32 = 0.46;
-
-const LEAD_ATTACK_MS: u64 = 3;
-const LEAD_DECAY_MS: u64 = 28;
-const LEAD_SUSTAIN: f32 = 0.56;
-
-const COUNTER_ATTACK_MS: u64 = 2;
-const COUNTER_DECAY_MS: u64 = 20;
-const COUNTER_SUSTAIN: f32 = 0.42;
-
 const BASS_ATTACK_MS: u64 = 5;
 const BASS_DECAY_MS: u64 = 90;
 const BASS_SUSTAIN: f32 = 0.54;
 
-const CHORD_ATTACK_MS: u64 = 8;
-const CHORD_DECAY_MS: u64 = 150;
-const CHORD_SUSTAIN: f32 = 0.32;
+const PERC_LOW_VOLUME: f32 = 0.15;
+const PERC_LOW_AMPLITUDE: f32 = 0.60;
+const PERC_LOW_ATTACK_MS: u64 = 1;
+const PERC_LOW_DECAY_MS: u64 = 40;
+const PERC_LOW_SUSTAIN: f32 = 0.15;
 
-const C2: f32 = 65.41;
-const D2: f32 = 73.42;
-const E2: f32 = 82.41;
-const F2: f32 = 87.31;
-const G2: f32 = 98.00;
-const A2: f32 = 110.00;
-const B2: f32 = 123.47;
+const PERC_HIGH_VOLUME: f32 = 0.10;
+const PERC_HIGH_AMPLITUDE: f32 = 0.50;
+const PERC_HIGH_ATTACK_MS: u64 = 1;
+const PERC_HIGH_DECAY_MS: u64 = 25;
+const PERC_HIGH_SUSTAIN: f32 = 0.10;
 
-const C3: f32 = 130.81;
-const D3: f32 = 146.83;
-const E3: f32 = 164.81;
-const F3: f32 = 174.61;
-const G3: f32 = 196.00;
-const A3: f32 = 220.00;
-const B3: f32 = 246.94;
-
-const C4: f32 = 261.63;
-const CS4: f32 = 277.18;
-const D4: f32 = 293.66;
-const E4: f32 = 329.63;
-const F4: f32 = 349.23;
-const FS4: f32 = 369.99;
-const G4: f32 = 392.00;
-const A4: f32 = 440.00;
-const B4: f32 = 493.88;
-
-const C5: f32 = 523.25;
-const D5: f32 = 587.33;
-const E5: f32 = 659.25;
-const G5: f32 = 783.99;
-
-#[derive(Clone, Copy)]
-struct Note {
-    freq: f32,
-    steps: u8,
+fn duration_ms(note: &NoteEvent) -> u64 {
+    (note.duration_sec * 1000.0).round().max(1.0) as u64
 }
 
-impl Note {
-    const fn new(freq: f32, steps: u8) -> Self {
-        Self { freq, steps }
+/// ノート本来の音量(`base`)にvelocity(0.0〜1.0)を掛け合わせる。
+fn amplitude(base: f32, note: &NoteEvent) -> f32 {
+    base * note.velocity.clamp(0.0, 1.0)
+}
+
+/// 1トラックぶんの再生カーソル(TERM独自拡張。#131)。`bgm_data`の各トラックは
+/// `start_sec`昇順に並んでいるため、直前に処理した位置から単調に読み進めるだけで
+/// 「経過秒数までに開始すべきノート」を取りこぼしなく列挙できる。
+struct TrackCursor<'a> {
+    notes: &'a [NoteEvent],
+    next: usize,
+}
+
+impl<'a> TrackCursor<'a> {
+    fn new(notes: &'a [NoteEvent]) -> Self {
+        Self { notes, next: 0 }
     }
-}
 
-type Pattern = [Option<Note>; 16];
+    fn reset(&mut self) {
+        self.next = 0;
+    }
 
-const fn n(freq: f32, steps: u8) -> Option<Note> {
-    Some(Note::new(freq, steps))
-}
-
-const LEAD: [Pattern; 8] = [
-    [
-        n(E4, 2),
-        None,
-        n(G4, 1),
-        n(A4, 1),
-        n(G4, 2),
-        None,
-        n(E4, 1),
-        n(D4, 1),
-        n(C4, 2),
-        None,
-        n(E4, 1),
-        n(G4, 1),
-        n(A4, 2),
-        None,
-        n(G4, 2),
-        None,
-    ],
-    [
-        n(E4, 1),
-        n(G4, 1),
-        n(A4, 2),
-        None,
-        n(C5, 2),
-        None,
-        n(B4, 1),
-        n(A4, 1),
-        n(G4, 2),
-        n(E4, 1),
-        n(D4, 1),
-        n(E4, 2),
-        None,
-        n(G4, 1),
-        n(A4, 1),
-        n(B4, 2),
-    ],
-    [
-        n(A4, 2),
-        None,
-        n(C5, 1),
-        n(B4, 1),
-        n(A4, 2),
-        n(G4, 1),
-        n(E4, 1),
-        n(F4, 2),
-        None,
-        n(A4, 1),
-        n(C5, 1),
-        n(D5, 2),
-        None,
-        n(C5, 1),
-        n(A4, 1),
-        n(G4, 2),
-    ],
-    [
-        n(G4, 1),
-        n(A4, 1),
-        n(B4, 2),
-        n(D5, 2),
-        None,
-        n(B4, 1),
-        n(G4, 1),
-        n(FS4, 2),
-        n(G4, 1),
-        n(A4, 1),
-        n(B4, 1),
-        n(D5, 1),
-        n(E5, 2),
-        n(D5, 1),
-        n(B4, 1),
-        n(G4, 2),
-    ],
-    [
-        n(E5, 2),
-        None,
-        n(D5, 1),
-        n(C5, 1),
-        n(B4, 2),
-        n(G4, 1),
-        n(E4, 1),
-        n(A4, 2),
-        None,
-        n(C5, 1),
-        n(B4, 1),
-        n(A4, 2),
-        n(G4, 1),
-        n(E4, 1),
-        n(D4, 2),
-        None,
-    ],
-    [
-        n(F4, 1),
-        n(A4, 1),
-        n(C5, 2),
-        n(E5, 2),
-        None,
-        n(D5, 1),
-        n(C5, 1),
-        n(A4, 2),
-        n(F4, 1),
-        n(G4, 1),
-        n(A4, 2),
-        n(C5, 1),
-        n(D5, 1),
-        n(E5, 2),
-        None,
-        None,
-    ],
-    [
-        n(G4, 2),
-        n(B4, 1),
-        n(D5, 1),
-        n(G5, 2),
-        None,
-        n(D5, 1),
-        n(B4, 1),
-        n(A4, 2),
-        n(B4, 1),
-        n(C5, 1),
-        n(D5, 2),
-        n(B4, 1),
-        n(G4, 1),
-        n(FS4, 2),
-        None,
-        None,
-    ],
-    [
-        n(E4, 1),
-        n(G4, 1),
-        n(A4, 1),
-        n(B4, 1),
-        n(C5, 2),
-        n(B4, 1),
-        n(A4, 1),
-        n(G4, 1),
-        n(E4, 1),
-        None,
-        n(D4, 1),
-        n(CS4, 1),
-        n(D4, 1),
-        n(E4, 1),
-        n(G4, 1),
-        n(C5, 2),
-    ],
-];
-
-const COUNTER: [Pattern; 8] = [
-    [
-        None,
-        None,
-        n(C5, 1),
-        None,
-        None,
-        n(B4, 1),
-        None,
-        None,
-        None,
-        n(G4, 1),
-        None,
-        None,
-        None,
-        n(B4, 1),
-        None,
-        None,
-    ],
-    [
-        None,
-        n(C5, 1),
-        None,
-        None,
-        None,
-        n(E5, 1),
-        None,
-        None,
-        None,
-        n(B4, 1),
-        None,
-        None,
-        n(D5, 1),
-        None,
-        None,
-        None,
-    ],
-    [
-        None,
-        None,
-        n(E5, 1),
-        None,
-        None,
-        n(C5, 1),
-        None,
-        None,
-        None,
-        n(A4, 1),
-        None,
-        None,
-        None,
-        n(E5, 1),
-        None,
-        None,
-    ],
-    [
-        None,
-        n(D5, 1),
-        None,
-        None,
-        None,
-        n(G5, 1),
-        None,
-        None,
-        None,
-        n(D5, 1),
-        None,
-        None,
-        n(FS4, 1),
-        None,
-        None,
-        None,
-    ],
-    [
-        None,
-        None,
-        n(G4, 1),
-        None,
-        n(A4, 1),
-        None,
-        None,
-        None,
-        None,
-        n(E5, 1),
-        None,
-        None,
-        None,
-        n(C5, 1),
-        None,
-        None,
-    ],
-    [
-        None,
-        n(C5, 1),
-        None,
-        None,
-        None,
-        n(A4, 1),
-        None,
-        None,
-        None,
-        n(C5, 1),
-        None,
-        None,
-        n(G4, 1),
-        None,
-        None,
-        None,
-    ],
-    [
-        None,
-        None,
-        n(D5, 1),
-        None,
-        None,
-        n(B4, 1),
-        None,
-        None,
-        None,
-        n(G5, 1),
-        None,
-        None,
-        None,
-        n(D5, 1),
-        None,
-        None,
-    ],
-    [
-        None,
-        n(C5, 1),
-        None,
-        n(B4, 1),
-        None,
-        n(A4, 1),
-        None,
-        n(G4, 1),
-        None,
-        n(E4, 1),
-        None,
-        n(G4, 1),
-        None,
-        n(B4, 1),
-        None,
-        n(E5, 1),
-    ],
-];
-
-const BASS: [Pattern; 8] = [
-    [
-        n(C2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(E2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(B2, 2),
-        None,
-    ],
-    [
-        n(C2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(E2, 2),
-        None,
-        n(F2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(D3, 2),
-        None,
-    ],
-    [
-        n(A2, 2),
-        None,
-        n(E2, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(F2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(E2, 2),
-        None,
-    ],
-    [
-        n(G2, 2),
-        None,
-        n(D2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(B2, 2),
-        None,
-        n(D3, 2),
-        None,
-        n(B2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(D2, 2),
-        None,
-    ],
-    [
-        n(C2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(E2, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(E2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(B2, 2),
-        None,
-    ],
-    [
-        n(F2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(F2, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(D2, 2),
-        None,
-        n(A2, 2),
-        None,
-        n(D3, 2),
-        None,
-        n(C3, 2),
-        None,
-    ],
-    [
-        n(G2, 2),
-        None,
-        n(D3, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(B2, 2),
-        None,
-        n(E2, 2),
-        None,
-        n(B2, 2),
-        None,
-        n(D3, 2),
-        None,
-        n(FS4 / 4.0, 2),
-        None,
-    ],
-    [
-        n(A2, 2),
-        None,
-        n(E3, 2),
-        None,
-        n(F2, 2),
-        None,
-        n(C3, 2),
-        None,
-        n(G2, 2),
-        None,
-        n(D3, 2),
-        None,
-        n(G2, 1),
-        n(A2, 1),
-        n(B2, 1),
-        n(C3, 1),
-    ],
-];
-
-const CHORDS: [[[f32; 3]; 4]; 8] = [
-    [[C3, E3, G3], [C3, E3, G3], [A2, C3, E3], [G2, B2, D3]],
-    [[C3, E3, G3], [A2, C3, E3], [F2, A2, C3], [G2, B2, D3]],
-    [[A2, C3, E3], [A2, C3, E3], [F2, A2, C3], [G2, B2, D3]],
-    [
-        [G2, B2, D3],
-        [G2, B2, D3],
-        [D3, FS4 / 2.0, A3],
-        [G2, B2, D3],
-    ],
-    [[C3, E3, G3], [E3, G3, B3], [A2, C3, E3], [A2, C3, E3]],
-    [[F2, A2, C3], [F2, A2, C3], [D3, F3, A3], [G2, B2, D3]],
-    [
-        [G2, B2, D3],
-        [G2, B2, D3],
-        [E2, G2, B2],
-        [D3, FS4 / 2.0, A3],
-    ],
-    [[A2, C3, E3], [F2, A2, C3], [G2, B2, D3], [G2, B2, D3]],
-];
-
-fn note_duration_ms(note: Note) -> u64 {
-    STEP_MS * u64::from(note.steps).max(1) * 9 / 10
+    /// `elapsed_sec`までに開始すべきノートそれぞれについて`f`を呼び、カーソルを進める。
+    fn for_each_due(&mut self, elapsed_sec: f32, mut f: impl FnMut(&NoteEvent)) {
+        while let Some(note) = self.notes.get(self.next) {
+            if note.start_sec > elapsed_sec {
+                break;
+            }
+            f(note);
+            self.next += 1;
+        }
+    }
 }
 
 pub fn spawn_bgm_thread(mixer: Mixer, stop_flag: Arc<AtomicBool>, music_enabled: Arc<AtomicBool>) {
     thread::spawn(move || {
-        let lead_player = Player::connect_new(&mixer);
-        lead_player.set_volume(LEAD_VOLUME);
-        let counter_player = Player::connect_new(&mixer);
-        counter_player.set_volume(COUNTER_VOLUME);
+        let vocals_player = Player::connect_new(&mixer);
+        vocals_player.set_volume(VOCALS_VOLUME);
+        let voice1_player = Player::connect_new(&mixer);
+        voice1_player.set_volume(VOICE1_VOLUME);
+        let voice2_player = Player::connect_new(&mixer);
+        voice2_player.set_volume(VOICE2_VOLUME);
         let bass_player = Player::connect_new(&mixer);
         bass_player.set_volume(BASS_VOLUME);
-        let chord_player = Player::connect_new(&mixer);
-        chord_player.set_volume(CHORD_VOLUME);
+        let perc_low_player = Player::connect_new(&mixer);
+        perc_low_player.set_volume(PERC_LOW_VOLUME);
+        let perc_high_player = Player::connect_new(&mixer);
+        perc_high_player.set_volume(PERC_HIGH_VOLUME);
 
-        let step_duration = Duration::from_millis(STEP_MS);
+        let mut vocals = TrackCursor::new(bgm_data::VOCALS);
+        let mut voice1 = TrackCursor::new(bgm_data::OTHER_VOICE1);
+        let mut voice2 = TrackCursor::new(bgm_data::OTHER_VOICE2);
+        let mut bass = TrackCursor::new(bgm_data::BASS);
+        let mut perc_low = TrackCursor::new(bgm_data::PERCUSSION_LOW);
+        let mut perc_high = TrackCursor::new(bgm_data::PERCUSSION_HIGH);
 
-        'outer: loop {
-            for measure_idx in 0..LEAD.len() {
-                for step_idx in 0..16 {
-                    if stop_flag.load(Ordering::Relaxed) {
-                        break 'outer;
-                    }
+        let tick = Duration::from_millis(TICK_MS);
+        let mut loop_start = Instant::now();
 
-                    if music_enabled.load(Ordering::Relaxed) {
-                        if let Some(note) = LEAD[measure_idx][step_idx] {
-                            lead_player.append(square_tone_enveloped(
-                                note.freq,
-                                note_duration_ms(note),
-                                LEAD_AMPLITUDE,
-                                LEAD_ATTACK_MS,
-                                LEAD_DECAY_MS,
-                                LEAD_SUSTAIN,
-                            ));
-                        }
-
-                        if let Some(note) = COUNTER[measure_idx][step_idx] {
-                            counter_player.append(square_tone_enveloped(
-                                note.freq,
-                                note_duration_ms(note),
-                                COUNTER_AMPLITUDE,
-                                COUNTER_ATTACK_MS,
-                                COUNTER_DECAY_MS,
-                                COUNTER_SUSTAIN,
-                            ));
-                        }
-
-                        if let Some(note) = BASS[measure_idx][step_idx] {
-                            bass_player.append(triangle_tone_enveloped(
-                                note.freq,
-                                note_duration_ms(note),
-                                BASS_AMPLITUDE,
-                                BASS_ATTACK_MS,
-                                BASS_DECAY_MS,
-                                BASS_SUSTAIN,
-                            ));
-                        }
-
-                        if step_idx % 4 == 0 {
-                            chord_player.append(sine_chord(
-                                &CHORDS[measure_idx][step_idx / 4],
-                                FOUR_STEPS_MS * 3 / 4,
-                                CHORD_AMPLITUDE,
-                                CHORD_ATTACK_MS,
-                                CHORD_DECAY_MS,
-                                CHORD_SUSTAIN,
-                            ));
-                        }
-                    }
-
-                    thread::sleep(step_duration);
-                }
+        loop {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
             }
+
+            let elapsed = loop_start.elapsed().as_secs_f32();
+            if elapsed >= bgm_data::DURATION_SEC {
+                loop_start = Instant::now();
+                vocals.reset();
+                voice1.reset();
+                voice2.reset();
+                bass.reset();
+                perc_low.reset();
+                perc_high.reset();
+            } else if music_enabled.load(Ordering::Relaxed) {
+                vocals.for_each_due(elapsed, |note| {
+                    vocals_player.append(square_tone_enveloped(
+                        note.freq_hz,
+                        duration_ms(note),
+                        amplitude(VOCALS_AMPLITUDE, note),
+                        VOCALS_ATTACK_MS,
+                        VOCALS_DECAY_MS,
+                        VOCALS_SUSTAIN,
+                    ));
+                });
+                voice1.for_each_due(elapsed, |note| {
+                    voice1_player.append(square_tone_enveloped(
+                        note.freq_hz,
+                        duration_ms(note),
+                        amplitude(VOICE1_AMPLITUDE, note),
+                        VOICE1_ATTACK_MS,
+                        VOICE1_DECAY_MS,
+                        VOICE1_SUSTAIN,
+                    ));
+                });
+                voice2.for_each_due(elapsed, |note| {
+                    voice2_player.append(square_tone_enveloped(
+                        note.freq_hz,
+                        duration_ms(note),
+                        amplitude(VOICE2_AMPLITUDE, note),
+                        VOICE2_ATTACK_MS,
+                        VOICE2_DECAY_MS,
+                        VOICE2_SUSTAIN,
+                    ));
+                });
+                bass.for_each_due(elapsed, |note| {
+                    bass_player.append(triangle_tone_enveloped(
+                        note.freq_hz,
+                        duration_ms(note),
+                        amplitude(BASS_AMPLITUDE, note),
+                        BASS_ATTACK_MS,
+                        BASS_DECAY_MS,
+                        BASS_SUSTAIN,
+                    ));
+                });
+                perc_low.for_each_due(elapsed, |note| {
+                    perc_low_player.append(square_tone_enveloped(
+                        note.freq_hz,
+                        duration_ms(note),
+                        amplitude(PERC_LOW_AMPLITUDE, note),
+                        PERC_LOW_ATTACK_MS,
+                        PERC_LOW_DECAY_MS,
+                        PERC_LOW_SUSTAIN,
+                    ));
+                });
+                perc_high.for_each_due(elapsed, |note| {
+                    perc_high_player.append(square_tone_enveloped(
+                        note.freq_hz,
+                        duration_ms(note),
+                        amplitude(PERC_HIGH_AMPLITUDE, note),
+                        PERC_HIGH_ATTACK_MS,
+                        PERC_HIGH_DECAY_MS,
+                        PERC_HIGH_SUSTAIN,
+                    ));
+                });
+            } else {
+                // 無効中もカーソルだけは進め、再有効化した時に空白期間ぶんの
+                // ノートをまとめて鳴らしてしまわないようにする。
+                vocals.for_each_due(elapsed, |_| {});
+                voice1.for_each_due(elapsed, |_| {});
+                voice2.for_each_due(elapsed, |_| {});
+                bass.for_each_due(elapsed, |_| {});
+                perc_low.for_each_due(elapsed, |_| {});
+                perc_high.for_each_due(elapsed, |_| {});
+            }
+
+            thread::sleep(tick);
         }
 
-        lead_player.stop();
-        counter_player.stop();
+        vocals_player.stop();
+        voice1_player.stop();
+        voice2_player.stop();
         bass_player.stop();
-        chord_player.stop();
+        perc_low_player.stop();
+        perc_high_player.stop();
     });
 }
 
@@ -639,25 +223,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn patterns_have_matching_measure_counts() {
-        assert_eq!(LEAD.len(), COUNTER.len());
-        assert_eq!(LEAD.len(), BASS.len());
-        assert_eq!(LEAD.len(), CHORDS.len());
-    }
-
-    #[test]
-    fn all_notes_have_valid_frequency_and_duration() {
-        for pattern in LEAD.iter().chain(COUNTER.iter()).chain(BASS.iter()) {
-            for note in pattern.iter().flatten() {
-                assert!(note.freq.is_finite() && note.freq > 0.0);
-                assert!((1..=4).contains(&note.steps));
-                assert!(note_duration_ms(*note) <= FOUR_STEPS_MS);
+    fn all_tracks_have_valid_finite_notes_sorted_by_start_time() {
+        let tracks: [&[NoteEvent]; 6] = [
+            bgm_data::VOCALS,
+            bgm_data::OTHER_VOICE1,
+            bgm_data::OTHER_VOICE2,
+            bgm_data::BASS,
+            bgm_data::PERCUSSION_LOW,
+            bgm_data::PERCUSSION_HIGH,
+        ];
+        for notes in tracks {
+            assert!(!notes.is_empty());
+            let mut prev_start = 0.0f32;
+            for note in notes {
+                assert!(note.freq_hz.is_finite() && note.freq_hz > 0.0);
+                assert!(note.duration_sec.is_finite() && note.duration_sec > 0.0);
+                assert!((0.0..=1.0).contains(&note.velocity));
+                assert!(note.start_sec >= prev_start, "start_secは昇順のはず");
+                prev_start = note.start_sec;
             }
         }
     }
 
     #[test]
-    fn tempo_produces_positive_step_length() {
-        assert!(STEP_MS > 0);
+    fn track_cursor_yields_notes_up_to_the_elapsed_time_in_order_without_repeats() {
+        let notes = [
+            NoteEvent { freq_hz: 100.0, start_sec: 0.0, duration_sec: 0.1, velocity: 1.0 },
+            NoteEvent { freq_hz: 200.0, start_sec: 0.5, duration_sec: 0.1, velocity: 1.0 },
+            NoteEvent { freq_hz: 300.0, start_sec: 1.0, duration_sec: 0.1, velocity: 1.0 },
+        ];
+        let mut cursor = TrackCursor::new(&notes);
+
+        let mut seen = Vec::new();
+        cursor.for_each_due(0.6, |note| seen.push(note.freq_hz));
+        assert_eq!(seen, vec![100.0, 200.0], "経過0.6秒までに開始する2つだけ列挙されるはず");
+
+        // 同じ経過秒数で再度呼んでも、既に処理済みのノートは重複しないはず。
+        let mut seen_again = Vec::new();
+        cursor.for_each_due(0.6, |note| seen_again.push(note.freq_hz));
+        assert!(seen_again.is_empty(), "同じ経過秒数を再度渡しても重複して鳴らさないはず");
+
+        let mut seen_rest = Vec::new();
+        cursor.for_each_due(1.0, |note| seen_rest.push(note.freq_hz));
+        assert_eq!(seen_rest, vec![300.0]);
+    }
+
+    #[test]
+    fn track_cursor_reset_replays_from_the_beginning() {
+        let notes = [NoteEvent { freq_hz: 100.0, start_sec: 0.0, duration_sec: 0.1, velocity: 1.0 }];
+        let mut cursor = TrackCursor::new(&notes);
+
+        let mut count = 0;
+        cursor.for_each_due(1.0, |_| count += 1);
+        assert_eq!(count, 1);
+
+        cursor.reset();
+        let mut count_after_reset = 0;
+        cursor.for_each_due(1.0, |_| count_after_reset += 1);
+        assert_eq!(count_after_reset, 1, "resetの後は先頭から再び列挙されるはず");
+    }
+
+    #[test]
+    fn duration_ms_rounds_seconds_to_milliseconds_with_a_minimum_of_one() {
+        let note = NoteEvent { freq_hz: 100.0, start_sec: 0.0, duration_sec: 0.0001, velocity: 1.0 };
+        assert_eq!(duration_ms(&note), 1, "極端に短い長さでも最低1msは確保するはず");
+
+        let note = NoteEvent { freq_hz: 100.0, start_sec: 0.0, duration_sec: 0.2, velocity: 1.0 };
+        assert_eq!(duration_ms(&note), 200);
+    }
+
+    #[test]
+    fn amplitude_scales_base_by_velocity() {
+        let note = NoteEvent { freq_hz: 100.0, start_sec: 0.0, duration_sec: 0.1, velocity: 0.5 };
+        assert!((amplitude(1.0, &note) - 0.5).abs() < f32::EPSILON);
     }
 }
