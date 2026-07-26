@@ -990,6 +990,14 @@ impl Game {
         if !was_dying {
             let delta_ms = delta.as_millis() as u32;
             let mut exploded = Vec::new();
+            // 他のボムの現在位置のスナップショット(TERM独自拡張。#143。ユーザー指摘:
+            // 「爆弾は爆弾に重ならないようにする」)。ボムはCellグリッドとは別の
+            // オーバーレイ(`Vec<Bomb>`)のため、盤面のセルだけを見て重力・バウンドを
+            // 判定すると他のボムへ重なって落下・移動してしまう。このフレーム開始時点の
+            // 位置で判定するため、同一フレーム内で複数のボムがほぼ同時に同じマスへ
+            // 動こうとする極めて稀なケースでは1フレームだけ一時的にずれる場合がある
+            // (次フレームで解消される)。
+            let bomb_positions: Vec<board::Pos> = self.bombs.iter().map(|b| b.pos).collect();
             for (i, bomb) in self.bombs.iter_mut().enumerate() {
                 match bomb.phase {
                     BombPhase::Entering => {
@@ -1023,6 +1031,7 @@ impl Game {
                                 &self.board,
                                 &mut bomb.pos,
                                 &mut bomb.settle_bounce_dir,
+                                &bomb_positions,
                             );
                         }
                         if bomb.phase_elapsed_ms >= BOMB_SETTLE_MS {
@@ -1031,15 +1040,35 @@ impl Game {
                         }
                     }
                     BombPhase::Ticking => {
-                        // 起爆カウントダウン中も支えを失っていれば落下を続ける
-                        // (TERM独自拡張。#140)。落下している間は`remaining_ms`を
-                        // 減らさない(空中で起爆させないため)。
                         let below = (bomb.pos.0 + 1, bomb.pos.1);
-                        if below.0 < self.board.depth_rows()
+                        if bomb_positions.contains(&below) {
+                            // 他のボムの真上に来た場合は、地面に着地した時と違い
+                            // そこで静止せず、Settling同様に左右へバウンドしながら
+                            // 転がり続ける(TERM独自拡張。#143。ユーザー指摘: 「爆弾が
+                            // したにあったら、はねながら転がること」)。他のボムの上に
+                            // 乗っている間は起爆カウントダウンも進めない(Settling中と
+                            // 同じ扱い)。
+                            let prev_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
+                            bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
+                            let new_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
+                            for _ in 0..(new_ticks - prev_ticks) {
+                                bomb_settle_step(
+                                    &self.board,
+                                    &mut bomb.pos,
+                                    &mut bomb.settle_bounce_dir,
+                                    &bomb_positions,
+                                );
+                            }
+                        } else if below.0 < self.board.depth_rows()
                             && self.board.cell(below.0, below.1) == Cell::Empty
                         {
+                            // 起爆カウントダウン中も支えを失っていれば落下を続ける
+                            // (TERM独自拡張。#140)。落下している間は`remaining_ms`を
+                            // 減らさない(空中で起爆させないため)。
                             bomb.pos = below;
+                            bomb.phase_elapsed_ms = 0;
                         } else {
+                            bomb.phase_elapsed_ms = 0;
                             bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta_ms);
                             if bomb.remaining_ms == 0 {
                                 exploded.push(i);
@@ -1684,14 +1713,19 @@ impl Game {
 
     /// 画面内(プレイヤー位置から上下`STAR_VISIBLE_RANGE_ROWS`行)のEmptyマスを1つ
     /// ランダムに選び、ボムを設置する(TERM独自拡張。#96)。候補が無ければ何もしない。
+    /// 既存の他のボムが既に占めているマスは候補から除外する(TERM独自拡張。#143。
+    /// ユーザー指摘: 「爆弾は爆弾に重ならないようにする」)。
     fn spawn_bomb_at_random_empty_cell(&mut self) {
         let start_row = self.player.row.saturating_sub(STAR_VISIBLE_RANGE_ROWS);
         let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS)
             .min(self.board.depth_rows().saturating_sub(1));
         let width = self.board.width();
+        let occupied: Vec<board::Pos> = self.bombs.iter().map(|b| b.pos).collect();
         let candidates: Vec<board::Pos> = (start_row..=end_row)
             .flat_map(|row| (0..width).map(move |col| (row, col)))
-            .filter(|&(row, col)| self.board.cell(row, col) == Cell::Empty)
+            .filter(|&(row, col)| {
+                self.board.cell(row, col) == Cell::Empty && !occupied.contains(&(row, col))
+            })
             .collect();
         if candidates.is_empty() {
             return;
@@ -1729,11 +1763,22 @@ impl Game {
 
 /// `BombPhase::Settling`中の1歩ぶんの移動(TERM独自拡張。#140)。支えを失って
 /// いれば1マス落下し、支持されていれば現在の`bounce_dir`(+1=右、-1=左)方向へ
-/// 1マス移動を試みる。移動先が壁または既存ブロックで塞がっていれば方向を反転する
-/// (次のステップで反対方向を試す)。
-fn bomb_settle_step(board: &Board, pos: &mut board::Pos, bounce_dir: &mut i8) {
+/// 1マス移動を試みる。移動先が壁・既存ブロック・他のボムで塞がっていれば方向を
+/// 反転する(次のステップで反対方向を試す)。`other_bomb_positions`は他のボムの
+/// 現在位置(TERM独自拡張。#143。ユーザー指摘: 「爆弾は爆弾に重ならないように
+/// する」)。Cellグリッドとは別のオーバーレイのため、盤面のセルだけを見ていると
+/// 他のボムのマスへそのまま重なって落下・移動してしまう。
+fn bomb_settle_step(
+    board: &Board,
+    pos: &mut board::Pos,
+    bounce_dir: &mut i8,
+    other_bomb_positions: &[board::Pos],
+) {
     let below = (pos.0 + 1, pos.1);
-    if below.0 < board.depth_rows() && board.cell(below.0, below.1) == Cell::Empty {
+    if below.0 < board.depth_rows()
+        && board.cell(below.0, below.1) == Cell::Empty
+        && !other_bomb_positions.contains(&below)
+    {
         *pos = below;
         return;
     }
@@ -1742,6 +1787,7 @@ fn bomb_settle_step(board: &Board, pos: &mut board::Pos, bounce_dir: &mut i8) {
     if next_col >= 0
         && (next_col as usize) < board.width()
         && board.cell(pos.0, next_col as usize) == Cell::Empty
+        && !other_bomb_positions.contains(&(pos.0, next_col as usize))
     {
         pos.1 = next_col as usize;
     } else {
@@ -4113,6 +4159,157 @@ mod tests {
             game.bombs[0].phase,
             BombPhase::Settling,
             "落下してもSettling段階のままのはず"
+        );
+    }
+
+    #[test]
+    fn bomb_in_settling_phase_bounces_sideways_instead_of_falling_onto_another_bomb_below() {
+        // ユーザー指摘: 「爆弾は爆弾に重ならないようにする」「爆弾がしたにあったら、
+        // はねながら転がること」(#143)。直下が空セルでも、既に他のボムが
+        // 占めていれば、そこへは落下せず左右へバウンドするはず。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Settling,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+        game.bombs.push(Bomb {
+            pos: (521, 5), // 1つ目のボムの直下
+            origin: (521, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.update(Duration::from_millis(BOMB_SETTLE_TICK_MS as u64));
+
+        assert_eq!(
+            game.bombs[0].pos,
+            (520, 6),
+            "他のボムの直下へは落下せず、bounce_dir方向(右)へバウンドするはず"
+        );
+    }
+
+    #[test]
+    fn bomb_ticking_above_another_bomb_stays_put_before_a_full_settle_tick_elapses() {
+        // 他のボムの真上に来た直後、まだ1 settle tickぶんの時間が経過していなければ
+        // 動かないはず(Settlingと同じペース制御であることの確認)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 1000,
+            settle_bounce_dir: 1,
+        });
+        game.bombs.push(Bomb {
+            pos: (521, 5),
+            origin: (521, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.update(Duration::from_millis(50)); // BOMB_SETTLE_TICK_MS(80)未満
+
+        assert_eq!(
+            game.bombs[0].pos,
+            (520, 5),
+            "1 settle tick未満では他のボムの上でまだ動かないはず"
+        );
+        assert_eq!(
+            game.bombs[0].remaining_ms, 1000,
+            "他のボムの上に乗っている間は起爆カウントダウンを進めないはず"
+        );
+    }
+
+    #[test]
+    fn bomb_ticking_above_another_bomb_bounces_sideways_after_a_full_settle_tick() {
+        // ユーザー指摘: 「爆弾がしたにあったら、はねながら転がること」(#143)。
+        // 起爆カウントダウン中でも、直下に他のボムが居座っていればそこで静止せず、
+        // 1 settle tick経過後に左右へバウンドするはず。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 1000,
+            settle_bounce_dir: 1,
+        });
+        game.bombs.push(Bomb {
+            pos: (521, 5),
+            origin: (521, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.update(Duration::from_millis(BOMB_SETTLE_TICK_MS as u64));
+
+        assert_eq!(
+            game.bombs[0].pos,
+            (520, 6),
+            "他のボムの上に居座り続けず、右へバウンドして転がるはず"
+        );
+        assert_eq!(
+            game.bombs[0].remaining_ms, 1000,
+            "他のボムの上に乗っていた間は起爆カウントダウンを進めないはず"
+        );
+    }
+
+    #[test]
+    fn spawning_a_new_bomb_never_lands_on_a_cell_already_occupied_by_another_bomb() {
+        // ユーザー指摘: 「爆弾は爆弾に重ならないようにする」(#143)。ボムはCellグリッド
+        // とは別のオーバーレイのため、既存ボムの位置も候補から除外されているかを
+        // 確認する。画面内(±STAR_VISIBLE_RANGE_ROWS)を岩で埋め、既存ボムが占める
+        // マスと、本当に空いているマスの2つだけをEmptyにすることで、新しいボムが
+        // 確実に後者へ設置されることを保証する(RNGのseedによらず決定的)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
+        for row in (game.player.row - range)..=(game.player.row + range) {
+            for col in 0..game.board.width() {
+                game.board.rows[row][col] = Cell::Rock { hits: 0 };
+            }
+        }
+        let occupied_by_existing_bomb = (game.player.row, 3);
+        let genuinely_free_cell = (game.player.row, 7);
+        game.board.rows[occupied_by_existing_bomb.0][occupied_by_existing_bomb.1] = Cell::Empty;
+        game.board.rows[genuinely_free_cell.0][genuinely_free_cell.1] = Cell::Empty;
+        game.bombs.push(Bomb {
+            pos: occupied_by_existing_bomb,
+            origin: occupied_by_existing_bomb,
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.debug_place_bomb();
+
+        assert_eq!(game.bombs.len(), 2, "新しいボムが1個追加されているはず");
+        assert_eq!(
+            game.bombs[1].pos, genuinely_free_cell,
+            "既存ボムが占めるマスを避け、本当に空いているマスへ設置されるはず"
         );
     }
 
