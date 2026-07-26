@@ -1171,13 +1171,22 @@ impl Game {
         if self.status != GameStatus::Playing {
             return;
         }
+        // 4連結自動消滅と同じ消滅フラッシュ演出を出す(TERM独自拡張。ユーザー指摘:
+        // 「ショートカットRの動作だけど、消えるとき、結合して消えるときと同じ消える
+        // アニメーションして」)。
+        let mut cleared = Vec::new();
         for row in 0..self.player.row {
             for col in 0..self.board.width() {
-                if !matches!(self.board.cell(row, col), Cell::Oxygen) {
+                let cell = self.board.cell(row, col);
+                if !matches!(cell, Cell::Oxygen) {
+                    if cell != Cell::Empty {
+                        cleared.push((row, col));
+                    }
                     self.board.set(row, col, Cell::Empty);
                 }
             }
         }
+        self.note_vanished_cells(cleared);
     }
 
     /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
@@ -2293,6 +2302,24 @@ mod tests {
 
         assert_eq!(game.board.cell(10, 5), Cell::Oxygen, "AIRは消えずに残るはず");
         assert_eq!(game.board.cell(10, 6), Cell::Empty, "AIR以外は通常通り消えるはず");
+    }
+
+    #[test]
+    fn debug_clear_above_player_shows_the_same_vanish_flash_as_auto_vanish() {
+        // ユーザー指摘: 「ショートカットRの動作だけど、消えるとき、結合して消えるとき
+        // と同じ消えるアニメーションして」。
+        let mut game = Game::new(71);
+        clear_board(&mut game);
+        game.player.row = 50;
+        game.player.col = 5;
+        game.board.rows[10][6] = Cell::Rock { hits: 2 };
+
+        game.debug_clear_above_player();
+
+        assert!(
+            game.vanish_flash_progress((10, 6)).is_some(),
+            "4連結自動消滅と同じ消滅フラッシュが出るはず"
+        );
     }
 
     #[test]
