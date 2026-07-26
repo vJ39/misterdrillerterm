@@ -390,9 +390,27 @@ pub fn play_rock_hit(mixer: &Mixer) {
     play_tone(mixer, square_tone(220.0, 20, 0.5), SE_VOLUME);
 }
 
+/// 破壊音の下降チャープを何連にするか(4個消滅ごとに1つ追加)の上限(TERM独自拡張)。
+/// 大量消滅時に音がどこまでも長く伸び続けるのを防ぐ。
+const MAX_DESTROY_CHIRPS: usize = 5;
+
 /// 破壊音: ブロックが破壊され消滅した瞬間。矩形波(下降チャープ) 220Hz→110Hz, 60ms。
-pub fn play_destroy(mixer: &Mixer) {
-    play_tone(mixer, square_chirp(220.0, 110.0, 60, 0.5), SE_VOLUME);
+/// `blocks`(消滅数)が4個増えるごとにチャープを1つ追加し、たくさん消えるほど
+/// 「たくさん消えてる」感が出るようにする(ユーザー指摘: 「ブロックが消えたときの
+/// SEが必要たくさん消えるといっぱい消えてる感じに」)。1〜3個は従来通り単発のまま。
+pub fn play_destroy(mixer: &Mixer, blocks: usize) {
+    let chirp_count = (blocks / 4 + 1).min(MAX_DESTROY_CHIRPS);
+    if chirp_count == 1 {
+        play_tone(mixer, square_chirp(220.0, 110.0, 60, 0.5), SE_VOLUME);
+        return;
+    }
+    let tones: Vec<Box<dyn Source<Item = f32> + Send>> = (0..chirp_count)
+        .map(|i| {
+            let start = 220.0 - i as f32 * 30.0;
+            Box::new(square_chirp(start, start * 0.5, 45, 0.5)) as Box<dyn Source<Item = f32> + Send>
+        })
+        .collect();
+    play_sequence(mixer, tones, SE_VOLUME);
 }
 
 /// air取得音: 酸素カプセル取得時。矩形波2音 523Hz(60ms)→784Hz(60ms)。
