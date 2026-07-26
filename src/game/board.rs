@@ -889,6 +889,10 @@ pub type Pos = (usize, usize);
 /// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う)。
 pub type BlockMove = (Pos, Pos);
 
+/// `apply_gravity_tick`内で「揺れが明けて今ティックで落下する候補」を表す
+/// (代表座標, 塊の全セル)。
+type FallCandidate = (Pos, Vec<Pos>);
+
 /// 1回の重力ティックの結果。
 #[derive(Debug, Clone, Default)]
 pub struct FallTickOutcome {
@@ -1119,7 +1123,10 @@ pub fn apply_gravity_tick(
 
     let mut next_unsupported_ticks: HashMap<(usize, usize), u8> = HashMap::new();
     let mut next_shaking_cells: HashSet<(usize, usize)> = HashSet::new();
-    let mut falling_groups: Vec<Vec<(usize, usize)>> = Vec::new();
+
+    // 揺れが明けて「今ティックで落下する」候補の塊。この時点ではまだ確定ではない
+    // (直後の収束ループで、着地先がまだ物理的に塞がっている候補を除外する)。
+    let mut candidates: Vec<FallCandidate> = Vec::new();
 
     for (i, group) in groups.into_iter().enumerate() {
         if supported[i] {
@@ -1136,20 +1143,55 @@ pub fn apply_gravity_tick(
             .unwrap_or(0)
             + 1;
         if ticks_unsupported as u32 > shake_ticks as u32 {
-            // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する。
-            // 移動後もなお未支持なら、次のティック以降は揺れ直さずそのまま落下し続ける
-            // (ユーザー指摘: 「落下開始したら、ぐらぐらしなくてもいい」)。移動先の
-            // 代表座標(行+1・列は変わらない)へ、既に揺れが明けたことを示す印を
-            // 引き継いでおく。値を`shake_ticks+1`に固定するのは、落下し続ける間に
-            // ここへ延々と加算してu8オーバーフローするのを避けるため。
-            let unlocked_representative = (representative.0 + 1, representative.1);
-            next_unsupported_ticks.insert(unlocked_representative, shake_ticks.saturating_add(1));
-            falling_groups.push(group);
+            // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する
+            // 「候補」にする。確定は後段の収束ループの後。
+            candidates.push((representative, group));
         } else {
             // まだ揺れている最中 -> 移動しない。描画用に塊の全セルを揺れ中として記録する。
             next_shaking_cells.extend(group.iter().copied());
             next_unsupported_ticks.insert(representative, ticks_unsupported);
         }
+    }
+
+    // 揺れ明け候補同士でも、着地先セル(snapshot時点)がまだ非Emptyかつ「今ティックで
+    // 立ち退く別の候補」でもない場合、その支えは実際にはまだ物理的にそこに残っている
+    // (発見: #85。`has_stable_support`の連鎖判定は論理的な支持喪失を伝播させるが、
+    // 揺れ猶予(shake_ticks)の消化は塊ごとに完全に独立したカウンタで進むため、支えの
+    // 側がまだ揺れ猶予中で物理的にその場に残っているのに、支えられていた側が先に
+    // 揺れ明けして1マス落下し、無警告でそのセルを上書きしてしまうことがあった)。
+    // 該当する候補は今ティックの落下を見送り、揺れ中に戻す。1候補を見送ると別の
+    // 候補の立ち退き先が失われる場合があるため、変化が無くなるまで繰り返す。
+    loop {
+        let vacating: HashSet<(usize, usize)> = candidates
+            .iter()
+            .flat_map(|(_, group)| group.iter().copied())
+            .collect();
+        let blocked_at = candidates.iter().position(|(_, group)| {
+            group.iter().any(|&(r, c)| {
+                let to = (r + 1, c);
+                to != player_pos
+                    && snapshot.cell(to.0, to.1) != Cell::Empty
+                    && !vacating.contains(&to)
+            })
+        });
+        let Some(idx) = blocked_at else { break };
+        let (representative, group) = candidates.remove(idx);
+        next_shaking_cells.extend(group.iter().copied());
+        // 揺れ猶予をゼロからやり直させず、次ティックで即座に再挑戦できるよう
+        // shake_ticksちょうど(次ティック+1でshake_ticksを超える)を積んでおく。
+        next_unsupported_ticks.insert(representative, shake_ticks);
+    }
+
+    let mut falling_groups: Vec<Vec<(usize, usize)>> = Vec::new();
+    for (representative, group) in candidates {
+        // 移動後もなお未支持なら、次のティック以降は揺れ直さずそのまま落下し続ける
+        // (ユーザー指摘: 「落下開始したら、ぐらぐらしなくてもいい」)。移動先の
+        // 代表座標(行+1・列は変わらない)へ、既に揺れが明けたことを示す印を
+        // 引き継いでおく。値を`shake_ticks+1`に固定するのは、落下し続ける間に
+        // ここへ延々と加算してu8オーバーフローするのを避けるため。
+        let unlocked_representative = (representative.0 + 1, representative.1);
+        next_unsupported_ticks.insert(unlocked_representative, shake_ticks.saturating_add(1));
+        falling_groups.push(group);
     }
 
     gravity.unsupported_ticks = next_unsupported_ticks;
@@ -4004,6 +4046,69 @@ mod tests {
             board.cell(19, 3),
             Cell::Diamond,
             "同一列を単独セルの岩が素通りするなどして、ダイヤは(19,3)に残っているはず"
+        );
+    }
+
+    #[test]
+    fn a_group_that_already_finished_shaking_does_not_overwrite_a_neighbor_still_within_its_own_shake_grace_period(
+    ) {
+        // #85根本原因の再現(2026/07/27): 実プレイのデバッグログを`board_snapshot`と
+        // `block_events`の全件突合で解析した結果、静止していたダイヤ(col1,row33)が
+        // 一度もmove/vanishログに現れないまま、その真上を落ちてきた岩の着地ログ
+        // (`move Rock (33,1) <- (32,1)`)にちょうど上書きされる形で消えていたことが
+        // 確定した。原因はapply_gravity_tick内の`has_stable_support`連鎖判定にある:
+        // 支えとなる塊(ダイヤ)が論理的に支持を失った(=`supported[]`がfalseになった)
+        // ことは、支えられる側(岩)へ即座に伝播するが、実際に「揺れ猶予(shake_ticks)
+        // が明けて物理的に動き出す」タイミングは塊ごとに完全に独立したカウンタ
+        // (`unsupported_ticks`、代表座標キー)で管理されている。そのため、岩が既に
+        // (別の経緯で)揺れ明け・連続落下中で、ダイヤの方はこのtickで初めて支持を
+        // 失ったばかり(揺れ猶予の1ティック目)、という組み合わせが起こり得る。この
+        // 状態で書き込みフェーズ(旧: 着地先の非Emptyチェックが無かった)が実行される
+        // と、岩がまだそこに物理的に残っているダイヤへ無警告で上書きしてしまっていた。
+        let mut board = empty_board(6);
+        board.rows[0][0] = Cell::Rock { hits: 0 };
+        board.rows[1][0] = Cell::Diamond;
+        // row2は空。ダイヤはこのtickで初めて支持を失う(直下が最深行でも岩でもない)。
+
+        let mut gravity = GravityState::new();
+        // 岩(代表座標(0,0))は、既に別の経緯で揺れ明け・連続落下中だったことを模す
+        // (実プレイでは、この岩は隣接列と連結した塊としてもっと手前のtickから
+        // 揺れ明けしていた)。
+        gravity.unsupported_ticks.insert((0, 0), SHAKE_TICKS);
+
+        let outcome = apply_gravity_tick(&mut board, (usize::MAX, usize::MAX), &mut gravity, SHAKE_TICKS);
+
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Diamond,
+            "ダイヤはまだ揺れ猶予中(このtickで支持を失ったばかり)なので、\
+             揺れ明け済みの岩に上書きされて消えてはいけない"
+        );
+        assert_eq!(
+            board.cell(0, 0),
+            Cell::Rock { hits: 0 },
+            "ダイヤがまだそこに物理的に残っている以上、岩はこのtickでは1マス落下できないはず"
+        );
+        assert!(
+            outcome.moved_cells.is_empty(),
+            "着地先がまだ塞がっているので、このtickでは何も移動しないはず: {:?}",
+            outcome.moved_cells
+        );
+
+        // その後、ダイヤ自身の揺れ猶予が明けて実際に落下を始めれば、岩も連動して
+        // 正しく後を追って落下し続けられる(=恒久的にフリーズしたままにはならない)。
+        for _ in 0..(SHAKE_TICKS as usize + 4) {
+            apply_gravity_tick(&mut board, (usize::MAX, usize::MAX), &mut gravity, SHAKE_TICKS);
+        }
+        assert_eq!(
+            board.cell(5, 0),
+            Cell::Diamond,
+            "ダイヤは最終的に最深行まで正しく落下しているはず(消えてはいない)"
+        );
+        assert_eq!(
+            board.cell(4, 0),
+            Cell::Rock { hits: 0 },
+            "岩もダイヤを追って正しく最深行の1つ上まで落下しているはず"
         );
     }
 
