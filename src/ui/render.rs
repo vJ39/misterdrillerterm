@@ -2383,6 +2383,36 @@ mod tests {
         assert!(wide.field_rect.width > narrow.field_rect.width);
     }
 
+    #[test]
+    fn compute_layout_visible_rows_never_exceeds_the_spawn_rate_reroll_safe_margin() {
+        // ユーザー報告: 「掘っていないのに設置済みブロックが消える/落下する」(#83)。
+        // 原因調査の結果、プレイ中の配分率再抽選(reroll_spawn_rates_from)が
+        // `player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`より先だけを書き換える
+        // 前提になっているが、この定数(以前は40)が縮退表示(9.8、幅不足のターミナル
+        // では可視行数がターミナルの実高さから動的に計算される)の可視行数と
+        // 独立に固定されていたため、非常に縦長のターミナルでは可視行数がこの定数を
+        // 上回り、画面内の未掘削ブロックまで書き換わってしまうバグがあった。
+        // 現実的なターミナルサイズの範囲(幅は縮退表示に入りやすい50〜120、高さは
+        // 十分余裕を見て300行まで)・全field_width設定で、可視行数が安全マージンを
+        // 超えないことを回帰確認する。field_widthが大きいほどtotal_wも大きくなり
+        // 縮退表示に入りやすくなるため、設定可能な全範囲を確認する。
+        for field_width in crate::constants::FIELD_WIDTH_MIN..=crate::constants::FIELD_WIDTH_MAX {
+            for width in (50..120u16).step_by(5) {
+                for height in (16..300u16).step_by(4) {
+                    let area = Rect::new(0, 0, width, height);
+                    let plan = compute_layout(area, field_width);
+                    assert!(
+                        plan.visible_rows <= crate::constants::SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
+                        "field_width={field_width} width={width} height={height}: \
+                         可視行数({})が安全マージン({})を超えている",
+                        plan.visible_rows,
+                        crate::constants::SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS
+                    );
+                }
+            }
+        }
+    }
+
     // --- 揺れ(ぐらぐら)アニメーションのジッター(TERM独自拡張) ---
 
     #[test]
