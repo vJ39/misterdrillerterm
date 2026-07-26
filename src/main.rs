@@ -67,7 +67,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // MUSIC/SE個別ON/OFF設定(TERM独自拡張、spec.md 10章)。前回終了時の状態を復元し、
     // BGMスレッド・SE再生の双方から参照できるよう`Arc<AtomicBool>`で共有する。
     let mut settings = Settings::load();
-    let music_enabled = Arc::new(AtomicBool::new(settings.music_enabled));
+    // 起動直後はタイトル画面から始まるため、MUSIC設定がONでも実際に鳴らす値は
+    // `effective_music_enabled`経由でタイトル画面ぶん無音にしておく(TERM独自拡張。
+    // ユーザー指摘: 「タイトル画面ではMUSIC無し」)。
+    let music_enabled = Arc::new(AtomicBool::new(effective_music_enabled(settings.music_enabled, &Screen::Title)));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
@@ -562,11 +565,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             screen = Screen::Title;
             pause_overlay = PauseOverlay::None;
         }
+
+        // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが
+        // 参照する実効MUSIC状態を毎フレーム同期する(TERM独自拡張。ユーザー指摘:
+        // 「タイトル画面ではMUSIC無し」)。
+        music_enabled.store(effective_music_enabled(settings.music_enabled, &screen), Ordering::Relaxed);
     }
 
     bgm_stop.store(true, Ordering::Relaxed);
 
     Ok(())
+}
+
+/// MUSIC設定・現在の画面から、実際にBGMスレッドで鳴らすべきかを判定する(TERM独自
+/// 拡張。ユーザー指摘: 「タイトル画面ではMUSIC無し」)。タイトル画面ではMUSIC設定の
+/// ON/OFFに関わらず常に無音にする。
+fn effective_music_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+    settings_music_enabled && !matches!(screen, Screen::Title)
 }
 
 /// アプリ全体の画面状態。タイトル画面・設定画面・プレイ中(Gameを保持)の3値
@@ -660,5 +675,25 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::GameOverMiss => audio::sfx::play_miss(mixer),
             GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_music_enabled_is_always_false_on_title_regardless_of_setting() {
+        // ユーザー指摘: 「タイトル画面ではMUSIC無し」。
+        assert!(!effective_music_enabled(true, &Screen::Title));
+        assert!(!effective_music_enabled(false, &Screen::Title));
+    }
+
+    #[test]
+    fn effective_music_enabled_follows_the_setting_on_other_screens() {
+        assert!(effective_music_enabled(true, &Screen::Settings));
+        assert!(!effective_music_enabled(false, &Screen::Settings));
+        assert!(effective_music_enabled(true, &Screen::Help));
+        assert!(!effective_music_enabled(false, &Screen::Help));
     }
 }
