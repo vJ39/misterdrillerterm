@@ -759,7 +759,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             // 曲が最後まで自然に終わっていたら、再生中表示を消す(TERM独自拡張。#151)。
             if help_jukebox_playing
                 .as_ref()
-                .is_some_and(|(_, preview)| preview.finished.load(Ordering::Relaxed))
+                .is_some_and(|(_, preview)| preview.is_finished())
             {
                 help_jukebox_playing = None;
             }
@@ -777,7 +777,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 match action {
                     InputAction::Quit => {
                         if let Some((_, preview)) = help_jukebox_playing.take() {
-                            preview.stop.store(true, Ordering::Relaxed);
+                            preview.stop();
                         }
                         screen = Screen::Title;
                     }
@@ -801,12 +801,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 help_jukebox_playing.as_ref().map(|(idx, _)| *idx)
                                     == Some(help_jukebox_selection);
                             if let Some((_, preview)) = help_jukebox_playing.take() {
-                                preview.stop.store(true, Ordering::Relaxed);
+                                preview.stop();
                             }
                             if !already_playing_selection {
                                 let (_, track) = audio::bgm::JUKEBOX_TRACKS[help_jukebox_selection];
-                                let preview =
-                                    audio::bgm::spawn_jukebox_preview_thread(m.clone(), track);
+                                let preview = audio::bgm::start_jukebox_preview(m, track);
                                 help_jukebox_playing = Some((help_jukebox_selection, preview));
                             }
                         }

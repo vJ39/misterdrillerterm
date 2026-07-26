@@ -141,42 +141,39 @@ pub const JUKEBOX_TRACKS: [(&str, &[u8]); 4] = [
 ];
 
 /// ジュークボックスで再生中の1曲を制御するハンドル(TERM独自拡張。#151)。
-/// `stop`をtrueにすると次のポーリングで即座に停止する(次の曲を選んだ時・
-/// ヘルプ画面を閉じた時に呼び出し側が使う)。曲が最後まで自然に終わった場合、
-/// または`stop`により止めた場合のいずれも、スレッドが`finished`をtrueにする。
+///
+/// 以前はポーリング間隔`POLL_MS`(100ms)ごとに停止指示を確認する専用スレッドを
+/// 立てていたが、曲切り替え時に旧スレッドが停止指示に気づくまでの間、新しい
+/// 曲と最大100ms重複して聞こえるバグがあった(TERM独自拡張。#154)。呼び出し側
+/// (main.rsのメインループ、FRAME_INTERVAL_MS間隔で毎フレーム動く)から`stop`を
+/// 直接同期呼び出しできるようにし、専用スレッドを廃止することで解消した。
+/// 再生完了の検知も同様に、呼び出し側が毎フレーム`is_finished`をポーリングする。
 pub struct JukeboxPreview {
-    pub stop: Arc<AtomicBool>,
-    pub finished: Arc<AtomicBool>,
+    player: Player,
 }
 
-/// 選んだ1曲を1回だけ再生するプレビュースレッドを立てる(TERM独自拡張。#151)。
-/// タイトル用・プレイ中用の常駐スレッドとは別に、ヘルプ画面にいる間だけ
-/// 存在する使い捨てのスレッド。
-pub fn spawn_jukebox_preview_thread(mixer: Mixer, track: &'static [u8]) -> JukeboxPreview {
-    let stop = Arc::new(AtomicBool::new(false));
-    let finished = Arc::new(AtomicBool::new(false));
-    let thread_stop = Arc::clone(&stop);
-    let thread_finished = Arc::clone(&finished);
+impl JukeboxPreview {
+    /// 曲が最後まで自然に再生し終えたか。
+    pub fn is_finished(&self) -> bool {
+        self.player.empty()
+    }
 
-    thread::spawn(move || {
-        let player = Player::connect_new(&mixer);
-        player.set_volume(BGM_VOLUME);
-        let decoder = Decoder::new(Cursor::new(track))
-            .expect("embedded BGM track must be a valid, bundled mp3");
-        player.append(decoder);
+    /// 再生を即座に停止する(#154。バックグラウンドスレッドのポーリングを待たない
+    /// ため、次の曲の再生開始と重複しない)。
+    pub fn stop(&self) {
+        self.player.stop();
+    }
+}
 
-        let poll = Duration::from_millis(POLL_MS);
-        while !player.empty() {
-            if thread_stop.load(Ordering::Relaxed) {
-                player.stop();
-                break;
-            }
-            thread::sleep(poll);
-        }
-        thread_finished.store(true, Ordering::Relaxed);
-    });
-
-    JukeboxPreview { stop, finished }
+/// 選んだ1曲の再生を開始する(TERM独自拡張。#151)。タイトル用・プレイ中用の
+/// 常駐スレッドとは異なり、専用スレッドは立てない(#154)。
+pub fn start_jukebox_preview(mixer: &Mixer, track: &'static [u8]) -> JukeboxPreview {
+    let player = Player::connect_new(mixer);
+    player.set_volume(BGM_VOLUME);
+    let decoder =
+        Decoder::new(Cursor::new(track)).expect("embedded BGM track must be a valid, bundled mp3");
+    player.append(decoder);
+    JukeboxPreview { player }
 }
 
 #[cfg(test)]
