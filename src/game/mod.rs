@@ -1428,8 +1428,17 @@ impl Game {
     /// ログの記録先を新規に作り直して有効化する(TERM独自拡張。ユーザー指摘:
     /// 「タイトルからゲームスタートした時点でログdbは毎回リフレッシュするものと
     /// する」)。開けなかった場合は記録自体を諦め、ゲーム進行には影響させない。
-    pub fn refresh_debug_log(&mut self) {
-        self.debug_log = DebugLog::open_fresh();
+    ///
+    /// `enabled`が`false`の場合は記録自体を行わない(TERM独自拡張。#167。
+    /// ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」)。設定画面
+    /// から切り替えた場合、稼働中のgameへ即座に反映する用途にも使う(有効化時は
+    /// 新規にログを開き直し、無効化時は以降の記録を止める)。
+    pub fn refresh_debug_log(&mut self, enabled: bool) {
+        self.debug_log = if enabled {
+            DebugLog::open_fresh()
+        } else {
+            None
+        };
     }
 
     /// `update()`が呼ばれるたびに1増えるフレーム通し番号(TERM独自拡張。#85調査用。
@@ -1987,6 +1996,18 @@ mod tests {
                 *cell = Cell::Empty;
             }
         }
+    }
+
+    #[test]
+    fn refresh_debug_log_disables_recording_when_the_setting_is_off() {
+        // ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」(#167)。
+        // enabled=falseなら記録先を開かない(debug_logがNoneのまま)ことを確認する。
+        // enabled=true側はディスクI/O(dirsクレート経由の実パス)に依存するため
+        // 環境依存になり得るのでここでは確認しない(open_fresh自体は
+        // debug_log.rs側で別途テスト済み)。
+        let mut game = Game::new(1);
+        game.refresh_debug_log(false);
+        assert!(game.debug_log.is_none(), "無効化時はログを記録しないはず");
     }
 
     #[test]

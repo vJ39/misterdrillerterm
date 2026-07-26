@@ -537,6 +537,9 @@ pub enum SettingsChoice {
     DodgeRecoveryMs,
     /// ボム出現頻度(%、0まで下げられる)。TERM独自拡張。#96。
     BombRate,
+    /// #85調査用のブロック状態遷移ログ(SQLite)を記録するかどうか(TERM独自拡張。
+    /// #167。ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」)。
+    DebugLogEnabled,
 }
 
 impl SettingsChoice {
@@ -559,7 +562,8 @@ impl SettingsChoice {
             SettingsChoice::PlayerFallSpeed => SettingsChoice::MoveSpeed,
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
-            SettingsChoice::BombRate => SettingsChoice::Music,
+            SettingsChoice::BombRate => SettingsChoice::DebugLogEnabled,
+            SettingsChoice::DebugLogEnabled => SettingsChoice::Music,
         }
     }
 
@@ -568,7 +572,8 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::BombRate,
+            SettingsChoice::Music => SettingsChoice::DebugLogEnabled,
+            SettingsChoice::DebugLogEnabled => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::Se => SettingsChoice::Music,
             SettingsChoice::RockRate => SettingsChoice::Se,
@@ -615,6 +620,7 @@ pub fn draw_settings(
     move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
     bomb_spawn_rate_percent: u32,
+    debug_log_enabled: bool,
     standalone: bool,
 ) {
     let area = frame.area();
@@ -774,9 +780,14 @@ pub fn draw_settings(
             bomb_spawn_rate_percent,
             selection == SettingsChoice::BombRate,
         ),
+        toggle_line(
+            "DEBUG LOG",
+            debug_log_enabled,
+            selection == SettingsChoice::DebugLogEnabled,
+        ),
         Line::from(""),
         Line::from(Span::styled(
-            "↑↓で選択 / MUSIC・SEはSpaceか←→でトグル",
+            "↑↓で選択 / MUSIC・SE・DEBUG LOGはSpaceか←→でトグル",
             text_style,
         )),
         Line::from(Span::styled(
@@ -2274,6 +2285,8 @@ mod tests {
             SettingsChoice::PlayerFallSpeed,
             SettingsChoice::MoveSpeed,
             SettingsChoice::DodgeRecoveryMs,
+            SettingsChoice::BombRate,
+            SettingsChoice::DebugLogEnabled,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);
@@ -2350,9 +2363,9 @@ mod tests {
         // (#108でアイテム3種のrate行を追加した際、枠が足りず下部のms_line(落下速度等)が
         // クリップして見えなくなっていた)。見出し1+空行1+MUSIC/SE(2)+岩/AIR/スター/
         // ダイヤ(4)+アイテム3種(3)+色数(1)+色結合(1)+列数(1)+落下速度系4種(4)+
-        // ボム出現頻度(1)+空行1+ヘルプ2行(2)=23行、枠(上下)2行込みで25行必要。
-        // 今後さらに設定を追加したらこの定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 23;
+        // ボム出現頻度(1)+DEBUG LOG(1、#167)+空行1+ヘルプ2行(2)=24行、
+        // 枠(上下)2行込みで26行必要。今後さらに設定を追加したらこの定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 24;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let settings_area = centered_rect(60, 90, frame_rect);

@@ -68,6 +68,11 @@ pub struct Settings {
     /// ボム出現頻度(%、100=通常のまま。0=完全に出現させない。TERM独自拡張。#96)。
     /// 設定画面から調整する。
     pub bomb_spawn_rate_percent: u32,
+    /// #85調査用のブロック状態遷移ログ(SQLite、`debug_log`モジュール)を記録するか
+    /// どうか(TERM独自拡張。#167。ユーザー指摘: 「デバッグ用のDB記録するしない
+    /// トグル設定に追加」)。設定画面から切り替える。既定は有効(以前の常時記録の
+    /// 挙動を変えない)。
+    pub debug_log_enabled: bool,
 }
 
 impl Default for Settings {
@@ -91,6 +96,7 @@ impl Default for Settings {
             move_cooldown_ms: MOVE_COOLDOWN_MS_DEFAULT,
             field_width: FIELD_WIDTH_DEFAULT,
             bomb_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            debug_log_enabled: true,
         }
     }
 }
@@ -170,6 +176,8 @@ impl Settings {
             bomb_spawn_rate_percent: parse_u64_field(&text, "bomb_spawn_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.bomb_spawn_rate_percent),
+            debug_log_enabled: parse_bool_field(&text, "debug_log_enabled")
+                .unwrap_or(default.debug_log_enabled),
         }
     }
 
@@ -191,7 +199,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
@@ -209,7 +217,8 @@ impl Settings {
             self.dodge_recovery_ms,
             self.move_cooldown_ms,
             self.field_width,
-            self.bomb_spawn_rate_percent
+            self.bomb_spawn_rate_percent,
+            self.debug_log_enabled
         );
         // 一時ファイルへ書いてからrenameすることで保存をアトミックにする(TERM独自
         // 拡張。#158)。File::create+write_allをpathへ直接行うと、書き込み途中で
@@ -377,6 +386,7 @@ mod tests {
             move_cooldown_ms: 40,
             field_width: 8,
             bomb_spawn_rate_percent: 60,
+            debug_log_enabled: false,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -400,6 +410,7 @@ mod tests {
             move_cooldown_ms: 300,
             field_width: 20,
             bomb_spawn_rate_percent: 300,
+            debug_log_enabled: true,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

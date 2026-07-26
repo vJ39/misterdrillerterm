@@ -239,6 +239,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
+                            // #85調査用のブロック状態遷移ログのON/OFF(TERM独自拡張。#167)。
+                            // 一時停止中のオーバーレイからは、稼働中のgameへも即座に反映する
+                            // (無効化時は記録を止め、有効化時は新規にログを開き直す)。
+                            ui::render::SettingsChoice::DebugLogEnabled => {
+                                settings.debug_log_enabled = !settings.debug_log_enabled;
+                                game.refresh_debug_log(settings.debug_log_enabled);
+                                settings.save();
+                            }
                             // 配分率・色数・落下速度・回避硬直時間は←→で調整するので、Spaceは無効(トグル対象ではない)。
                             ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
@@ -264,7 +272,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         if pause_overlay == PauseOverlay::Settings
                             && matches!(
                                 settings_selection,
-                                ui::render::SettingsChoice::Music | ui::render::SettingsChoice::Se
+                                ui::render::SettingsChoice::Music
+                                    | ui::render::SettingsChoice::Se
+                                    | ui::render::SettingsChoice::DebugLogEnabled
                             ) =>
                     {
                         match settings_selection {
@@ -276,6 +286,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::Se => {
                                 settings.se_enabled = !settings.se_enabled;
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::DebugLogEnabled => {
+                                settings.debug_log_enabled = !settings.debug_log_enabled;
+                                game.refresh_debug_log(settings.debug_log_enabled);
                             }
                             _ => {}
                         }
@@ -543,6 +557,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.move_cooldown_ms,
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
+                            settings.debug_log_enabled,
                             false,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame, None, false),
@@ -573,6 +588,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.move_cooldown_ms,
                     settings.dodge_recovery_ms,
                     settings.bomb_spawn_rate_percent,
+                    settings.debug_log_enabled,
                     true,
                 )
             })?;
@@ -601,6 +617,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                             settings.save();
                         }
+                        // #85調査用のブロック状態遷移ログのON/OFF(TERM独自拡張。#167)。
+                        // このScreen::Settings(タイトルから開く独立画面)にはgameが
+                        // 無いため、次回のゲーム開始時(refresh_debug_log呼び出し時)に
+                        // 反映される。
+                        ui::render::SettingsChoice::DebugLogEnabled => {
+                            settings.debug_log_enabled = !settings.debug_log_enabled;
+                            settings.save();
+                        }
                         ui::render::SettingsChoice::RockRate
                         | ui::render::SettingsChoice::AirRate
                         | ui::render::SettingsChoice::StarRate
@@ -627,7 +651,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::TogglePause | InputAction::MoveLeft | InputAction::MoveRight
                         if matches!(
                             settings_selection,
-                            ui::render::SettingsChoice::Music | ui::render::SettingsChoice::Se
+                            ui::render::SettingsChoice::Music
+                                | ui::render::SettingsChoice::Se
+                                | ui::render::SettingsChoice::DebugLogEnabled
                         ) =>
                     {
                         match settings_selection {
@@ -639,6 +665,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::Se => {
                                 settings.se_enabled = !settings.se_enabled;
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::DebugLogEnabled => {
+                                settings.debug_log_enabled = !settings.debug_log_enabled;
                             }
                             _ => {}
                         }
@@ -831,7 +860,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         // #85調査用のブロック状態遷移ログをタイトルからのゲーム開始時に
                         // 毎回作り直す(TERM独自拡張。ユーザー指摘: 「タイトルからゲーム
                         // スタートした時点でログdbは毎回リフレッシュするものとする」)。
-                        game.refresh_debug_log();
+                        // 設定画面のトグルで無効化していれば記録自体を行わない(#167)。
+                        game.refresh_debug_log(settings.debug_log_enabled);
                         // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
                         // (settings.rs)、新しいゲーム開始時にも引き継ぐ(TERM独自拡張)。
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
