@@ -1524,6 +1524,34 @@ impl Game {
             .map(|&(_, _, kind)| kind)
     }
 
+    /// 指定セルの消滅フラッシュの残り時間(ms、TERM独自拡張。#174調査用ログの補助)。
+    /// 対象でなければ`None`。
+    fn recently_vanished_flash_remaining_ms(&self, pos: board::Pos) -> Option<u64> {
+        self.recently_vanished
+            .iter()
+            .find(|&&(p, _, _)| p == pos)
+            .map(|&(_, remaining, _)| remaining.as_millis() as u64)
+    }
+
+    /// 落下ブロック補間描画(`draw_falling_blocks`)が、着地先セルが盤面上で既に
+    /// Emptyになっている場面に遭遇したことを記録する(TERM独自拡張。#174。
+    /// ユーザー指摘: 「このやり取りが何回か続いており解決できてないので...
+    /// 不足要素をロギングしよう」)。デバッグログ無効時は何もしない。
+    pub fn log_render_fallback(&self, to: board::Pos, from: board::Pos, resolved: Option<Cell>) {
+        if let Some(log) = &self.debug_log {
+            let resolved_kind = resolved.map(|k| format!("{k:?}"));
+            log.log_render_fallback(
+                self.frame_counter,
+                to,
+                from,
+                resolved_kind.as_deref(),
+                self.block_fall_progress(),
+                self.effective_block_fall_tick_ms(),
+                self.recently_vanished_flash_remaining_ms(to),
+            );
+        }
+    }
+
     /// 描画側が使う、指定セルのボム爆発・炎演出の進捗(0.0=爆発直後、1.0=演出完了
     /// 直前)と爆心地からの距離(TERM独自拡張。#126)。対象でなければ`None`を返す。
     pub fn explosion_flash_progress(&self, pos: board::Pos) -> Option<(f32, u8)> {

@@ -1198,10 +1198,18 @@ fn draw_falling_blocks(
         // 接地する1コマ前でスルスルと消えてしまう」)。盤面から読めない間は消滅直前の
         // 種類で補い、最後まで落ちきってからフラッシュへ移る見た目にする。
         let cell = match cell {
-            BoardCell::Empty => match game.recently_vanished_kind((to_row, to_col)) {
-                Some(kind) => kind,
-                None => continue, // 押し潰し等で既に消滅済み、表示すべき内容がない
-            },
+            BoardCell::Empty => {
+                let resolved = game.recently_vanished_kind((to_row, to_col));
+                // #174: このフォールバック分岐に入ったこと自体(補えたか/丸ごと
+                // スキップしたか)をログに残す。この分岐は同一tick着地+自動消滅の
+                // ような稀なケースでしか通らないため、毎フレーム描画中でも記録量は
+                // 少ない。
+                game.log_render_fallback((to_row, to_col), (from_row, from_col), resolved);
+                match resolved {
+                    Some(kind) => kind,
+                    None => continue, // 押し潰し等で既に消滅済み、表示すべき内容がない
+                }
+            }
             other => other,
         };
 

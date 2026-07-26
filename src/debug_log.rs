@@ -62,6 +62,18 @@ impl DebugLog {
                  col INTEGER NOT NULL,
                  facing TEXT NOT NULL,
                  status TEXT NOT NULL
+             );
+             CREATE TABLE render_fallback_events (
+                 frame INTEGER NOT NULL,
+                 row INTEGER NOT NULL,
+                 col INTEGER NOT NULL,
+                 from_row INTEGER NOT NULL,
+                 from_col INTEGER NOT NULL,
+                 resolved_kind TEXT,
+                 fallback_used INTEGER NOT NULL,
+                 progress REAL NOT NULL,
+                 effective_tick_ms INTEGER NOT NULL,
+                 flash_remaining_ms INTEGER
              );",
         )
         .ok()?;
@@ -104,6 +116,44 @@ impl DebugLog {
             "INSERT INTO block_events (frame, kind, cell_kind, row, col, from_row, from_col) VALUES (?1, 'vanish', ?2, ?3, ?4, NULL, NULL)",
         ).and_then(|mut stmt| {
             stmt.execute(rusqlite::params![frame as i64, cell_kind, pos.0 as i64, pos.1 as i64])
+        });
+        let _ = result;
+    }
+
+    /// 落下ブロック補間描画(`draw_falling_blocks`)が、着地先セルが盤面上で既に
+    /// Emptyになっている(着地と同一tickで自動消滅した等)場面に遭遇したことを記録する
+    /// (TERM独自拡張。#172の再発疑い調査用。ユーザー指摘: 「このやり取りが何回か
+    /// 続いており解決できてないので...不足要素をロギングしよう」)。
+    /// `resolved_kind`は`recently_vanished_kind`で補えた場合の種類(補えなければNone
+    /// =描画を丸ごとスキップした)。`progress`は`block_fall_progress()`(0.0〜1.0)、
+    /// `flash_remaining_ms`はこの時点で残っていた消滅フラッシュの残り時間(msの整数化。
+    /// 対象自体が無ければNone)。
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_render_fallback(
+        &self,
+        frame: u64,
+        to: (usize, usize),
+        from: (usize, usize),
+        resolved_kind: Option<&str>,
+        progress: f32,
+        effective_tick_ms: u64,
+        flash_remaining_ms: Option<u64>,
+    ) {
+        let result = self.conn.prepare_cached(
+            "INSERT INTO render_fallback_events (frame, row, col, from_row, from_col, resolved_kind, fallback_used, progress, effective_tick_ms, flash_remaining_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        ).and_then(|mut stmt| {
+            stmt.execute(rusqlite::params![
+                frame as i64,
+                to.0 as i64,
+                to.1 as i64,
+                from.0 as i64,
+                from.1 as i64,
+                resolved_kind,
+                resolved_kind.is_some() as i64,
+                progress as f64,
+                effective_tick_ms as i64,
+                flash_remaining_ms.map(|ms| ms as i64),
+            ])
         });
         let _ = result;
     }
@@ -171,6 +221,68 @@ mod tests {
             .unwrap();
         assert_eq!(frame, 10);
         assert_eq!(cell_kind, "Color(Red)");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn log_render_fallback_records_resolved_kind_and_progress_when_fallback_succeeds() {
+        let path = temp_log_path("render-fallback-hit");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let log = DebugLog::open_fresh_at(&path).unwrap();
+        log.log_render_fallback(42, (5, 1), (4, 1), Some("Color(Red)"), 0.75, 90, Some(120));
+
+        let (resolved_kind, fallback_used, progress, effective_tick_ms, flash_remaining_ms): (
+            Option<String>,
+            i64,
+            f64,
+            i64,
+            Option<i64>,
+        ) = log
+            .conn
+            .query_row(
+                "SELECT resolved_kind, fallback_used, progress, effective_tick_ms, flash_remaining_ms FROM render_fallback_events WHERE frame = 42",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(resolved_kind.as_deref(), Some("Color(Red)"));
+        assert_eq!(fallback_used, 1);
+        assert!((progress - 0.75).abs() < 1e-6);
+        assert_eq!(effective_tick_ms, 90);
+        assert_eq!(flash_remaining_ms, Some(120));
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn log_render_fallback_records_none_when_the_fallback_could_not_resolve_a_kind() {
+        let path = temp_log_path("render-fallback-miss");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let log = DebugLog::open_fresh_at(&path).unwrap();
+        log.log_render_fallback(7, (1, 1), (0, 1), None, 0.1, 150, None);
+
+        let (resolved_kind, fallback_used, flash_remaining_ms): (Option<String>, i64, Option<i64>) = log
+            .conn
+            .query_row(
+                "SELECT resolved_kind, fallback_used, flash_remaining_ms FROM render_fallback_events WHERE frame = 7",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(resolved_kind, None);
+        assert_eq!(fallback_used, 0);
+        assert_eq!(flash_remaining_ms, None);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
