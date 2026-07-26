@@ -9,10 +9,13 @@ mod settings;
 mod ui;
 
 use std::io;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+use crossterm::execute;
 use rand::RngExt;
 use rodio::mixer::Mixer;
 
@@ -30,7 +33,27 @@ const FRAME_INTERVAL_MS: u64 = 33;
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
+
+    // Kittyキーボードプロトコル(対応ターミナルのみ)を有効化する(TERM独自拡張。
+    // ユーザー指摘: 「z/xとカーソルキー同時押しできるようにして」)。レガシーの
+    // ANSIエスケープシーケンスでは、矢印キー(複数バイトのエスケープシーケンス)と
+    // 単純な1文字キーがほぼ同時に押された場合、ターミナル側の生バイト列の解釈が
+    // 曖昧になり得るため、対応ターミナル(kitty/WezTerm/Alacritty/foot等)では
+    // DISAMBIGUATE_ESCAPE_CODESで曖昧さを解消する。非対応ターミナルでは何もしない
+    // (`supports_keyboard_enhancement`がfalse/Errの場合は従来通り)。
+    let keyboard_enhancement_enabled = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+        && execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .is_ok();
+
     let result = run(&mut terminal);
+
+    if keyboard_enhancement_enabled {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        let _ = io::stdout().flush();
+    }
     ratatui::restore();
     result
 }
