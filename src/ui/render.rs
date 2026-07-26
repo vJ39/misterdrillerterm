@@ -3,6 +3,7 @@
 //! 1論理セルを横4文字×縦2ターミナル行の大型ブロックとして描画する(9.2)。
 //! 旧版のhalf-block方式(1論理セルを1文字に圧縮)は完全に廃止した。
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use ratatui::Frame;
@@ -240,22 +241,36 @@ fn on_off_label(enabled: bool) -> &'static str {
 // タイトル画面(spec.md 1章「Qキーはタイトルへ戻る」の受け皿)
 // ---------------------------------------------------------------------------
 
-/// スプラッシュ画像を縮小表示するスケール(TERM独自拡張)。1.0だと画像だけで
-/// 画面がほぼ埋まってしまい、下のスタート案内と同時表示できないため縮小する
-/// (ユーザー指摘: 「スプラッシュとタイトル画面一緒にしよ」を受け、起動直後に
-/// 別画面としてスプラッシュを挟まず、タイトル画面へ統合した)。
+/// タイトル画面のアートは端末サイズいっぱいに表示する(TERM独自拡張。#148。
+/// ユーザー提案: 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。
+/// 以前(#129)はアート:案内文の高さ比を黄金比にする方針だったため、アートの
+/// 表示行数を絞る必要があり、その結果アートが低解像度で潰れて見える問題が
+/// あった(#127で解像度を上げた直後に#129で再び縮小した経緯)。ロゴ・案内文を
+/// アートと同じ領域(画面全体)へ上から重ね描きする方式に変えたことで、この
+/// トレードオフ自体を解消している。
 ///
-/// 当初0.5→0.75と引き上げてきたが、#124(ユーザー指摘: 「スプラッシュもっと
-/// 解像度高く」)であらためて見直し、この値を1.0に固定して`intro::DISPLAY_SIZE`
-/// 側だけで最終解像度を決めるよう変更した(理由は`DISPLAY_SIZE`のコメントを参照。
-/// 二段階の粗い間引きを避けるため)。
-///
-/// なお`draw_title`はゲーム本編のフレームサイズ`TOTAL_SCREEN_H`を使わず、実際の
-/// 端末サイズ(`area`)へ直接収める設計になっている。#120でロゴ3行を追加した際に
-/// 合計行数(アート+区切り+案内文)が当時のコメントの想定(31行、`TOTAL_SCREEN_H`
-/// 基準)を既に超えていたが見落とされていた。行数の目安は
-/// `title_screen_content_fits_a_reasonably_sized_terminal`で回帰確認する。
-const TITLE_ART_SCALE: f32 = 1.0;
+/// アートの構築(PNGデコード+Lanczos3リサイズ)は軽くない処理のため、端末サイズが
+/// 変わらない限り再利用するキャッシュを`title_art_lines`に持たせている
+/// (`draw_title`はタイトル画面にいる間、毎フレーム=約33msごとに呼ばれるため)。
+type TitleArtCache = Option<((u16, u16), Vec<Line<'static>>)>;
+
+fn title_art_lines(cols: u16, rows: u16) -> Vec<Line<'static>> {
+    thread_local! {
+        static CACHE: RefCell<TitleArtCache> = const { RefCell::new(None) };
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((size, lines)) = cache.as_ref()
+            && *size == (cols, rows)
+        {
+            return lines.clone();
+        }
+        let canvas = intro::build_canvas(cols, rows);
+        let lines = canvas.to_lines(1.0);
+        *cache = Some(((cols, rows), lines.clone()));
+        lines
+    })
+}
 
 /// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント
 /// (3行×3列、TERM独自拡張。ユーザー指摘: 「TERMMAPみたいにかっこいい題字
@@ -324,10 +339,17 @@ pub fn draw_title(frame: &mut Frame) {
             .bg(colors::LETTERBOX_BG),
     );
 
-    let canvas = intro::build_canvas();
-    let art_lines = canvas.to_lines(TITLE_ART_SCALE);
-    let art_rows = art_lines.len() as u16;
+    // アートを画面いっぱいに表示する(TERM独自拡張。#148)。
+    let art_lines = title_art_lines(area.width, area.height);
+    frame.render_widget(
+        Paragraph::new(Text::from(art_lines)).alignment(Alignment::Center),
+        area,
+    );
 
+    // ロゴ・案内文はアートの上に重ね描きする(TERM独自拡張。#148。ユーザー提案:
+    // 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。パネルの
+    // 地色(LETTERBOX_BG)がその部分のアートを覆い隠す形で表示されるため、
+    // 背景の絵柄によらず文字が読める。
     let text_style = Style::default()
         .fg(colors::PANEL_TEXT)
         .bg(colors::LETTERBOX_BG);
@@ -341,27 +363,12 @@ pub fn draw_title(frame: &mut Frame) {
     ]);
     let text_rows = text_lines.len() as u16;
 
-    let content_area = centered_fixed_rect(area.width, art_rows + 1 + text_rows, area);
-    let chunks = Layout::default()
-        .direction(LayoutDirection::Vertical)
-        .constraints([
-            Constraint::Length(art_rows),
-            Constraint::Length(1),
-            Constraint::Length(text_rows),
-        ])
-        .split(content_area);
-
-    frame.render_widget(
-        Paragraph::new(Text::from(art_lines))
-            .style(Style::default().bg(colors::LETTERBOX_BG))
-            .alignment(Alignment::Center),
-        chunks[0],
-    );
+    let text_area = centered_fixed_rect(area.width, text_rows, area);
     frame.render_widget(
         Paragraph::new(text_lines)
             .style(Style::default().bg(colors::LETTERBOX_BG))
             .alignment(Alignment::Center),
-        chunks[2],
+        text_area,
     );
 }
 
@@ -2181,20 +2188,12 @@ mod tests {
     }
 
     #[test]
-    fn title_screen_content_fits_a_reasonably_sized_terminal() {
-        // ユーザー指摘: 「スプラッシュもっと解像度高く」(#124)。`draw_title`は
-        // ゲーム本編のフレームサイズ`TOTAL_SCREEN_H`を使わず、実際の端末サイズへ
-        // 直接収める設計のため、アート解像度を上げるたびに合計行数(アート+区切り+
-        // 案内文)がユーザーの端末で収まるか回帰確認する必要がある(#120でロゴ3行を
-        // 追加した際、この合計行数が当時のコメントの想定より増えていたのに
-        // 見落とされていた)。55行はごく一般的なターミナルウィンドウの高さの目安
-        // (#127でDISPLAY_SIZEを60→80へ引き上げた際に、それまでの40行から
-        // 引き上げた。ユーザーの実端末スクリーンショットで#124時点の合計39行は
-        // 余裕をもって収まっていたことを確認済み)。
+    fn title_screen_text_overlay_fits_within_a_reasonably_sized_terminal() {
+        // #148でアートは画面いっぱいに表示する方式に変えたため、合計行数の
+        // 心配は「ロゴ+案内文パネルが画面の縦幅に収まるか」だけになった
+        // (以前はここにアートの行数も加算していたが、アートはもう別途行数を
+        // 消費しない)。55行はごく一般的なターミナルウィンドウの高さの目安(#127)。
         const ASSUMED_COMMON_TERMINAL_H: u16 = 55;
-
-        let canvas = intro::build_canvas();
-        let art_rows = canvas.to_lines(TITLE_ART_SCALE).len() as u16;
 
         let mut text_lines = build_title_logo_lines().to_vec();
         text_lines.extend([
@@ -2206,43 +2205,31 @@ mod tests {
         ]);
         let text_rows = text_lines.len() as u16;
 
-        let total = art_rows + 1 + text_rows;
         assert!(
-            total <= ASSUMED_COMMON_TERMINAL_H,
-            "タイトル画面の合計行数が一般的な端末の高さ({ASSUMED_COMMON_TERMINAL_H}行)を\
-             超えている(合計={total}、内訳: アート{art_rows}行+区切り1行+案内文{text_rows}行)。\
-             解像度を上げる際はこの行数も見直すこと"
+            text_rows <= ASSUMED_COMMON_TERMINAL_H,
+            "ロゴ+案内文パネルの行数が一般的な端末の高さ({ASSUMED_COMMON_TERMINAL_H}行)を\
+             超えている(text_rows={text_rows})"
         );
     }
 
     #[test]
-    fn title_screen_art_to_text_height_ratio_approximates_the_golden_ratio() {
-        // ユーザー指摘: 「スプラッシュの構成を黄金比に」(#129。アート:ロゴ/案内文の
-        // 高さ比を黄金比にする、と明示的に確認済み)。アート解像度を優先してきた
-        // #124/#127の方針より構成比を優先する選択のため、比率がずれたら回帰で
-        // 気づけるようにする。
-        const GOLDEN_RATIO: f32 = 1.618_034;
-        const TOLERANCE: f32 = 0.15;
+    fn title_art_lines_fills_the_exact_requested_terminal_size() {
+        // #148: アートは画面いっぱいに表示するため、行数・幅とも要求した
+        // 端末サイズと1:1で一致するはず。
+        let lines = title_art_lines(100, 40);
+        assert_eq!(lines.len(), 40);
+        assert_eq!(lines[0].spans.len(), 100);
+    }
 
-        let canvas = intro::build_canvas();
-        let art_rows = canvas.to_lines(TITLE_ART_SCALE).len() as f32;
-
-        let mut text_lines = build_title_logo_lines().to_vec();
-        text_lines.extend([
-            Line::from(""),
-            Line::from(""),
-            Line::from(""),
-            Line::from(""),
-            Line::from(""),
-        ]);
-        let text_rows = text_lines.len() as f32;
-
-        let ratio = art_rows / text_rows;
-        assert!(
-            (ratio - GOLDEN_RATIO).abs() < TOLERANCE,
-            "アート:テキストの高さ比が黄金比から外れている\
-             (比率={ratio}、art_rows={art_rows}、text_rows={text_rows})"
-        );
+    #[test]
+    fn title_art_lines_cache_returns_the_same_size_on_repeated_calls() {
+        // 同じ端末サイズでの再呼び出しはキャッシュから返されるが、内容(サイズ)は
+        // 変わらないはず(TERM独自拡張。#148。`draw_title`は毎フレーム呼ばれるため
+        // 再デコードを避けるキャッシュを持つ)。
+        let first = title_art_lines(80, 24);
+        let second = title_art_lines(80, 24);
+        assert_eq!(first.len(), second.len());
+        assert_eq!(first[0].spans.len(), second[0].spans.len());
     }
 
     #[test]

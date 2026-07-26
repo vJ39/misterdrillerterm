@@ -19,55 +19,51 @@ use super::pixel_canvas::PixelCanvas;
 /// 埋め込み画像(`assets/intro.png`)。
 const INTRO_IMAGE_BYTES: &[u8] = include_bytes!("../../assets/intro.png");
 
-/// 表示解像度(論理ピクセル、長辺基準)。元画像は縦長(1024x1536)なので、
-/// 長辺(高さ)をこの値にリサイズする。
-///
-/// この値と`render::TITLE_ART_SCALE`は対で決める(TERM独自拡張。#124。ユーザー
-/// 指摘: 「スプラッシュもっと解像度高く」)。以前は64にリサイズした後で
-/// `TITLE_ART_SCALE`(0.75)により最近傍サンプリングでさらに間引いていたが、
-/// この二段階目は`image`クレートのフィルタを経ない粗い間引きのため画質が
-/// 損なわれる。そこで`TITLE_ART_SCALE`を1.0にし、最終的に欲しい表示行数ぶんの
-/// 解像度をここで直接指定する(=フィルタ付きリサイズ1回で完結させる)。
-///
-/// 60→80へさらに引き上げた(#127。ユーザー指摘: 「もっとくっきり見えるように
-/// ならん？」。60でも大きな色ブロックのモザイクにしか見えなかった)。
-///
-/// 80→26へ縮小(TERM独自拡張。#129。ユーザー指摘: 「スプラッシュの構成を黄金比に」
-/// →アート:ロゴ/案内文の高さ比を黄金比(約1.618:1)にする方向で確認済み)。
-/// アート解像度を優先してきた#124/#127の方針とは逆行するが、構成比を優先する
-/// というユーザーの明示的な選択による(art_rows=13、text_rows=8として
-/// 13/8≈1.625で黄金比に近づける)。
-const DISPLAY_SIZE: u32 = 26;
-
 /// アルファ値がこれ未満の画素は透過(背景)として扱う。
 const ALPHA_THRESHOLD: u8 = 128;
 
-/// 起動時スプラッシュ用のピクセルキャンバスを組み立てる。
-/// 呼び出しごとに画像のデコード・リサイズを行う(起動時に1回しか呼ばないため
-/// キャッシュは設けていない)。
-pub fn build_canvas() -> PixelCanvas {
+/// 起動時スプラッシュ用のピクセルキャンバスを、端末セル`target_cols`×`target_rows`
+/// ぶんの画面全体を覆うサイズで組み立てる(TERM独自拡張。#148。ユーザー提案:
+/// 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。
+///
+/// 以前(#129)はアート:案内文の高さ比を黄金比にする方針だったため、画面全体を
+/// 使わずアート自体の解像度を絞る必要があり、結果としてアートが低解像度で
+/// 潰れて見える問題があった。ロゴ・案内文をアートの上に重ね描きする方式に
+/// 変えたことで、アートは画面全体をそのまま使えるようになった。
+///
+/// 1端末セル=横1論理ピクセル・縦2論理ピクセル(ハーフブロック疑似2倍解像度、
+/// `pixel_canvas.rs`参照)なので、画面いっぱいに隙間なく表示するには
+/// `target_cols`×`target_rows*2`論理ピクセル分の画像が要る。元画像のアスペクト比
+/// を保ったまま画面全体を覆う(CSSの`background-size: cover`と同じ考え方)よう、
+/// 縦横どちらかがぴったり収まるまで拡大してから、はみ出した分を中央基準で
+/// 切り出す(引き伸ばして歪めることはしない)。
+pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
     let background = colors::LETTERBOX_BG;
 
     let decoded = image::load_from_memory(INTRO_IMAGE_BYTES)
         .expect("assets/intro.png must be a valid, bundled PNG");
     let (src_w, src_h) = decoded.dimensions();
-    let (target_w, target_h) = if src_w >= src_h {
-        (DISPLAY_SIZE, DISPLAY_SIZE * src_h / src_w.max(1))
-    } else {
-        (DISPLAY_SIZE * src_w / src_h.max(1), DISPLAY_SIZE)
-    };
-    // Lanczos3はTriangle(双線形)より輪郭・コントラストの保持に優れ、この規模の
-    // 縮小(1024x1536→数十px)でも模様が潰れにくい(TERM独自拡張。#127)。
+
+    let target_w = (target_cols as u32).max(1);
+    let target_h = (target_rows as u32).max(1) * 2;
+
+    let scale = (target_w as f32 / src_w.max(1) as f32).max(target_h as f32 / src_h.max(1) as f32);
+    let resized_w = ((src_w as f32) * scale).ceil().max(target_w as f32) as u32;
+    let resized_h = ((src_h as f32) * scale).ceil().max(target_h as f32) as u32;
+
+    // Lanczos3はTriangle(双線形)より輪郭・コントラストの保持に優れ、大きな縮小率
+    // でも模様が潰れにくい(TERM独自拡張。#127)。
     let resized = decoded
-        .resize_exact(target_w.max(1), target_h.max(1), FilterType::Lanczos3)
+        .resize_exact(resized_w, resized_h, FilterType::Lanczos3)
         .to_rgba8();
 
-    let mut canvas = PixelCanvas::new(
-        resized.width() as usize,
-        resized.height() as usize,
-        background,
-    );
-    for (x, y, Rgba([r, g, b, a])) in resized.enumerate_pixels() {
+    let crop_x = (resized_w - target_w) / 2;
+    let crop_y = (resized_h - target_h) / 2;
+    let cropped =
+        image::imageops::crop_imm(&resized, crop_x, crop_y, target_w, target_h).to_image();
+
+    let mut canvas = PixelCanvas::new(target_w as usize, target_h as usize, background);
+    for (x, y, Rgba([r, g, b, a])) in cropped.enumerate_pixels() {
         if *a < ALPHA_THRESHOLD {
             continue; // 透過(背景)はキャンバスの下地色のまま残す。
         }
@@ -83,7 +79,27 @@ mod tests {
 
     #[test]
     fn build_canvas_produces_non_empty_output() {
-        let canvas = build_canvas();
+        let canvas = build_canvas(80, 24);
+        let lines = canvas.to_lines(1.0);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn build_canvas_fills_the_exact_requested_terminal_size() {
+        // #148: アートは画面いっぱいに表示する(端末セル数と1:1で一致するはず)。
+        let canvas = build_canvas(100, 40);
+        let lines = canvas.to_lines(1.0);
+        assert_eq!(lines.len(), 40, "行数は要求したtarget_rowsと一致するはず");
+        assert_eq!(
+            lines[0].spans.len(),
+            100,
+            "幅は要求したtarget_colsと一致するはず"
+        );
+    }
+
+    #[test]
+    fn build_canvas_handles_a_tiny_terminal_without_panicking() {
+        let canvas = build_canvas(1, 1);
         let lines = canvas.to_lines(1.0);
         assert!(!lines.is_empty());
     }
