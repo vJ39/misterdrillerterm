@@ -152,6 +152,9 @@ pub enum GameEvent {
     LevelUp { level: usize },
     /// ライフを1つ失ったが、まだライフが残っている(その場で酸素全回復して再開)
     LifeLost,
+    /// 「天に召される」演出が終わり、その場に復活した瞬間(TERM独自拡張。ユーザー指摘:
+    /// 「死んで、復活したときのSEほしい」)
+    Revived,
     /// 最後のライフを失い、ゲームオーバーになった
     GameOverMiss,
     /// 深度1000m到達でゲームクリアした
@@ -580,7 +583,7 @@ impl Game {
     /// まわりの落下アニメーションを止めない」)。演出が終わった瞬間、死亡地点の3列
     /// クリア・押し潰したブロック自体のクリア・ライフ減算・酸素回復をまとめて行い、
     /// その場に復活する。
-    fn tick_ascending(&mut self, delta: Duration) {
+    fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) {
         let Some(remaining) = self.ascending_remaining else {
             return;
         };
@@ -596,7 +599,10 @@ impl Game {
             debug_assert!(!game_over, "ライフ0のケースはapply_missで即座に処理済みのはず");
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
             // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に
-            // 発火済みのため、ここでは重複して発火しない。
+            // 発火済みのため、ここでは重複して発火しない。復活した瞬間のSEは
+            // ここで発火する(TERM独自拡張。ユーザー指摘: 「死んで、復活したときの
+            // SEほしい」)。
+            events.push(GameEvent::Revived);
         } else {
             self.ascending_remaining = Some(remaining);
         }
@@ -691,7 +697,7 @@ impl Game {
         // へその場でさらに酸素減少・クールダウン加算として二重に適用されてしまう
         // (演出完了時に酸素を全回復させた直後、同じフレーム内で減衰させてしまうバグ)。
         let was_dying = self.is_dying();
-        self.tick_ascending(delta);
+        self.tick_ascending(delta, &mut events);
 
         // 「わ〜!」スライダー演出中(TERM独自拡張)は入力のみを凍結する(is_input_frozen
         // が各入力ハンドラで担う)。ユーザー指摘: 「ゲーム全体が止まってるように見える」
@@ -2593,6 +2599,28 @@ mod tests {
             "演出完了時に重複してLifeLostが発火してはいけない"
         );
         assert_eq!(game.player.lives, 1, "演出完了時にライフは減るはず");
+    }
+
+    #[test]
+    fn revived_event_fires_exactly_when_the_ascend_animation_completes() {
+        // ユーザー指摘: 「死んで、復活したときのSEほしい(よーし、がんばるぞーみたいな)」。
+        let mut game = Game::new_with_lives(80, 2);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        assert!(
+            !events.iter().any(|e| matches!(e, GameEvent::Revived)),
+            "押し潰された直後(演出開始時点)ではまだ復活していないはず"
+        );
+
+        let events = game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::Revived)),
+            "演出完了時にRevivedが発火するはず"
+        );
     }
 
     #[test]

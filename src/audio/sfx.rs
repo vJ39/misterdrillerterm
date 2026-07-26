@@ -570,3 +570,18 @@ pub fn play_miss(mixer: &Mixer) {
 pub fn play_life_lost(mixer: &Mixer) {
     play_tone(mixer, square_chirp(440.0, 220.0, 250, 0.5), SE_VOLUME);
 }
+
+/// 復活音: 「天に召される」演出が終わり、その場に復活した瞬間(TERM独自拡張。
+/// ユーザー指摘: 「死んで、復活したときのSEほしい」)。気持ちを切り替える合図として
+/// 短く駆け上がる3音アルペジオ(矩形波)440/554/659Hz、各70ms。
+pub fn play_revive(mixer: &Mixer) {
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(square_tone(440.0, 70, 0.5)),
+            Box::new(square_tone(554.0, 70, 0.5)),
+            Box::new(square_tone(659.0, 70, 0.5)),
+        ],
+        SE_VOLUME,
+    );
+}

@@ -847,6 +847,7 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::OxygenWarningTick => audio::sfx::play_oxygen_warning(mixer),
             GameEvent::LevelUp { .. } => audio::sfx::play_level_up(mixer),
             GameEvent::LifeLost => audio::sfx::play_life_lost(mixer),
+            GameEvent::Revived => audio::sfx::play_revive(mixer),
             GameEvent::GameOverMiss => audio::sfx::play_miss(mixer),
             GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
             GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
