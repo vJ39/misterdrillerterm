@@ -1246,12 +1246,16 @@ impl Game {
                     // 「軸方向に何マス離れているか」と一致する。
                     let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
                     let tier = tier.min(u8::MAX as usize) as u8;
+                    // 炎フラッシュは着弾したセルの中身を問わず、爆風が通過した
+                    // 全マスに表示する(TERM独自拡張。#166)。以前はRock/Diamond/
+                    // Colorを変化させた場合にのみ発火しており、#159で爆風が
+                    // Empty(既に掘削済みの空間)も遠くまで貫通するようになった
+                    // ことで、炎が全く見えないマスが大半を占めてしまっていた。
+                    self.recently_exploded.push(((row, col), flash, tier));
                     if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
                         self.board.set(row, col, Cell::Star { visible_ms: 0 });
-                        self.recently_exploded.push(((row, col), flash, tier));
                     } else if matches!(self.board.cell(row, col), Cell::Color(_)) {
                         self.board.set(row, col, Cell::Color(unify_color));
-                        self.recently_exploded.push(((row, col), flash, tier));
                         unified_positions.push((row, col));
                     }
                 }
@@ -4867,6 +4871,46 @@ mod tests {
             game.explosion_flash_progress((520, 5)).is_none(),
             "演出時間が経過したら炎フラッシュは終わるはず"
         );
+    }
+
+    #[test]
+    fn bomb_explosion_shows_a_flame_flash_on_empty_cells_within_the_blast_too() {
+        // ユーザー指摘: 「爆打の火柱が描画されていない!」(#166)。#159で爆風が
+        // Rock/Diamondで止まらず遠くまで貫通するようになった結果、爆風経路の大半を
+        // 占めるEmpty(既に掘削済みの空間)には炎フラッシュが一切付かず、炎の柱が
+        // ほとんど見えなくなっていた。Empty/Oxygen/Item等、内容を書き換えない
+        // セルでも炎演出自体は他のセルと同じように発火するはず。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        // 爆心地の右方向はすべてEmptyのまま(#159で導入された、遮蔽物なしの貫通経路)。
+
+        game.update(Duration::from_millis(60));
+
+        let (_, tier_right1) = game
+            .explosion_flash_progress((520, 6))
+            .expect("Empty(距離1・右方向)も炎演出の対象のはず");
+        assert_eq!(tier_right1, 1);
+        assert_eq!(
+            game.board.cell(520, 6),
+            Cell::Empty,
+            "炎演出はEmptyの中身自体を書き換えないはず"
+        );
+
+        let (_, tier_right2) = game
+            .explosion_flash_progress((520, 7))
+            .expect("Empty(距離2・右方向)も炎演出の対象のはず");
+        assert_eq!(tier_right2, 2);
     }
 
     #[test]
