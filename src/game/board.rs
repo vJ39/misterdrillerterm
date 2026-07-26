@@ -1178,7 +1178,14 @@ pub fn apply_gravity_tick(
         }
     }
 
-    for group in &falling_groups {
+    // 押し潰しを起こした塊のインデックス(`falling_groups`内)を記録する(TERM独自拡張。
+    // #170。ユーザー指摘: 「キャラと同じ位置に来た隣接ブロックがどうも消える」)。
+    // 押し潰したセルはプレイヤー位置にそのまま表示用に残る特殊セルであり、これを
+    // 起点に後続の自動消滅判定(4連結以上)を回すと、たまたま同色で隣接していた
+    // だけの、落下とは無関係な既存の静的ブロックまで巻き込んで消えてしまっていた。
+    let mut crushed_group_indices: HashSet<usize> = HashSet::new();
+
+    for (group_index, group) in falling_groups.iter().enumerate() {
         // 各セルの内容(色ブロックのColorKind・岩ブロックのhits)は`snapshot`から
         // セルごとに個別取得する。グループ代表セル1つの内容を全セルへ使い回すと、
         // 岩ブロックのようにセルごとに異なる付随データ(hits)を持つ塊で、着地後に
@@ -1216,6 +1223,7 @@ pub fn apply_gravity_tick(
 
         if crushed_in_group {
             outcome.crushed = true;
+            crushed_group_indices.insert(group_index);
             // ここで`break`すると、直前のループで旧位置を既にEmptyにしてしまった
             // 「他の(無関係な)落下中の塊」が新位置への書き込みだけスキップされ、
             // 盤面から消滅してしまう(発見: 同一tickに複数の塊が同時に落下していて、
@@ -1230,8 +1238,13 @@ pub fn apply_gravity_tick(
     // 着地した他の(無関係な)塊の4連結自動消滅とは独立している。ここで早期returnすると、
     // 押し潰しが起きたtickに限って、本来なら着地・自動消滅するはずの塊(押し潰しとは
     // 無関係な塊も含め全て)が消滅せずそのまま盤面に残ってしまう
-    // (発見: 「4個以上結合したのに消えない」報告の一因)。押し潰された塊自体は、
-    // 直後のEmptyチェックで自然にスキップされるため、ここで特別扱いする必要はない。
+    // (発見: 「4個以上結合したのに消えない」報告の一因)。
+    //
+    // ただし押し潰した塊自体(`crushed_group_indices`)は、この自動消滅判定の対象から
+    // 明示的に除外する(TERM独自拡張。#170)。押し潰したセルはEmptyにはならず
+    // プレイヤー位置にそのまま表示用に残るため、以前は「Emptyなら消滅済みとみなして
+    // スキップ」という判定をすり抜け、たまたま同色で隣接していた無関係な静的ブロック
+    // まで巻き込んで自動消滅させてしまっていた。
 
     // 着地(=移動先で直下が支持状態になった)色ブロック・岩ブロックについて連結・自動消滅を
     // 判定する(spec.md 4.5・4.9)。岩ブロックも4連結以上になれば自動消滅するが得点は
@@ -1240,13 +1253,16 @@ pub fn apply_gravity_tick(
     // 1ブロックしか消せない」)とは独立していて、こちらは「支えを失って落下し、着地して
     // 4個以上連結した場合」にのみ働く自動消滅(ユーザー指摘: 「4個以上結合したら
     // ちゃんと消えないといけない」)。
-    for group in &falling_groups {
+    for (group_index, group) in falling_groups.iter().enumerate() {
+        if crushed_group_indices.contains(&group_index) {
+            continue; // 押し潰した塊は自動消滅判定の対象外(#170)
+        }
         let moved_group: Vec<(usize, usize)> = group.iter().map(|&(r, c)| (r + 1, c)).collect();
         let Some(&to) = moved_group.first() else {
             continue;
         };
         if board.cell(to.0, to.1) == Cell::Empty {
-            continue; // 押し潰しでこの塊自体が消滅済み
+            continue; // 別の塊による押し潰し等で既にこの位置が変化している
         }
         match board.cell(to.0, to.1) {
             Cell::Color(color) => {
@@ -3278,6 +3294,42 @@ mod tests {
             Cell::Color(ColorKind::Blue),
             "無関係な塊は消滅せず、ちゃんと1マス落下しているはず"
         );
+    }
+
+    #[test]
+    fn crushing_the_player_does_not_auto_vanish_static_same_color_neighbors_via_the_crush_cell() {
+        // ユーザー指摘: 「キャラと同じ位置に来た隣接ブロックがどうも消えるっぽい」(#170)。
+        // 押し潰したブロックはプレイヤー位置にそのまま残る(表示用の特殊セル、
+        // falling_block_onto_player_crushes_and_remains_visible_at_the_impact_point参照)が、
+        // このセルを起点に通常の自動消滅判定(4連結以上)を回してしまうと、たまたま
+        // 同色で隣接していただけの、落下とは無関係な既存の静的ブロックまで巻き込んで
+        // 消えてしまっていた。押し潰した塊は自動消滅判定の対象から除外されるべき。
+        let mut board = empty_board(3);
+        board.rows[0][0] = Cell::Color(ColorKind::Red); // プレイヤーを押し潰す塊
+        board.rows[1][1] = Cell::Color(ColorKind::Red); // 静的な隣接ブロック(消えてはいけない)
+        board.rows[1][2] = Cell::Color(ColorKind::Red);
+        board.rows[1][3] = Cell::Color(ColorKind::Red);
+        board.rows[2][1] = Cell::Rock { hits: 0 }; // 隣接ブロックを支える床
+        board.rows[2][2] = Cell::Rock { hits: 0 };
+        board.rows[2][3] = Cell::Rock { hits: 0 };
+        let player_pos = (1, 0);
+        let mut gravity = GravityState::new();
+
+        let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity);
+
+        assert!(outcome.crushed, "プレイヤーは押し潰されるはず");
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Color(ColorKind::Red),
+            "押し潰したブロックはその場に残って見えるはず"
+        );
+        assert_eq!(
+            board.cell(1, 1),
+            Cell::Color(ColorKind::Red),
+            "静的な隣接ブロックは押し潰しに巻き込まれて消えてはいけないはず"
+        );
+        assert_eq!(board.cell(1, 2), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(1, 3), Cell::Color(ColorKind::Red));
     }
 
     #[test]
