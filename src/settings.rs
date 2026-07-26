@@ -65,6 +65,9 @@ pub struct Settings {
     /// できるようにして」。設定画面から調整する。新規ゲーム開始時にのみ反映され、
     /// プレイ中に変更しても次回開始まで見た目には反映しない。
     pub field_width: usize,
+    /// ボム出現頻度(%、100=通常のまま。0=完全に出現させない。TERM独自拡張。#96)。
+    /// 設定画面から調整する。
+    pub bomb_spawn_rate_percent: u32,
 }
 
 impl Default for Settings {
@@ -87,6 +90,7 @@ impl Default for Settings {
             dodge_recovery_ms: DODGE_RECOVERY_MS_DEFAULT,
             move_cooldown_ms: MOVE_COOLDOWN_MS_DEFAULT,
             field_width: FIELD_WIDTH_DEFAULT,
+            bomb_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
         }
     }
 }
@@ -163,6 +167,9 @@ impl Settings {
             field_width: parse_u64_field(&text, "field_width")
                 .map(|v| v as usize)
                 .unwrap_or(default.field_width),
+            bomb_spawn_rate_percent: parse_u64_field(&text, "bomb_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.bomb_spawn_rate_percent),
         }
     }
 
@@ -184,7 +191,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
@@ -201,7 +208,8 @@ impl Settings {
             self.color_cluster_rate_percent,
             self.dodge_recovery_ms,
             self.move_cooldown_ms,
-            self.field_width
+            self.field_width,
+            self.bomb_spawn_rate_percent
         );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
@@ -278,6 +286,10 @@ mod tests {
         assert_eq!(settings.dodge_recovery_ms, DODGE_RECOVERY_MS_DEFAULT);
         assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_DEFAULT);
         assert_eq!(settings.field_width, FIELD_WIDTH_DEFAULT);
+        assert_eq!(
+            settings.bomb_spawn_rate_percent,
+            SPAWN_RATE_PERCENT_DEFAULT
+        );
     }
 
     #[test]
@@ -350,6 +362,7 @@ mod tests {
             dodge_recovery_ms: 500,
             move_cooldown_ms: 40,
             field_width: 8,
+            bomb_spawn_rate_percent: 60,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -372,6 +385,7 @@ mod tests {
             dodge_recovery_ms: 2000,
             move_cooldown_ms: 300,
             field_width: 20,
+            bomb_spawn_rate_percent: 300,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

@@ -10,23 +10,38 @@ pub mod player;
 
 use std::time::Duration;
 
+use rand::{RngExt, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
-    DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
-    DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
-    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
-    FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
+    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD,
+    BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS, CRUSH_ASCEND_MS,
+    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
+    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
+    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
     FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
     INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
     MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS, depth_fraction,
+    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
+    STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
-use board::{BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, tick_star_melting};
+use board::{BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells, tick_star_melting};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
 use crate::debug_log::DebugLog;
+
+/// 白ボンがランダムに投げ込むボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、
+/// 爆弾をランダムに投げてくるイメージで、敵は出現しないものとする」)。移動する
+/// 敵キャラは持たず、盤面上に設置されたこのボム自体だけを管理する。ブロックとは
+/// 別レイヤーのオブジェクトなので`Cell`列挙体には追加しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bomb {
+    pub pos: board::Pos,
+    pub remaining_ms: u32,
+}
 
 /// キー入力から得られるゲーム側のアクション(spec.md 1章)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +81,9 @@ pub enum InputAction {
     /// (TERM独自拡張、動作確認用ショートカット。ユーザー指摘: 「画面内をスター化
     /// する(Xブロック,ダイヤブロック100%)」)
     DebugStarifyVisibleScreen,
+    /// デバッグ: ボムを1個、画面内のランダムなEmptyマスへ即座に設置する(TERM独自拡張、
+    /// 動作確認用ショートカット。#96。ユーザー指摘: 「ショートカットキーもくれ」)
+    DebugPlaceBomb,
     /// デバッグ: ブロックの落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
     DebugBlockFallSlower,
     /// デバッグ: ブロックの落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
@@ -166,6 +184,9 @@ pub enum GameEvent {
     /// 「ショートカットRと同じ効果のあるアイテムつくろ」「ショートカットC効果の
     /// アイテムも作って」)
     ItemCollected(ItemEffect),
+    /// ボムが爆発した(TERM独自拡張。#96)。プレイヤーが爆風に巻き込まれたかどうかは
+    /// 別途`LifeLost`/`GameOverMiss`が続けて発生するかで判断できる。
+    BombExploded,
 }
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
@@ -277,6 +298,17 @@ pub struct Game {
     /// 有効化するまでは`None`(no-op)のままなので、通常のテスト等では disk I/O が
     /// 発生しない。
     debug_log: Option<DebugLog>,
+    /// 現在盤面上にあるボム(TERM独自拡張。#96)。
+    bombs: Vec<Bomb>,
+    /// ボム出現判定の経過時間蓄積(TERM独自拡張。#96)。`BOMB_SPAWN_CHECK_INTERVAL_MS`
+    /// ぶん貯まるたびに1回、出現確率を判定する。
+    bomb_spawn_check_accum_ms: u64,
+    /// ボム出現頻度設定(%、100=既定、TERM独自拡張。#96)。設定画面から調整できる。
+    bomb_spawn_rate_percent: u32,
+    /// ボム出現位置・確率判定専用の乱数生成器(TERM独自拡張。#96)。ゲームのシードから
+    /// 派生させるため、同じシードなら同じ出現パターンが再現できる(既存の盤面生成と
+    /// 同じ決定性の考え方)。
+    rng: ChaCha8Rng,
 }
 
 impl Game {
@@ -342,6 +374,13 @@ impl Game {
             game_over_selection: GameOverChoice::BackToTitle,
             frame_counter: 0,
             debug_log: None,
+            bombs: Vec::new(),
+            bomb_spawn_check_accum_ms: 0,
+            bomb_spawn_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+            // ボード生成(`Board::generate`)とは別系統の乱数列にするため、シードを
+            // ビット反転して使う(TERM独自拡張。#96)。同じゲームシードなら同じボム
+            // 出現パターンが再現される。
+            rng: ChaCha8Rng::seed_from_u64(!seed),
         }
     }
 
@@ -901,6 +940,48 @@ impl Game {
             self.note_vanished_cells(melted);
         }
 
+        // ボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、爆弾をランダムに投げて
+        // くるイメージで、敵は出現しないものとする」)。「天に召される」演出中は
+        // 位置の食い違いを避けるため、他のプレイヤー関連処理と同様に進行を止める。
+        if !was_dying {
+            let mut exploded = Vec::new();
+            for (i, bomb) in self.bombs.iter_mut().enumerate() {
+                bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta.as_millis() as u32);
+                if bomb.remaining_ms == 0 {
+                    exploded.push(i);
+                }
+            }
+            for &i in exploded.iter().rev() {
+                let bomb = self.bombs.remove(i);
+                let blast_cells = bomb_blast_cells(&self.board, bomb.pos, BOMB_BLAST_RANGE);
+                let mut hit_player = false;
+                for &(row, col) in &blast_cells {
+                    if (row, col) == self.player.position() {
+                        hit_player = true;
+                    }
+                    if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
+                        self.board.set(row, col, Cell::Star { visible_ms: 0 });
+                    }
+                }
+                events.push(GameEvent::BombExploded);
+                // 同一フレームで複数のボムが爆発し、どちらもプレイヤーを巻き込んだ
+                // 場合に二重でミス処理しないよう、既にミス処理済み(is_dying/GameOver
+                // へ遷移済み)でないことを確認してから適用する。
+                if hit_player && !self.is_dying() && self.status == GameStatus::Playing {
+                    self.apply_miss(&mut events);
+                    if self.status != GameStatus::Playing {
+                        return events;
+                    }
+                }
+            }
+
+            self.bomb_spawn_check_accum_ms += delta.as_millis() as u64;
+            while self.bomb_spawn_check_accum_ms >= BOMB_SPAWN_CHECK_INTERVAL_MS {
+                self.bomb_spawn_check_accum_ms -= BOMB_SPAWN_CHECK_INTERVAL_MS;
+                self.maybe_spawn_bomb();
+            }
+        }
+
         // プレイヤー自身の自由落下(spec.md 1章、TERM独自拡張)。ブロックの重力とは
         // 独立したtick間隔(`player_fall_tick_ms`)で判定する(デバッグショートカットで
         // 両者を別々に速度調整できるようにするため、あえて別ループに分離している)。
@@ -1212,6 +1293,21 @@ impl Game {
         self.dodge_recovery_ms = ms.clamp(DODGE_RECOVERY_MS_MIN, DODGE_RECOVERY_MS_MAX);
     }
 
+    /// ボム出現頻度を直接指定する(起動時、Settingsから読み込んだ値を適用する用途。
+    /// TERM独自拡張。#96)。範囲外の値は`BOMB_SPAWN_RATE_PERCENT_MIN`〜
+    /// `SPAWN_RATE_PERCENT_MAX`にクランプする。
+    pub fn set_bomb_spawn_rate_percent(&mut self, percent: u32) {
+        self.bomb_spawn_rate_percent = percent.clamp(
+            crate::constants::BOMB_SPAWN_RATE_PERCENT_MIN,
+            crate::constants::SPAWN_RATE_PERCENT_MAX,
+        );
+    }
+
+    /// 現在盤面上にあるボムの一覧(TERM独自拡張。#96)。描画側(render.rs)が参照する。
+    pub fn bombs(&self) -> &[Bomb] {
+        &self.bombs
+    }
+
     /// `from_row`以降の岩(X)/AIR/スター/ダイヤブロック出現率を、指定の配分率(%、
     /// 100=通常のまま)で再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの
     /// 配分量・AIRの配分量をいじれるようにしたい。プレイ中でもその数値をいじれるように
@@ -1398,6 +1494,52 @@ impl Game {
                 }
             }
         }
+    }
+
+    /// ボム出現を1回判定する(TERM独自拡張。#96)。盤面全体のボム数が上限未満で、
+    /// 深度・設定に応じた確率の抽選に当たれば、画面内のランダムなEmptyマスへ
+    /// ボムを1個設置する。
+    fn maybe_spawn_bomb(&mut self) {
+        if self.bombs.len() >= BOMB_MAX_COUNT_ON_BOARD {
+            return;
+        }
+        let prob = (BOMB_SPAWN_BASE_PROB
+            + BOMB_SPAWN_DEPTH_MAX_BONUS * depth_fraction(self.player.depth_m()))
+            * (self.bomb_spawn_rate_percent as f32 / 100.0);
+        if self.rng.random_range(0.0..1.0) >= prob {
+            return;
+        }
+        self.spawn_bomb_at_random_empty_cell();
+    }
+
+    /// 画面内(プレイヤー位置から上下`STAR_VISIBLE_RANGE_ROWS`行)のEmptyマスを1つ
+    /// ランダムに選び、ボムを設置する(TERM独自拡張。#96)。候補が無ければ何もしない。
+    fn spawn_bomb_at_random_empty_cell(&mut self) {
+        let start_row = self.player.row.saturating_sub(STAR_VISIBLE_RANGE_ROWS);
+        let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
+        let width = self.board.width();
+        let candidates: Vec<board::Pos> = (start_row..=end_row)
+            .flat_map(|row| (0..width).map(move |col| (row, col)))
+            .filter(|&(row, col)| self.board.cell(row, col) == Cell::Empty)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let idx = self.rng.random_range(0..candidates.len());
+        self.bombs.push(Bomb {
+            pos: candidates[idx],
+            remaining_ms: BOMB_FUSE_MS,
+        });
+    }
+
+    /// デバッグ: ボムを1個、画面内のランダムなEmptyマスへ即座に設置する(TERM独自拡張。
+    /// #96。ユーザー指摘: 「ショートカットキーもくれ」)。盤面全体のボム数が上限に
+    /// 達している、または出現先が無ければ何もしない。Playing中のみ有効。
+    pub fn debug_place_bomb(&mut self) {
+        if self.status != GameStatus::Playing || self.bombs.len() >= BOMB_MAX_COUNT_ON_BOARD {
+            return;
+        }
+        self.spawn_bomb_at_random_empty_cell();
     }
 }
 
@@ -3444,5 +3586,130 @@ mod tests {
             saw_four_or_more_connected_and_intact,
             "300回試行しても4連結が形成されるケースを確認できなかった"
         );
+    }
+
+    // --- ボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、爆弾をランダムに投げて
+    // くるイメージで、敵は出現しないものとする」) ---
+
+    #[test]
+    fn debug_place_bomb_spawns_at_the_only_empty_cell_within_visible_range() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        // 画面内(±STAR_VISIBLE_RANGE_ROWS)を全て岩で埋め、1マスだけEmptyにすることで
+        // デバッグ配置先を一意に絞り込む。
+        let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
+        for row in (game.player.row - range)..=(game.player.row + range) {
+            for col in 0..game.board.width() {
+                game.board.rows[row][col] = Cell::Rock { hits: 0 };
+            }
+        }
+        game.board.rows[510][7] = Cell::Empty;
+
+        game.debug_place_bomb();
+
+        assert_eq!(game.bombs.len(), 1, "候補が1マスしかないのでボムが1個設置されるはず");
+        assert_eq!(game.bombs[0].pos, (510, 7));
+        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS);
+    }
+
+    #[test]
+    fn debug_place_bomb_does_nothing_while_not_playing() {
+        let mut game = Game::new(1);
+        game.status = GameStatus::Paused;
+
+        game.debug_place_bomb();
+
+        assert!(game.bombs.is_empty(), "Playing中以外ではボムを設置しないはず");
+    }
+
+    #[test]
+    fn debug_place_bomb_respects_the_board_wide_cap() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+
+        for _ in 0..(BOMB_MAX_COUNT_ON_BOARD + 5) {
+            game.debug_place_bomb();
+        }
+
+        assert_eq!(
+            game.bombs.len(),
+            BOMB_MAX_COUNT_ON_BOARD,
+            "上限を超えてボムが設置されてはいけない"
+        );
+    }
+
+    #[test]
+    fn bomb_explosion_converts_rock_and_diamond_within_blast_range_to_star_but_leaves_air_and_items_untouched()
+     {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            remaining_ms: 50,
+        });
+        game.board.rows[520][6] = Cell::Rock { hits: 0 };
+        game.board.rows[521][5] = Cell::Diamond;
+        game.board.rows[520][4] = Cell::Oxygen;
+        game.board.rows[519][5] = Cell::Item(ItemEffect::ClearAbove);
+
+        let events = game.update(Duration::from_millis(60));
+
+        assert!(game.bombs.is_empty(), "爆発したボムはリストから消えるはず");
+        assert!(matches!(game.board.cell(520, 6), Cell::Star { .. }), "爆風内の岩はスターに変わるはず");
+        assert!(
+            matches!(game.board.cell(521, 5), Cell::Star { .. }),
+            "爆風内のダイヤはスターに変わるはず"
+        );
+        assert_eq!(game.board.cell(520, 4), Cell::Oxygen, "AIRは爆風の影響を受けないはず");
+        assert_eq!(
+            game.board.cell(519, 5),
+            Cell::Item(ItemEffect::ClearAbove),
+            "アイテムブロックは爆風の影響を受けないはず"
+        );
+        assert!(events.contains(&GameEvent::BombExploded));
+    }
+
+    #[test]
+    fn bomb_explosion_crushes_the_player_caught_in_the_blast() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            remaining_ms: 50,
+        }); // プレイヤーの1マス右、爆風範囲内
+
+        let events = game.update(Duration::from_millis(60));
+
+        assert!(events.contains(&GameEvent::BombExploded));
+        assert!(
+            events.contains(&GameEvent::LifeLost),
+            "爆風に巻き込まれたら押し潰し相当のミスになるはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn bomb_stops_blinking_countdown_and_does_not_explode_before_the_fuse_runs_out() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            remaining_ms: BOMB_FUSE_MS,
+        });
+
+        let events = game.update(Duration::from_millis(100));
+
+        assert_eq!(game.bombs.len(), 1, "起爆時間前は消えないはず");
+        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS - 100);
+        assert!(!events.contains(&GameEvent::BombExploded));
     }
 }

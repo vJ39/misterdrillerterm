@@ -410,6 +410,7 @@ pub fn draw_help(frame: &mut Frame) {
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1   A: AIRを100%に回復"),
         line("R: 自分より上のブロックを全削除   K: 画面内のX/ダイヤを全てスターに"),
+        line("B: ボムを画面内のランダムな位置に設置"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
         line(", / .: 揺れ時間 長く/短く"),
@@ -475,6 +476,8 @@ pub enum SettingsChoice {
     /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms)。
     /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」。
     DodgeRecoveryMs,
+    /// ボム出現頻度(%、0まで下げられる)。TERM独自拡張。#96。
+    BombRate,
 }
 
 impl SettingsChoice {
@@ -496,7 +499,8 @@ impl SettingsChoice {
             SettingsChoice::BlockFallSpeed => SettingsChoice::PlayerFallSpeed,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::MoveSpeed,
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
-            SettingsChoice::DodgeRecoveryMs => SettingsChoice::Music,
+            SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
+            SettingsChoice::BombRate => SettingsChoice::Music,
         }
     }
 
@@ -505,7 +509,8 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::DodgeRecoveryMs,
+            SettingsChoice::Music => SettingsChoice::BombRate,
+            SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::Se => SettingsChoice::Music,
             SettingsChoice::RockRate => SettingsChoice::Se,
             SettingsChoice::AirRate => SettingsChoice::RockRate,
@@ -547,6 +552,7 @@ pub fn draw_settings(
     player_fall_tick_ms: u64,
     move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
+    bomb_spawn_rate_percent: u32,
 ) {
     let area = frame.area();
 
@@ -700,6 +706,11 @@ pub fn draw_settings(
             dodge_recovery_ms,
             selection == SettingsChoice::DodgeRecoveryMs,
         ),
+        rate_line(
+            "ボム出現頻度",
+            bomb_spawn_rate_percent,
+            selection == SettingsChoice::BombRate,
+        ),
         Line::from(""),
         Line::from(Span::styled(
             "↑↓で選択 / MUSIC・SEはSpaceか←→でトグル",
@@ -817,7 +828,51 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     }
 
     draw_falling_blocks(buf, inner, top_row, visible_rows, game, &moved_map);
+    draw_bombs(buf, inner, top_row, visible_rows, game);
     draw_player(buf, inner, top_row, game);
+}
+
+/// ボム(TERM独自拡張。#96)を盤面の上に重ねて描画する。ブロックとは別レイヤーの
+/// オブジェクトなので、通常のセル描画ループとは独立してここで扱う。起爆が近づく
+/// ほど点滅を速める(既存の「揺れ」「スター点滅」と同じ、爆発前に必ず視覚的な
+/// 予兆を出す設計方針)。
+fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize, game: &Game) {
+    for bomb in game.bombs() {
+        if bomb.pos.0 < top_row {
+            continue;
+        }
+        let screen_row = bomb.pos.0 - top_row;
+        if screen_row >= visible_rows {
+            continue;
+        }
+        let y = inner.y + screen_row as u16 * CELL_H;
+        let x = inner.x + bomb.pos.1 as u16 * CELL_W;
+        if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+            continue;
+        }
+        let bg = if bomb_is_bright_frame(bomb.remaining_ms) {
+            colors::BOMB_BG_BRIGHT
+        } else {
+            colors::BOMB_BG_DIM
+        };
+        draw_fixed_unit(buf, x, y, [['*', '*'], ['B', 'B']], colors::BOMB_FG, bg);
+    }
+}
+
+/// ボムの点滅が「明るい方」の周期かどうか(TERM独自拡張。#96)。残り時間が
+/// `BOMB_BLINK_FAST_THRESHOLD_MS`を切ると点滅周期を短くし、起爆間近であることを
+/// 強調する。
+const BOMB_BLINK_PERIOD_MS: u32 = 400;
+const BOMB_BLINK_PERIOD_FAST_MS: u32 = 150;
+const BOMB_BLINK_FAST_THRESHOLD_MS: u32 = 1000;
+
+fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
+    let period = if remaining_ms <= BOMB_BLINK_FAST_THRESHOLD_MS {
+        BOMB_BLINK_PERIOD_FAST_MS
+    } else {
+        BOMB_BLINK_PERIOD_MS
+    };
+    (remaining_ms / period).is_multiple_of(2)
 }
 
 /// 直近の重力ティックで落下したブロックを、移動前の位置から移動後の位置へ向けて
@@ -1589,10 +1644,10 @@ mod tests {
         // 増えるたびに枠の高さが実際の内容行数を収められているか回帰確認する
         // (#108でアイテム3種のrate行を追加した際、枠が足りず下部のms_line(落下速度等)が
         // クリップして見えなくなっていた)。見出し1+空行1+MUSIC/SE(2)+岩/AIR/スター/
-        // ダイヤ(4)+アイテム3種(3)+色数(1)+色結合(1)+列数(1)+落下速度系4種(4)+空行1+
-        // ヘルプ2行(2)=22行、枠(上下)2行込みで24行必要。今後さらに設定を追加したら
-        // この定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 22;
+        // ダイヤ(4)+アイテム3種(3)+色数(1)+色結合(1)+列数(1)+落下速度系4種(4)+
+        // ボム出現頻度(1)+空行1+ヘルプ2行(2)=23行、枠(上下)2行込みで25行必要。
+        // 今後さらに設定を追加したらこの定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 23;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let settings_area = centered_rect(60, 90, frame_rect);

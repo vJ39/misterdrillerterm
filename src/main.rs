@@ -23,12 +23,12 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
-    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
-    FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
-    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    BOMB_SPAWN_RATE_PERCENT_MIN, COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN,
+    DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX,
+    FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
+    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -221,7 +221,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::MoveSpeed
-                            | ui::render::SettingsChoice::DodgeRecoveryMs => {}
+                            | ui::render::SettingsChoice::DodgeRecoveryMs
+                            | ui::render::SettingsChoice::BombRate => {}
                         }
                     }
                     // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
@@ -257,6 +258,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::PlayerFallSpeed
                                     | ui::render::SettingsChoice::MoveSpeed
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
+                                    | ui::render::SettingsChoice::BombRate
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -280,6 +282,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.dodge_recovery_ms =
                                     adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                                 game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
+                            }
+                            ui::render::SettingsChoice::BombRate => {
+                                settings.bomb_spawn_rate_percent = adjust_rate_percent(
+                                    settings.bomb_spawn_rate_percent,
+                                    increase,
+                                    BOMB_SPAWN_RATE_PERCENT_MIN,
+                                );
+                                game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
                             }
                             _ => {}
                         }
@@ -430,6 +440,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::DebugFillAir => game.debug_fill_air(),
                     InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
                     InputAction::DebugStarifyVisibleScreen => game.debug_starify_visible_screen(),
+                    InputAction::DebugPlaceBomb => game.debug_place_bomb(),
                     InputAction::DebugBlockFallSlower => {
                         game.debug_adjust_block_fall_speed(false);
                         settings.block_fall_tick_ms = game.block_fall_tick_ms();
@@ -498,6 +509,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.player_fall_tick_ms,
                             settings.move_cooldown_ms,
                             settings.dodge_recovery_ms,
+                            settings.bomb_spawn_rate_percent,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame),
                     }
@@ -526,6 +538,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.player_fall_tick_ms,
                     settings.move_cooldown_ms,
                     settings.dodge_recovery_ms,
+                    settings.bomb_spawn_rate_percent,
                 )
             })?;
 
@@ -566,7 +579,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::BlockFallSpeed
                         | ui::render::SettingsChoice::PlayerFallSpeed
                         | ui::render::SettingsChoice::MoveSpeed
-                        | ui::render::SettingsChoice::DodgeRecoveryMs => {}
+                        | ui::render::SettingsChoice::DodgeRecoveryMs
+                        | ui::render::SettingsChoice::BombRate => {}
                     },
                     // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
                     // 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで切り替えできる
@@ -604,6 +618,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::PlayerFallSpeed
                                 | ui::render::SettingsChoice::MoveSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
+                                | ui::render::SettingsChoice::BombRate
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -688,6 +703,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.dodge_recovery_ms =
                                     adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                             }
+                            ui::render::SettingsChoice::BombRate => {
+                                settings.bomb_spawn_rate_percent = adjust_rate_percent(
+                                    settings.bomb_spawn_rate_percent,
+                                    increase,
+                                    BOMB_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
                             _ => {}
                         }
                         settings.save();
@@ -729,6 +751,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_shake_duration_ms(settings.shake_duration_ms);
                         game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
                         game.set_move_cooldown_ms(settings.move_cooldown_ms);
+                        game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
                         // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
                         // 安全地帯明け(行2)以降の全体へ反映する(TERM独自拡張)。
                         game.reroll_spawn_rates_from(
@@ -904,6 +927,7 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::GameOverMiss => audio::sfx::play_miss(mixer),
             GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
             GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
+            GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer),
         }
     }
 }

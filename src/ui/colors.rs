@@ -102,6 +102,14 @@ pub const ITEM_UNIFY_COLORS_FG: Color = Color::Rgb(230, 255, 250);
 pub const ITEM_STARIFY_SCREEN_BG: Color = Color::Rgb(80, 70, 130);
 pub const ITEM_STARIFY_SCREEN_FG: Color = Color::Rgb(255, 215, 120);
 
+/// ボム(TERM独自拡張。#96)の前景色。
+pub const BOMB_FG: Color = Color::Rgb(20, 20, 20);
+/// ボムの背景色(点滅の暗い方)。
+pub const BOMB_BG_DIM: Color = Color::Rgb(120, 30, 30);
+/// ボムの背景色(点滅の明るい方)。起爆が近づくほど点滅を速める(既存の「揺れ」
+/// 「スター点滅」と同じく、爆発前に必ず視覚的な予兆を出す設計方針)。
+pub const BOMB_BG_BRIGHT: Color = Color::Rgb(255, 60, 40);
+
 /// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
 /// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、
 /// その後`melt_duration_ms`かけて進行度が1.0(消滅)まで進む。

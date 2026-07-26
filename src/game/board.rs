@@ -1338,6 +1338,33 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
     melted
 }
 
+/// ボムの爆風が届くセル(原点を含む)を計算する(TERM独自拡張。#96。
+/// ユーザー指摘: 「白ボンが、爆弾をランダムに投げてくるイメージで」)。上下左右へ
+/// `range`マスずつ伸ばし、`vJ39/bombermanterm`の`explosion_cells`と同じロジックで
+/// Xブロック・ダイヤブロックに当たったらそのマスまでで止める(そこから先へは
+/// 伸ばさない)。Empty・その他のセルは素通りする。盤面外へは伸びない。
+pub fn bomb_blast_cells(board: &Board, origin: Pos, range: usize) -> Vec<Pos> {
+    let mut cells = vec![origin];
+    let deltas: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    for (dr, dc) in deltas {
+        let mut r = origin.0 as isize;
+        let mut c = origin.1 as isize;
+        for _ in 0..range {
+            r += dr;
+            c += dc;
+            if r < 0 || c < 0 || r as usize >= board.depth_rows() || c as usize >= board.width() {
+                break;
+            }
+            let pos = (r as usize, c as usize);
+            cells.push(pos);
+            if matches!(board.cell(pos.0, pos.1), Cell::Rock { .. } | Cell::Diamond) {
+                break;
+            }
+        }
+    }
+    cells
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1862,6 +1889,47 @@ mod tests {
             Cell::Star { visible_ms: 0 },
             "経過時間が進んでいないはず"
         );
+    }
+
+    // --- ボム爆発の爆風範囲(TERM独自拡張。#96) ---
+
+    #[test]
+    fn bomb_blast_cells_reaches_full_range_through_empty_cells() {
+        let board = empty_board(10);
+        let cells = bomb_blast_cells(&board, (5, 5), 2);
+        // 原点 + 上下左右2マスずつ = 9セル、全てEmptyなので途中で止まらないはず。
+        assert_eq!(cells.len(), 9);
+        for pos in [(3, 5), (4, 5), (5, 5), (6, 5), (7, 5), (5, 3), (5, 4), (5, 6), (5, 7)] {
+            assert!(cells.contains(&pos), "{pos:?}が爆風範囲に含まれるはず");
+        }
+    }
+
+    #[test]
+    fn bomb_blast_cells_stops_at_the_first_rock_in_each_direction() {
+        let mut board = empty_board(10);
+        board.rows[5][7] = Cell::Rock { hits: 0 }; // 原点(5,5)から右へ2マス目
+        let cells = bomb_blast_cells(&board, (5, 5), 2);
+        assert!(cells.contains(&(5, 6)), "岩の手前のマスは含まれるはず");
+        assert!(cells.contains(&(5, 7)), "岩自体のマスは含まれるはず(そこで止まる)");
+        assert!(!cells.contains(&(5, 8)), "岩の先へは爆風が伸びないはず");
+    }
+
+    #[test]
+    fn bomb_blast_cells_stops_at_diamond_the_same_way_as_rock() {
+        let mut board = empty_board(10);
+        board.rows[4][5] = Cell::Diamond; // 原点(5,5)から上へ1マス目
+        let cells = bomb_blast_cells(&board, (5, 5), 2);
+        assert!(cells.contains(&(4, 5)), "ダイヤ自体のマスは含まれるはず");
+        assert!(!cells.contains(&(3, 5)), "ダイヤの先へは爆風が伸びないはず");
+    }
+
+    #[test]
+    fn bomb_blast_cells_does_not_go_out_of_bounds() {
+        let board = empty_board(3);
+        let cells = bomb_blast_cells(&board, (0, 0), 2);
+        for &(r, c) in &cells {
+            assert!(r < board.depth_rows() && c < board.width(), "盤面外セル{:?}が含まれている", (r, c));
+        }
     }
 
     #[test]

@@ -48,6 +48,8 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Char('r') | KeyCode::Char('R') => InputAction::DebugClearAbovePlayer,
         // スターのキラキラ演出(#64)にちなんだキー。
         KeyCode::Char('k') | KeyCode::Char('K') => InputAction::DebugStarifyVisibleScreen,
+        // ボム(Bomb)の頭文字。#96。ユーザー指摘: 「ショートカットキーもくれ」。
+        KeyCode::Char('b') | KeyCode::Char('B') => InputAction::DebugPlaceBomb,
         KeyCode::Char('[') => InputAction::DebugBlockFallSlower,
         KeyCode::Char(']') => InputAction::DebugBlockFallFaster,
         KeyCode::Char('-') => InputAction::DebugPlayerFallSlower,

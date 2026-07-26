@@ -645,3 +645,16 @@ pub fn play_revive(mixer: &Mixer) {
         SE_VOLUME,
     );
 }
+
+/// ボム爆発音(TERM独自拡張。#96)。低い矩形波の「ドン」に続けて下降チャープを
+/// 重ね、既存の破壊音(play_destroy/play_rock_destroy)より低く長い爆発の質感を出す。
+pub fn play_bomb_explosion(mixer: &Mixer) {
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(square_tone(80.0, 40, 0.6)) as Box<dyn Source<Item = f32> + Send>,
+            Box::new(square_chirp(180.0, 55.0, 140, 0.55)) as Box<dyn Source<Item = f32> + Send>,
+        ],
+        SE_VOLUME,
+    );
+}
