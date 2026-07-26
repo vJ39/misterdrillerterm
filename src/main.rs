@@ -126,6 +126,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 状態フラグで管理する。
     let mut pause_overlay = PauseOverlay::None;
 
+    // ヘルプ画面(タイトルから開く独立画面)のジュークボックス状態(TERM独自拡張。
+    // #151。ユーザー指摘: 「ヘルプページミュージック選んで再生する機能ほしい」)。
+    // カーソル位置は画面を離れても保持する。再生中の曲は、その曲の再生を
+    // 制御するハンドル(stop/finishedフラグ)とセットで持つ。
+    let mut help_jukebox_selection: usize = 0;
+    let mut help_jukebox_playing: Option<(usize, audio::bgm::JukeboxPreview)> = None;
+
     loop {
         // Playing→Titleへの遷移フラグ。`screen`自体への再代入は、`game`(screenを
         // 借用したバインディング)の生存期間が終わった後、if/else全体を抜けてから
@@ -537,7 +544,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
                         ),
-                        PauseOverlay::Help => ui::render::draw_help(frame),
+                        PauseOverlay::Help => ui::render::draw_help(frame, None),
                     }
                 })?;
             }
@@ -745,14 +752,63 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 }
             }
         } else if let Screen::Help = screen {
-            terminal.draw(ui::render::draw_help)?;
-
-            // ヘルプ画面はQキーでタイトルへ戻るだけ(TERM独自拡張。ユーザー指摘:
-            // 「ショートカットのヘルプページも必要」)。
-            if let Some(action) = input::poll_any_key(FRAME_INTERVAL_MS)?
-                && matches!(action, input::AnyKeyAction::Quit)
+            // 曲が最後まで自然に終わっていたら、再生中表示を消す(TERM独自拡張。#151)。
+            if help_jukebox_playing
+                .as_ref()
+                .is_some_and(|(_, preview)| preview.finished.load(Ordering::Relaxed))
             {
-                screen = Screen::Title;
+                help_jukebox_playing = None;
+            }
+
+            let jukebox_state = ui::render::HelpJukeboxState {
+                selection: help_jukebox_selection,
+                playing: help_jukebox_playing.as_ref().map(|(idx, _)| *idx),
+            };
+            terminal.draw(|frame| ui::render::draw_help(frame, Some(&jukebox_state)))?;
+
+            // ヘルプ画面はQキーでタイトルへ戻る(TERM独自拡張。ユーザー指摘:
+            // 「ショートカットのヘルプページも必要」)。↑/↓で曲を選び、X/Zで
+            // 再生・停止するジュークボックス操作を追加した(#151)。
+            for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
+                match action {
+                    InputAction::Quit => {
+                        if let Some((_, preview)) = help_jukebox_playing.take() {
+                            preview.stop.store(true, Ordering::Relaxed);
+                        }
+                        screen = Screen::Title;
+                    }
+                    InputAction::FaceUp => {
+                        help_jukebox_selection = cycle_jukebox_selection(
+                            help_jukebox_selection,
+                            audio::bgm::JUKEBOX_TRACKS.len(),
+                            false,
+                        );
+                    }
+                    InputAction::FaceDown => {
+                        help_jukebox_selection = cycle_jukebox_selection(
+                            help_jukebox_selection,
+                            audio::bgm::JUKEBOX_TRACKS.len(),
+                            true,
+                        );
+                    }
+                    InputAction::Drill => {
+                        if let Some(m) = &mixer {
+                            let already_playing_selection =
+                                help_jukebox_playing.as_ref().map(|(idx, _)| *idx)
+                                    == Some(help_jukebox_selection);
+                            if let Some((_, preview)) = help_jukebox_playing.take() {
+                                preview.stop.store(true, Ordering::Relaxed);
+                            }
+                            if !already_playing_selection {
+                                let (_, track) = audio::bgm::JUKEBOX_TRACKS[help_jukebox_selection];
+                                let preview =
+                                    audio::bgm::spawn_jukebox_preview_thread(m.clone(), track);
+                                help_jukebox_playing = Some((help_jukebox_selection, preview));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         } else {
             terminal.draw(ui::render::draw_title)?;
@@ -848,7 +904,16 @@ fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen)
     match screen {
         Screen::Title => false,
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
-        Screen::Settings | Screen::Help => true,
+        Screen::Settings => true,
+        // タイトルから開く独立画面としてのヘルプ(Screen::Help)は、#151で曲を選んで
+        // 試聴できるジュークボックスの置き場になったため、以前のように自動で
+        // プレイ中BGMのローテーションを流し続けると、ジュークボックスの試聴と
+        // 二重に聞こえてしまう。そのため常に無音にし、聞こえる音は選んだ曲の
+        // プレビューだけにする(TERM独自拡張。ユーザー指摘: 「ヘルプページ
+        // ミュージック選んで再生する機能ほしい」)。プレイ中に一時停止して開く
+        // ヘルプオーバーレイは`screen`自体は`Screen::Playing`のままなのでこの
+        // 分岐には来ず、影響を受けない。
+        Screen::Help => false,
     }
 }
 
@@ -858,6 +923,17 @@ fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen)
 /// 転じた瞬間だけtrueを返す(有効のまま/無効のままでは巻き戻さない)。
 fn should_restart_title_bgm(was_enabled: bool, now_enabled: bool) -> bool {
     now_enabled && !was_enabled
+}
+
+/// ヘルプ画面のジュークボックスの選択カーソルを`len`個の巡回範囲内で動かす
+/// (TERM独自拡張。#151)。`forward`がtrueなら次へ、falseなら前へ進み、
+/// 端では反対の端へ巡回する。
+fn cycle_jukebox_selection(selection: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (selection + 1) % len
+    } else {
+        selection.checked_sub(1).unwrap_or(len - 1)
+    }
 }
 
 /// アプリ全体の画面状態。タイトル画面・設定画面・プレイ中(Gameを保持)の3値
@@ -1013,10 +1089,17 @@ mod tests {
     }
 
     #[test]
-    fn effective_gameplay_bgm_enabled_follows_the_setting_on_other_screens() {
+    fn effective_gameplay_bgm_enabled_follows_the_setting_on_settings_screen() {
         assert!(effective_gameplay_bgm_enabled(true, &Screen::Settings));
         assert!(!effective_gameplay_bgm_enabled(false, &Screen::Settings));
-        assert!(effective_gameplay_bgm_enabled(true, &Screen::Help));
+    }
+
+    #[test]
+    fn effective_gameplay_bgm_enabled_is_always_false_on_the_standalone_help_screen() {
+        // #151でヘルプ画面(タイトルから開く独立画面)はジュークボックスの
+        // 置き場になったため、自動でプレイ中BGMを流し続けると試聴と二重に
+        // 聞こえてしまう。常に無音にする。
+        assert!(!effective_gameplay_bgm_enabled(true, &Screen::Help));
         assert!(!effective_gameplay_bgm_enabled(false, &Screen::Help));
     }
 
@@ -1100,5 +1183,15 @@ mod tests {
             !should_restart_title_bgm(true, false),
             "有効→無効の遷移では巻き戻さないはず"
         );
+    }
+
+    #[test]
+    fn cycle_jukebox_selection_wraps_around_at_both_ends() {
+        // ユーザー指摘: 「ヘルプページミュージック選んで再生する機能ほしい」(#151)。
+        // ↑/↓での選択移動が両端で正しく巡回することを確認する。
+        assert_eq!(cycle_jukebox_selection(0, 4, true), 1);
+        assert_eq!(cycle_jukebox_selection(3, 4, true), 0, "末尾の次は先頭へ");
+        assert_eq!(cycle_jukebox_selection(2, 4, false), 1);
+        assert_eq!(cycle_jukebox_selection(0, 4, false), 3, "先頭の前は末尾へ");
     }
 }

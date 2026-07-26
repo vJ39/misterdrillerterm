@@ -130,6 +130,55 @@ pub fn spawn_gameplay_bgm_thread(
     spawn_playlist_thread(mixer, stop_flag, music_enabled, &GAMEPLAY_TRACKS, None);
 }
 
+/// ヘルプ画面のジュークボックスで選んで試聴できる曲の一覧(TERM独自拡張。#151。
+/// ユーザー指摘: 「ヘルプページミュージック選んで再生する機能ほしい」)。
+/// タイトル用・プレイ中用トラックをまとめて試聴できるようにする。
+pub const JUKEBOX_TRACKS: [(&str, &[u8]); 4] = [
+    ("Last Coin Standing(タイトル)", TITLE_TRACK),
+    ("The Last Token", GAMEPLAY_TRACKS[0]),
+    ("Last Piece Dropping", GAMEPLAY_TRACKS[1]),
+    ("地底のダンス", GAMEPLAY_TRACKS[2]),
+];
+
+/// ジュークボックスで再生中の1曲を制御するハンドル(TERM独自拡張。#151)。
+/// `stop`をtrueにすると次のポーリングで即座に停止する(次の曲を選んだ時・
+/// ヘルプ画面を閉じた時に呼び出し側が使う)。曲が最後まで自然に終わった場合、
+/// または`stop`により止めた場合のいずれも、スレッドが`finished`をtrueにする。
+pub struct JukeboxPreview {
+    pub stop: Arc<AtomicBool>,
+    pub finished: Arc<AtomicBool>,
+}
+
+/// 選んだ1曲を1回だけ再生するプレビュースレッドを立てる(TERM独自拡張。#151)。
+/// タイトル用・プレイ中用の常駐スレッドとは別に、ヘルプ画面にいる間だけ
+/// 存在する使い捨てのスレッド。
+pub fn spawn_jukebox_preview_thread(mixer: Mixer, track: &'static [u8]) -> JukeboxPreview {
+    let stop = Arc::new(AtomicBool::new(false));
+    let finished = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop);
+    let thread_finished = Arc::clone(&finished);
+
+    thread::spawn(move || {
+        let player = Player::connect_new(&mixer);
+        player.set_volume(BGM_VOLUME);
+        let decoder = Decoder::new(Cursor::new(track))
+            .expect("embedded BGM track must be a valid, bundled mp3");
+        player.append(decoder);
+
+        let poll = Duration::from_millis(POLL_MS);
+        while !player.empty() {
+            if thread_stop.load(Ordering::Relaxed) {
+                player.stop();
+                break;
+            }
+            thread::sleep(poll);
+        }
+        thread_finished.store(true, Ordering::Relaxed);
+    });
+
+    JukeboxPreview { stop, finished }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

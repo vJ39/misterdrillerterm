@@ -376,8 +376,19 @@ pub fn draw_title(frame: &mut Frame) {
 // ヘルプ画面(TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)
 // ---------------------------------------------------------------------------
 
-/// 操作キー・デバッグショートカット一覧を表示するヘルプ画面。
-pub fn draw_help(frame: &mut Frame) {
+/// ヘルプ画面のジュークボックスUI状態(TERM独自拡張。#151。ユーザー指摘:
+/// 「ヘルプページミュージック選んで再生する機能ほしい」)。カーソル位置
+/// (`selection`)と現在再生中の曲(`playing`、無ければ`None`)を保持する。
+pub struct HelpJukeboxState {
+    pub selection: usize,
+    pub playing: Option<usize>,
+}
+
+/// 操作キー・デバッグショートカット一覧を表示するヘルプ画面。`jukebox`が
+/// `Some`の時のみ、埋め込みBGMを選んで試聴できるジュークボックス欄を表示する
+/// (TERM独自拡張。#151)。一時停止中のヘルプオーバーレイでは実際のプレイ中BGMと
+/// 混ざってしまうため対象外にし、タイトルから開く独立画面のみで有効にする。
+pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>) {
     let area = frame.area();
 
     frame.buffer_mut().set_style(
@@ -397,6 +408,9 @@ pub fn draw_help(frame: &mut Frame) {
     let heading_style = Style::default()
         .fg(colors::PANEL_BORDER)
         .bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default()
+        .fg(colors::STAR_FG)
+        .bg(colors::LETTERBOX_BG);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -409,7 +423,7 @@ pub fn draw_help(frame: &mut Frame) {
     let line = |text: &str| Line::from(Span::styled(text.to_string(), text_style));
     let heading = |text: &str| Line::from(Span::styled(text.to_string(), heading_style));
 
-    let paragraph = Paragraph::new(vec![
+    let mut lines = vec![
         heading("== 操作 =="),
         line("←/→: 移動(掘削を伴う)      ↑/↓: 向きを変える(掘削なし)"),
         line("X/Z: 掘削(向いている方向)   Space/P: 一時停止"),
@@ -427,12 +441,35 @@ pub fn draw_help(frame: &mut Frame) {
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
         line(", / .: 揺れ時間 長く/短く"),
-        line(""),
-        line("Qキーでタイトルへ戻る"),
-    ])
-    .block(block)
-    .style(Style::default().bg(colors::LETTERBOX_BG))
-    .alignment(Alignment::Left);
+    ];
+
+    if let Some(jukebox) = jukebox {
+        lines.push(Line::from(""));
+        lines.push(heading("== ジュークボックス(↑/↓で選択、X/Zで再生/停止) =="));
+        for (i, (name, _)) in crate::audio::bgm::JUKEBOX_TRACKS.iter().enumerate() {
+            let marker = if jukebox.playing == Some(i) {
+                "▶ "
+            } else if jukebox.selection == i {
+                "> "
+            } else {
+                "  "
+            };
+            let style = if jukebox.selection == i {
+                selected_style
+            } else {
+                text_style
+            };
+            lines.push(Line::from(Span::styled(format!("{marker}{name}"), style)));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(line("Qキーでタイトルへ戻る"));
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Left);
     frame.render_widget(paragraph, help_area);
 }
 
@@ -2230,6 +2267,23 @@ mod tests {
         let second = title_art_lines(80, 24);
         assert_eq!(first.len(), second.len());
         assert_eq!(first[0].spans.len(), second[0].spans.len());
+    }
+
+    #[test]
+    fn help_screen_box_is_tall_enough_for_the_jukebox_section() {
+        // #151でジュークボックス欄(見出し1+空行1+曲4行)を追加した際、枠の高さが
+        // 実際の内容行数を収められているか回帰確認する。操作17行+ジュークボックス
+        // 6行+空行1+末尾1行=25行、枠(上下)2行込みで27行必要。
+        const REQUIRED_CONTENT_LINES: u16 = 25;
+        let area = Rect::new(0, 0, 200, 60);
+        let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+        let help_area = centered_rect(90, 90, frame_rect);
+        assert!(
+            help_area.height >= REQUIRED_CONTENT_LINES + 2,
+            "ヘルプ画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
+            REQUIRED_CONTENT_LINES,
+            help_area.height
+        );
     }
 
     #[test]
