@@ -3918,6 +3918,112 @@ mod tests {
     }
 
     #[test]
+    fn diamond_count_is_conserved_across_many_gravity_ticks_on_random_boards() {
+        // #85再調査(2026/07/27): プレイ中のスクリーンショットで、単独のダイヤブロックが
+        // 移動(move)・消滅(vanish)どちらのログにも一度も現れないまま盤面から消えている
+        // ことが2回連続で確認された。ダイヤは`collect_fall_groups`で常にサイズ1の塊として
+        // 扱われ、色/岩ブロックのような4連結自動消滅の対象にはならない(spec.md 2章)ため、
+        // `apply_gravity_tick`(プレイヤーへの押し潰し以外)を通しては本来一切消えないはず。
+        // ランダム生成した盤面を十分な回数ティックさせても、盤面全体のダイヤ総数が
+        // 変わらないことを確認する不変条件テスト(プレイヤー位置は影響しない盤外に置き、
+        // 押し潰しによる正規の消滅経路も除外する)。
+        for seed in 0..20u64 {
+            let mut board = Board::generate(seed, 60, FIELD_WIDTH);
+            let mut gravity = GravityState::new();
+            let player_pos = (usize::MAX, usize::MAX);
+
+            let count_diamonds = |b: &Board| -> usize {
+                let mut n = 0;
+                for row in 0..b.depth_rows() {
+                    for col in 0..b.width() {
+                        if b.cell(row, col) == Cell::Diamond {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            };
+
+            let before = count_diamonds(&board);
+
+            for _ in 0..(SHAKE_TICKS as usize + 1) * 60 {
+                let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+                assert!(
+                    !outcome
+                        .vanished_cells
+                        .iter()
+                        .any(|&(_, kind)| kind == Cell::Diamond),
+                    "seed={seed}: ダイヤが自動消滅の対象になっている(本来あり得ない)"
+                );
+            }
+
+            let after = count_diamonds(&board);
+            assert_eq!(
+                before, after,
+                "seed={seed}: ダイヤの総数が変化した(移動/消滅どちらのログにも残らず盤面から消えた疑い): 前={before} 後={after}"
+            );
+        }
+    }
+
+    #[test]
+    fn diamond_count_is_conserved_across_many_gravity_ticks_after_reroll_at_realistic_depth() {
+        // #85再調査: 上のテスト(reroll前の浅い盤面)では再現しなかったため、実プレイに近い
+        // 条件(reroll_overlays_from_row適用後、ダイヤ出現率を上げた深い深度相当)でも
+        // 同じ不変条件(ダイヤ総数の保存)を確認する。
+        for seed in 0..10u64 {
+            let mut board = Board::generate(seed, 70, FIELD_WIDTH);
+            let gravity_for_reroll = GravityState::new();
+            board.reroll_overlays_from_row(
+                2,
+                100,
+                100,
+                100,
+                200,
+                0,
+                0,
+                0,
+                4,
+                100,
+                &gravity_for_reroll,
+            );
+
+            let mut gravity = GravityState::new();
+            let player_pos = (usize::MAX, usize::MAX);
+
+            let count_diamonds = |b: &Board| -> usize {
+                let mut n = 0;
+                for row in 0..b.depth_rows() {
+                    for col in 0..b.width() {
+                        if b.cell(row, col) == Cell::Diamond {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            };
+
+            let before = count_diamonds(&board);
+
+            for _ in 0..(SHAKE_TICKS as usize + 1) * 70 {
+                let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+                assert!(
+                    !outcome
+                        .vanished_cells
+                        .iter()
+                        .any(|&(_, kind)| kind == Cell::Diamond),
+                    "seed={seed}: ダイヤが自動消滅の対象になっている(本来あり得ない)"
+                );
+            }
+
+            let after = count_diamonds(&board);
+            assert_eq!(
+                before, after,
+                "seed={seed}: reroll後・深い深度でダイヤの総数が変化した: 前={before} 後={after}"
+            );
+        }
+    }
+
+    #[test]
     fn horizontal_color_runs_are_noticeably_clustered_not_speckled() {
         // ユーザー指摘(「同じ色のブロックがくっついて見えない」)を受けてLEFT_INHERIT_PROBを
         // 0.55→0.65へ引き上げた。独立抽選(0.25)なら平均ラン長は1.33程度になるはずで、

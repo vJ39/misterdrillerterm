@@ -1544,7 +1544,10 @@ impl Game {
         let Some(log) = &self.debug_log else {
             return;
         };
-        if !self.frame_counter.is_multiple_of(BOARD_SNAPSHOT_TICK_INTERVAL) {
+        if !self
+            .frame_counter
+            .is_multiple_of(BOARD_SNAPSHOT_TICK_INTERVAL)
+        {
             return;
         }
         let row_start = self
