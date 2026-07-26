@@ -87,6 +87,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         &Screen::Title,
     )));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
+    // タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ
+    // (TERM独自拡張。#150。ユーザー指摘: 「タイトルに戻ったら最初から再生ね」)。
+    // 起動直後の初回表示は「戻ってきた」わけではないので、ここではまだ立てない。
+    let title_bgm_restart = Arc::new(AtomicBool::new(false));
+    let mut was_title_bgm_enabled = title_music_enabled.load(Ordering::Relaxed);
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
     if let Some(m) = &mixer {
@@ -94,6 +99,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             m.clone(),
             Arc::clone(&bgm_stop),
             Arc::clone(&title_music_enabled),
+            Arc::clone(&title_bgm_restart),
         );
         audio::bgm::spawn_gameplay_bgm_thread(
             m.clone(),
@@ -803,14 +809,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         // 参照する実効MUSIC状態を毎フレーム同期する(TERM独自拡張。ユーザー指摘:
         // 「タイトル画面ではMUSIC無し」→のちに#146で「タイトル画面は専用曲を鳴らす」
         // へ変更)。タイトル用・プレイ中用のいずれか一方だけがtrueになる。
-        title_music_enabled.store(
-            effective_title_bgm_enabled(settings.music_enabled, &screen),
-            Ordering::Relaxed,
-        );
+        let title_bgm_now_enabled = effective_title_bgm_enabled(settings.music_enabled, &screen);
+        title_music_enabled.store(title_bgm_now_enabled, Ordering::Relaxed);
         gameplay_music_enabled.store(
             effective_gameplay_bgm_enabled(settings.music_enabled, &screen),
             Ordering::Relaxed,
         );
+        // タイトル画面へ戻ってきた(無効→有効に転じた)瞬間に、タイトルBGMを
+        // 先頭から再生し直す(TERM独自拡張。#150。ユーザー指摘: 「タイトルに戻ったら
+        // 最初から再生ね」)。
+        if should_restart_title_bgm(was_title_bgm_enabled, title_bgm_now_enabled) {
+            title_bgm_restart.store(true, Ordering::Relaxed);
+        }
+        was_title_bgm_enabled = title_bgm_now_enabled;
     }
 
     bgm_stop.store(true, Ordering::Relaxed);
@@ -839,6 +850,14 @@ fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen)
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
         Screen::Settings | Screen::Help => true,
     }
+}
+
+/// タイトルBGMを先頭から再生し直すべきかを、直前フレームの有効状態
+/// (`was_enabled`)と現在の有効状態(`now_enabled`)から判定する(TERM独自拡張。
+/// #150。ユーザー指摘: 「タイトルに戻ったら最初から再生ね」)。無効→有効に
+/// 転じた瞬間だけtrueを返す(有効のまま/無効のままでは巻き戻さない)。
+fn should_restart_title_bgm(was_enabled: bool, now_enabled: bool) -> bool {
+    now_enabled && !was_enabled
 }
 
 /// アプリ全体の画面状態。タイトル画面・設定画面・プレイ中(Gameを保持)の3値
@@ -1059,5 +1078,27 @@ mod tests {
                 "{label}でタイトル用・プレイ中用の両方が有効になっている"
             );
         }
+    }
+
+    #[test]
+    fn should_restart_title_bgm_only_on_the_disabled_to_enabled_transition() {
+        // ユーザー指摘: 「タイトルに戻ったら最初から再生ね」(#150)。無効→有効に
+        // 転じた瞬間だけ巻き戻すべきで、有効のまま/無効のままでは巻き戻さない。
+        assert!(
+            should_restart_title_bgm(false, true),
+            "無効→有効の遷移では巻き戻すはず"
+        );
+        assert!(
+            !should_restart_title_bgm(true, true),
+            "有効のままなら巻き戻さないはず"
+        );
+        assert!(
+            !should_restart_title_bgm(false, false),
+            "無効のままなら巻き戻さないはず"
+        );
+        assert!(
+            !should_restart_title_bgm(true, false),
+            "有効→無効の遷移では巻き戻さないはず"
+        );
     }
 }

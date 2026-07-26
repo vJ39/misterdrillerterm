@@ -42,12 +42,17 @@ const GAMEPLAY_TRACKS: [&[u8]; 3] = [
 const POLL_MS: u64 = 100;
 
 /// `tracks`を順番に交代しながらループ再生するBGMスレッドを立てる。`tracks`が1曲
-/// だけならその曲を単純にループする(タイトル画面用)。
+/// だけならその曲を単純にループする(タイトル画面用)。`restart_requested`が
+/// `Some`の場合、そのフラグがtrueになったら現在の再生位置を捨てて曲の先頭
+/// (プレイリストの先頭)から再生し直す(TERM独自拡張。#150。ユーザー指摘:
+/// 「タイトルに戻ったら最初から再生ね」)。単純なpause/playでは一時停止した
+/// 位置から再開するだけで曲の途中に戻ってしまうため、別の仕組みが要る。
 fn spawn_playlist_thread(
     mixer: Mixer,
     stop_flag: Arc<AtomicBool>,
     music_enabled: Arc<AtomicBool>,
     tracks: &'static [&'static [u8]],
+    restart_requested: Option<Arc<AtomicBool>>,
 ) {
     thread::spawn(move || {
         let player = Player::connect_new(&mixer);
@@ -65,10 +70,18 @@ fn spawn_playlist_thread(
             player.append(decoder);
             track_index = (track_index + 1) % tracks.len();
 
-            while !player.empty() {
+            'playing: while !player.empty() {
                 if stop_flag.load(Ordering::Relaxed) {
                     player.stop();
                     return;
+                }
+
+                if let Some(restart) = &restart_requested
+                    && restart.swap(false, Ordering::Relaxed)
+                {
+                    player.stop();
+                    track_index = 0;
+                    break 'playing;
                 }
 
                 // MUSIC設定に合わせて一時停止/再開する(#131以前のステップ
@@ -91,13 +104,21 @@ fn spawn_playlist_thread(
     });
 }
 
-/// タイトル画面用BGMスレッドを立てる(TERM独自拡張。#146)。
+/// タイトル画面用BGMスレッドを立てる(TERM独自拡張。#146)。`restart_requested`は
+/// タイトル画面へ戻るたびに曲を先頭から再生し直すためのフラグ(#150)。
 pub fn spawn_title_bgm_thread(
     mixer: Mixer,
     stop_flag: Arc<AtomicBool>,
     music_enabled: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
 ) {
-    spawn_playlist_thread(mixer, stop_flag, music_enabled, &[TITLE_TRACK]);
+    spawn_playlist_thread(
+        mixer,
+        stop_flag,
+        music_enabled,
+        &[TITLE_TRACK],
+        Some(restart_requested),
+    );
 }
 
 /// プレイ中BGMスレッドを立てる(TERM独自拡張。#145)。
@@ -106,7 +127,7 @@ pub fn spawn_gameplay_bgm_thread(
     stop_flag: Arc<AtomicBool>,
     music_enabled: Arc<AtomicBool>,
 ) {
-    spawn_playlist_thread(mixer, stop_flag, music_enabled, &GAMEPLAY_TRACKS);
+    spawn_playlist_thread(mixer, stop_flag, music_enabled, &GAMEPLAY_TRACKS, None);
 }
 
 #[cfg(test)]
