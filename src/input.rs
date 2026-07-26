@@ -44,6 +44,8 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Char('a') | KeyCode::Char('A') => InputAction::DebugFillAir,
         // 元はXキーだったが、掘削キー(X/Z)と衝突するためRキーへ変更した。
         KeyCode::Char('r') | KeyCode::Char('R') => InputAction::DebugClearAbovePlayer,
+        // スターのキラキラ演出(#64)にちなんだキー。
+        KeyCode::Char('k') | KeyCode::Char('K') => InputAction::DebugCollectStar,
         KeyCode::Char('[') => InputAction::DebugBlockFallSlower,
         KeyCode::Char(']') => InputAction::DebugBlockFallFaster,
         KeyCode::Char('-') => InputAction::DebugPlayerFallSlower,
@@ -139,6 +141,8 @@ mod tests {
         assert_eq!(action_from_key_code(KeyCode::Char('r')), InputAction::DebugClearAbovePlayer);
         assert_eq!(action_from_key_code(KeyCode::Char('a')), InputAction::DebugFillAir);
         assert_eq!(action_from_key_code(KeyCode::Char('A')), InputAction::DebugFillAir);
+        assert_eq!(action_from_key_code(KeyCode::Char('k')), InputAction::DebugCollectStar);
+        assert_eq!(action_from_key_code(KeyCode::Char('K')), InputAction::DebugCollectStar);
         // ユーザー指摘: 「メニューから進むのEnter」「他のボタンで進んではいけない」。
         assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::Confirm);
     }

@@ -59,6 +59,10 @@ pub enum InputAction {
     /// デバッグ: プレイヤーより浅い(画面上で上にある)ブロックを全削除する
     /// (TERM独自拡張、動作確認用ショートカット)
     DebugClearAbovePlayer,
+    /// デバッグ: プレイヤーに最も近いスターブロックを、実際に取得したのと同じ挙動で
+    /// 取得する(TERM独自拡張、動作確認用ショートカット。ユーザー指摘: 「スター
+    /// ブロックをとったのと同じ挙動をするショートカットキーを容易して」)
+    DebugCollectStar,
     /// デバッグ: ブロックの落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
     DebugBlockFallSlower,
     /// デバッグ: ブロックの落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
@@ -1189,6 +1193,41 @@ impl Game {
 
         Vec::new()
     }
+
+    /// デバッグ: プレイヤーに最も近いスターブロックを1つ、実際にドリルで取得した
+    /// (`DrillOutcome::StarDestroyed`)のと全く同じ挙動(消滅・スコア加算・同じ
+    /// イベント列)で取得する。盤面上にスターが1つも無ければ何もしない。Playing中
+    /// のみ有効(TERM独自拡張。ユーザー指摘: 「スターブロックをとったのと同じ挙動を
+    /// するショートカットキーを容易して」)。
+    pub fn debug_collect_star(&mut self) -> Vec<GameEvent> {
+        if self.status != GameStatus::Playing {
+            return Vec::new();
+        }
+        let Some(pos) = self.nearest_star_to_player() else {
+            return Vec::new();
+        };
+        self.board.set(pos.0, pos.1, Cell::Empty);
+        self.player.award_drill_score(1);
+        vec![GameEvent::DrillImpact, GameEvent::BlockDestroyed { blocks: 1 }]
+    }
+
+    /// 盤面上に存在するスターブロックのうち、プレイヤーからマンハッタン距離が
+    /// 最も近い1つの座標を返す。存在しなければ`None`。
+    fn nearest_star_to_player(&self) -> Option<(usize, usize)> {
+        let mut nearest: Option<((usize, usize), usize)> = None;
+        for row in 0..self.board.depth_rows() {
+            for col in 0..self.board.width() {
+                if matches!(self.board.cell(row, col), Cell::Star { .. }) {
+                    let dist = (row as isize - self.player.row as isize).unsigned_abs()
+                        + (col as isize - self.player.col as isize).unsigned_abs();
+                    if nearest.is_none_or(|(_, best)| dist < best) {
+                        nearest = Some(((row, col), dist));
+                    }
+                }
+            }
+        }
+        nearest.map(|(pos, _)| pos)
+    }
 }
 
 /// `ms`を`step`ぶん増減させ、`DEBUG_FALL_TICK_MS_MIN`〜`MAX`にクランプする
@@ -2192,6 +2231,75 @@ mod tests {
         game.debug_fill_air();
 
         assert_eq!(game.player.oxygen, 0.0, "GameOver中は酸素を回復しない");
+    }
+
+    #[test]
+    fn debug_collect_star_removes_the_nearest_star_and_awards_score() {
+        // ユーザー指摘: 「スターブロックをとったのと同じ挙動をするショートカット
+        // キーを容易して」。
+        let mut game = Game::new(73);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[999][6] = Cell::Star { visible_ms: 0 };
+        let score_before = game.player.score;
+
+        let events = game.debug_collect_star();
+
+        assert!(matches!(game.board.cell(999, 6), Cell::Empty));
+        assert!(game.player.score > score_before);
+        assert!(events.iter().any(|e| matches!(e, GameEvent::DrillImpact)));
+        assert!(events.iter().any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 1 })));
+    }
+
+    #[test]
+    fn debug_collect_star_picks_the_nearest_star_when_multiple_exist() {
+        let mut game = Game::new(73);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[999][6] = Cell::Star { visible_ms: 0 }; // 距離1(近い)
+        game.board.rows[990][0] = Cell::Star { visible_ms: 0 }; // 遠い
+
+        game.debug_collect_star();
+
+        assert!(matches!(game.board.cell(999, 6), Cell::Empty), "近いスターが取得されるはず");
+        assert!(
+            matches!(game.board.cell(990, 0), Cell::Star { .. }),
+            "遠いスターは手つかずのまま残るはず"
+        );
+    }
+
+    #[test]
+    fn debug_collect_star_does_nothing_when_no_star_exists() {
+        let mut game = Game::new(73);
+        clear_board(&mut game);
+        let score_before = game.player.score;
+
+        let events = game.debug_collect_star();
+
+        assert!(events.is_empty());
+        assert_eq!(game.player.score, score_before);
+    }
+
+    #[test]
+    fn debug_collect_star_does_nothing_when_not_playing() {
+        let mut game = Game::new_with_lives(73, 1);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[999][6] = Cell::Star { visible_ms: 0 };
+        game.player.oxygen = 1.0;
+        game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
+        assert_eq!(game.status, GameStatus::GameOver);
+
+        let events = game.debug_collect_star();
+
+        assert!(events.is_empty());
+        assert!(
+            matches!(game.board.cell(999, 6), Cell::Star { .. }),
+            "GameOver中はスターを取得しないはず"
+        );
     }
 
     #[test]
