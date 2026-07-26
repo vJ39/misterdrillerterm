@@ -1340,12 +1340,17 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
 
 /// ボムの爆風が届くセル(原点を含む)を計算する(TERM独自拡張。#96。
 /// ユーザー指摘: 「白ボンが、爆弾をランダムに投げてくるイメージで」)。上下へ
-/// `row_range`マス、左右へ`col_range`マスずつ伸ばし、`vJ39/bombermanterm`の
-/// `explosion_cells`と同じロジックでXブロック・ダイヤブロックに当たったらそのマス
-/// までで止める(そこから先へは伸ばさない)。Empty・その他のセルは素通りする。
-/// 盤面外へは伸びない。上下・左右で別々の距離を取れるようにしているのは、
-/// 「横は画面幅全部・縦は画面の縦方向全部」というように軸ごとに求められる
-/// 「画面内全域」の大きさが異なるため(TERM独自拡張。#142)。
+/// `row_range`マス、左右へ`col_range`マスずつ伸ばす。盤面外へは伸びない。
+/// 上下・左右で別々の距離を取れるようにしているのは、「横は画面幅全部・縦は
+/// 画面の縦方向全部」というように軸ごとに求められる「画面内全域」の大きさが
+/// 異なるため(TERM独自拡張。#142)。
+///
+/// 以前(#96〜#142)は`vJ39/bombermanterm`の`explosion_cells`と同じく、Xブロック・
+/// ダイヤブロックに当たったらそのマスまでで止める(遮蔽される)仕様だったが、
+/// 「爆弾は縦横、橋から橋までKの効果出てくれないと困る」というユーザー指摘
+/// (#159)を受け、ショートカットK/StarifyScreenアイテム(画面内の岩・ダイヤを
+/// 遮蔽なく一律スター化する)と同じ挙動に揃えた。途中の岩・ダイヤで打ち切らず、
+/// 経路上の岩・ダイヤを全てスター化しながら画面端(range・盤面境界)まで届く。
 pub fn bomb_blast_cells(
     board: &Board,
     origin: Pos,
@@ -1368,11 +1373,7 @@ pub fn bomb_blast_cells(
             if r < 0 || c < 0 || r as usize >= board.depth_rows() || c as usize >= board.width() {
                 break;
             }
-            let pos = (r as usize, c as usize);
-            cells.push(pos);
-            if matches!(board.cell(pos.0, pos.1), Cell::Rock { .. } | Cell::Diamond) {
-                break;
-            }
+            cells.push((r as usize, c as usize));
         }
     }
     cells
@@ -1928,25 +1929,53 @@ mod tests {
     }
 
     #[test]
-    fn bomb_blast_cells_stops_at_the_first_rock_in_each_direction() {
+    fn bomb_blast_cells_passes_through_rock_without_stopping() {
+        // ユーザー指摘: 「爆弾は縦横、橋から橋までKの効果出てくれないと困る」
+        // (#159)。ショートカットK/StarifyScreenアイテムと同じく、途中の岩で
+        // 打ち切らず指定範囲の端まで届くはず。
         let mut board = empty_board(10);
         board.rows[5][7] = Cell::Rock { hits: 0 }; // 原点(5,5)から右へ2マス目
         let cells = bomb_blast_cells(&board, (5, 5), 2, 2);
         assert!(cells.contains(&(5, 6)), "岩の手前のマスは含まれるはず");
+        assert!(cells.contains(&(5, 7)), "岩自体のマスは含まれるはず");
         assert!(
-            cells.contains(&(5, 7)),
-            "岩自体のマスは含まれるはず(そこで止まる)"
+            !cells.contains(&(5, 8)),
+            "range(2)を超えた先は含まれないはず(岩に遮られたからではない)"
         );
-        assert!(!cells.contains(&(5, 8)), "岩の先へは爆風が伸びないはず");
     }
 
     #[test]
-    fn bomb_blast_cells_stops_at_diamond_the_same_way_as_rock() {
+    fn bomb_blast_cells_passes_through_diamond_the_same_way_as_rock() {
         let mut board = empty_board(10);
         board.rows[4][5] = Cell::Diamond; // 原点(5,5)から上へ1マス目
         let cells = bomb_blast_cells(&board, (5, 5), 2, 2);
         assert!(cells.contains(&(4, 5)), "ダイヤ自体のマスは含まれるはず");
-        assert!(!cells.contains(&(3, 5)), "ダイヤの先へは爆風が伸びないはず");
+        assert!(
+            cells.contains(&(3, 5)),
+            "ダイヤの先(range内)へも爆風が伸びるはず"
+        );
+    }
+
+    #[test]
+    fn bomb_blast_cells_reaches_the_screen_edge_through_a_solid_wall_of_rock_and_diamond() {
+        // ユーザー指摘: 「爆弾は縦横、橋から橋までKの効果出てくれないと困る」
+        // (#159)。連続した岩・ダイヤの壁があっても、遮蔽されずrangeの端まで
+        // 届くはず(「橋から橋まで」= 画面端から画面端まで)。
+        let mut board = empty_board(10);
+        for col in 6..=9 {
+            board.rows[5][col] = if col % 2 == 0 {
+                Cell::Rock { hits: 0 }
+            } else {
+                Cell::Diamond
+            };
+        }
+        let cells = bomb_blast_cells(&board, (5, 5), 0, 4);
+        for col in 6..=9 {
+            assert!(
+                cells.contains(&(5, col)),
+                "岩・ダイヤの壁の途中セル({col})も爆風に含まれるはず"
+            );
+        }
     }
 
     #[test]
