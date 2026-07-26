@@ -466,7 +466,11 @@ pub fn draw_settings(
         .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-    let settings_area = centered_rect(60, 50, frame_rect);
+    // 設定項目が増えるたびに縦に伸びてきた(#108でアイテム3種のrate行を追加した際、
+    // 従来の50%では下部のms_line(落下速度等)が枠からクリップして見えなくなった。
+    // ユーザー指摘: 「設定画面から時間要素の細かいものが結構消えてる」)。項目追加を
+    // 見越して余裕を持たせる。
+    let settings_area = centered_rect(60, 90, frame_rect);
     frame.render_widget(Clear, settings_area);
 
     let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
@@ -1268,6 +1272,27 @@ mod tests {
             assert_eq!(choice.cycle().cycle_back(), choice);
             assert_eq!(choice.cycle_back().cycle(), choice);
         }
+    }
+
+    #[test]
+    fn settings_screen_box_is_tall_enough_for_all_content_lines() {
+        // ユーザー指摘: 「設定画面から時間要素の細かいものが結構消えてるぞ」。設定項目が
+        // 増えるたびに枠の高さが実際の内容行数を収められているか回帰確認する
+        // (#108でアイテム3種のrate行を追加した際、枠が足りず下部のms_line(落下速度等)が
+        // クリップして見えなくなっていた)。見出し1+空行1+MUSIC/SE(2)+岩/AIR/スター/
+        // ダイヤ(4)+アイテム3種(3)+色数(1)+色結合(1)+列数(1)+落下速度系4種(4)+空行1+
+        // ヘルプ2行(2)=22行、枠(上下)2行込みで24行必要。今後さらに設定を追加したら
+        // この定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 22;
+        let area = Rect::new(0, 0, 200, 60);
+        let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+        let settings_area = centered_rect(60, 90, frame_rect);
+        assert!(
+            settings_area.height >= REQUIRED_CONTENT_LINES + 2,
+            "設定画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
+            REQUIRED_CONTENT_LINES,
+            settings_area.height
+        );
     }
 
     // --- フィールド幅(列数)可変レイアウト(TERM独自拡張) ---

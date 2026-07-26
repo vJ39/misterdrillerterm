@@ -486,7 +486,12 @@ impl Board {
 
             for col in 0..self.width {
                 let current = self.rows[row][col];
-                if current == Cell::Empty {
+                // アイテムブロックは配分率再抽選の対象外にする(TERM独自拡張。#109調査で
+                // 判明: 岩/AIR/スター/ダイヤの配分率設定を変更すると、既に盤面に配置済み
+                // (場合によっては落下中)のアイテムブロックまで無条件に再抽選され上書き
+                // されて消えてしまっていた)。既に置かれているアイテムはAIRと同様、
+                // このセルはEmpty同様「既に確定した内容」として扱い、そのまま残す。
+                if current == Cell::Empty || matches!(current, Cell::Item(_)) {
                     continue;
                 }
 
@@ -1164,6 +1169,23 @@ mod tests {
             );
         }
         assert_eq!(board.cell(0, 4), Cell::Empty, "既に掘削済みのセルは対象外のまま");
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_never_overwrites_existing_item_blocks() {
+        // #109調査で判明: 岩/AIR/スター/ダイヤの配分率を再抽選すると、既に盤面に
+        // 配置済みのアイテムブロックまで無条件に上書きされて消えてしまっていた。
+        // アイテムはAIRと同様、既に確定した内容として再抽選の対象外にする。
+        let mut board = empty_board(1);
+        board.rows[0][0] = Cell::Item(ItemEffect::ClearAbove);
+        board.rows[0][1] = Cell::Item(ItemEffect::UnifyColors);
+        board.rows[0][2] = Cell::Item(ItemEffect::StarifyScreen);
+
+        board.reroll_overlays_from_row(0, 300, 300, 300, 300, 300, 300, 300, 4, 100, &GravityState::new());
+
+        assert_eq!(board.cell(0, 0), Cell::Item(ItemEffect::ClearAbove), "Rアイテムは再抽選で上書きされないはず");
+        assert_eq!(board.cell(0, 1), Cell::Item(ItemEffect::UnifyColors), "Cアイテムは再抽選で上書きされないはず");
+        assert_eq!(board.cell(0, 2), Cell::Item(ItemEffect::StarifyScreen), "Kアイテムは再抽選で上書きされないはず");
     }
 
     #[test]
@@ -2140,6 +2162,25 @@ mod tests {
             apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS);
         }
         apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS)
+    }
+
+    #[test]
+    fn diamond_falling_onto_item_does_not_erase_the_item() {
+        // ユーザー指摘: 「RアイテムやKアイテムがその上にダイヤブロックなどがあるとき、
+        // 一緒に落下する過程で消えてしまう(必ず再現する)」。アイテムの真上にダイヤが
+        // あり両方支えを失って一緒に落下しても、アイテムが消えずに最深行まで残ることを
+        // 確認する(純粋な重力エンジンレベルの回帰テスト)。
+        let mut board = empty_board(5);
+        board.rows[0][0] = Cell::Diamond;
+        board.rows[1][0] = Cell::Item(ItemEffect::ClearAbove);
+        let mut gravity = GravityState::new();
+        let player_pos = (999, 999);
+        for _ in 0..(SHAKE_TICKS as usize + 6) {
+            apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+        }
+
+        assert!(matches!(board.cell(4, 0), Cell::Item(ItemEffect::ClearAbove)), "アイテムは最深行まで落ちて残るはず");
+        assert!(matches!(board.cell(3, 0), Cell::Diamond), "ダイヤはアイテムのすぐ上に着地するはず");
     }
 
     // --- 支えの連鎖判定(ユーザー指摘対応) ---

@@ -1184,12 +1184,14 @@ impl Game {
         }
         // 4連結自動消滅と同じ消滅フラッシュ演出を出す(TERM独自拡張。ユーザー指摘:
         // 「ショートカットRの動作だけど、消えるとき、結合して消えるときと同じ消える
-        // アニメーションして」)。
+        // アニメーションして」)。AIR・アイテムブロック(C/R/Kアイテム)は消さずに残す
+        // (TERM独自拡張。ユーザー指摘: 「ショートカットRは、Cアイテム、Rアイテム、
+        // Kアイテムを削除しない(AIRと同じ扱い)」)。
         let mut cleared = Vec::new();
         for row in 0..self.player.row {
             for col in 0..self.board.width() {
                 let cell = self.board.cell(row, col);
-                if !matches!(cell, Cell::Oxygen) {
+                if !matches!(cell, Cell::Oxygen | Cell::Item(_)) {
                     if cell != Cell::Empty {
                         cleared.push((row, col));
                     }
@@ -1402,6 +1404,33 @@ mod tests {
         assert!(matches!(game.board.cell(495, 3), Cell::Star { .. }));
         assert!(matches!(game.board.cell(498, 4), Cell::Star { .. }));
         assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::StarifyScreen))));
+    }
+
+    #[test]
+    fn item_survives_falling_together_with_a_diamond_above_it() {
+        // ユーザー指摘: 「RアイテムやKアイテムがその上にダイヤブロックなどがあるとき、
+        // 一緒に落下する過程で消えてしまう(必ず再現する)」。アイテムの真上にダイヤが
+        // あり両方支えを失って一緒に落下しても、アイテムが消えずに着地することを確認する。
+        const FRAME_MS: u64 = 33;
+        let mut game = Game::new(80);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 11;
+
+        game.board.rows[500][0] = Cell::Diamond;
+        game.board.rows[501][0] = Cell::Item(ItemEffect::ClearAbove);
+
+        let total_ms_needed = (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 500 * FALL_TICK_MS;
+        let mut elapsed_ms = 0u64;
+        while elapsed_ms < total_ms_needed {
+            game.update(Duration::from_millis(FRAME_MS));
+            elapsed_ms += FRAME_MS;
+        }
+
+        let item_count = game.board.rows.iter().flatten().filter(|c| matches!(c, Cell::Item(_))).count();
+        assert_eq!(item_count, 1, "ダイヤと一緒に落下してもアイテムが消えないはず");
+        assert!(matches!(game.board.cell(999, 0), Cell::Item(ItemEffect::ClearAbove)), "アイテムは最深行まで落ちて残るはず");
+        assert!(matches!(game.board.cell(998, 0), Cell::Diamond), "ダイヤはアイテムのすぐ上に着地するはず");
     }
 
     #[test]
@@ -2332,6 +2361,27 @@ mod tests {
 
         assert_eq!(game.board.cell(10, 5), Cell::Oxygen, "AIRは消えずに残るはず");
         assert_eq!(game.board.cell(10, 6), Cell::Empty, "AIR以外は通常通り消えるはず");
+    }
+
+    #[test]
+    fn debug_clear_above_player_leaves_item_blocks_in_place_to_fall_naturally() {
+        // ユーザー指摘: 「ショートカットRは、Cアイテム、Rアイテム、Kアイテムを削除
+        // しない(AIRと同じ扱い)」。
+        let mut game = Game::new(71);
+        clear_board(&mut game);
+        game.player.row = 50;
+        game.player.col = 5;
+        game.board.rows[10][5] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[11][5] = Cell::Item(ItemEffect::UnifyColors);
+        game.board.rows[12][5] = Cell::Item(ItemEffect::StarifyScreen);
+        game.board.rows[10][6] = Cell::Rock { hits: 2 }; // 比較用: アイテム以外は通常通り消える
+
+        game.debug_clear_above_player();
+
+        assert_eq!(game.board.cell(10, 5), Cell::Item(ItemEffect::ClearAbove), "Rアイテムは消えずに残るはず");
+        assert_eq!(game.board.cell(11, 5), Cell::Item(ItemEffect::UnifyColors), "Cアイテムは消えずに残るはず");
+        assert_eq!(game.board.cell(12, 5), Cell::Item(ItemEffect::StarifyScreen), "Kアイテムは消えずに残るはず");
+        assert_eq!(game.board.cell(10, 6), Cell::Empty, "アイテム以外は通常通り消えるはず");
     }
 
     #[test]
