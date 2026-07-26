@@ -558,7 +558,16 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             } else {
                 x
             };
-            draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
+            // 消滅した直後のセルは一瞬フラッシュしてから背景色へ消えていく
+            // (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出して
+            // ほしい」)。
+            if cell == BoardCell::Empty
+                && let Some(t) = game.vanish_flash_progress((board_row, col))
+            {
+                fill_block(buf, draw_x, y, colors::vanish_flash_bg(t));
+            } else {
+                draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
+            }
         }
     }
 

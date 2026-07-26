@@ -634,6 +634,10 @@ pub struct FallTickOutcome {
     /// 触れた場合も押し潰されず酸素回復扱いにする。ユーザー指摘「上から降ってきた
     /// AIRで回復してないバグ」の修正)。呼び出し側が酸素回復・スコア加算を行う。
     pub oxygen_collected: usize,
+    /// このティックで自動消滅(4連結以上の色ブロック・岩ブロック)により消えたセルの
+    /// 座標(TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
+    /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
+    pub vanished_cells: Vec<Pos>,
 }
 
 /// あるセル`pos`が「支持されている」か(spec.md 4.2)。
@@ -951,6 +955,7 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
                         board.set(vr, vc, Cell::Empty);
                     }
                     outcome.auto_vanished_blocks += vanish_group.len();
+                    outcome.vanished_cells.extend(vanish_group);
                 }
             }
             Cell::Rock { .. } => {
@@ -963,6 +968,7 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
                         board.set(vr, vc, Cell::Empty);
                     }
                     outcome.auto_vanished_rock_blocks += vanish_group.len();
+                    outcome.vanished_cells.extend(vanish_group);
                 }
             }
             _ => {}
@@ -979,11 +985,11 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
 /// 画面内に見えてから5秒たったら消えはじめること」)。画面外のスターブロックは
 /// 経過時間が進まない(画面内に戻ってきたら残りの猶予から再開する)。戻り値は消滅した
 /// スターブロックの個数。
-pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) -> usize {
+pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) -> Vec<Pos> {
     let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
     let row_start = player_row.saturating_sub(range);
     let row_end = (player_row + range).min(board.depth_rows().saturating_sub(1));
-    let mut melted = 0;
+    let mut melted = Vec::new();
     let vanish_at_ms = STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS;
 
     for r in row_start..=row_end {
@@ -992,7 +998,7 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
                 let updated = visible_ms.saturating_add(delta_ms);
                 if updated >= vanish_at_ms {
                     board.set(r, c, Cell::Empty);
-                    melted += 1;
+                    melted.push((r, c));
                 } else {
                     board.set(r, c, Cell::Star { visible_ms: updated });
                 }
@@ -1184,7 +1190,7 @@ mod tests {
 
         let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS - 1);
 
-        assert_eq!(melted, 0, "猶予時間未満では消滅しないはず");
+        assert_eq!(melted.len(), 0, "猶予時間未満では消滅しないはず");
         assert!(matches!(board.cell(0, 0), Cell::Star { .. }), "猶予時間未満ではまだスターのままのはず");
     }
 
@@ -1195,7 +1201,7 @@ mod tests {
 
         let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS);
 
-        assert_eq!(melted, 1, "猶予時間+溶解時間が経過すれば1個消えるはず");
+        assert_eq!(melted, vec![(0, 0)], "猶予時間+溶解時間が経過すれば1個消えるはず");
         assert_eq!(board.cell(0, 0), Cell::Empty, "溶け切ったスターは消えているはず");
     }
 
@@ -1210,7 +1216,7 @@ mod tests {
 
         let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS + 1000);
 
-        assert_eq!(melted, 0, "画面外のスターは溶解が進まないはず");
+        assert_eq!(melted.len(), 0, "画面外のスターは溶解が進まないはず");
         assert_eq!(board.cell(far_row, 0), Cell::Star { visible_ms: 0 }, "経過時間が進んでいないはず");
     }
 

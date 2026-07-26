@@ -6,7 +6,7 @@
 use crate::constants::OXYGEN_DECAY_PER_SEC;
 use crate::game::board::{
     apply_gravity_tick, connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
-    is_supported, Board, BlockMove, Cell, GravityState, RockHitResult,
+    is_supported, Board, BlockMove, Cell, GravityState, Pos, RockHitResult,
 };
 use crate::game::player::{Direction, Player};
 
@@ -273,6 +273,10 @@ pub struct GravityTickResult {
     /// 落下してきた酸素カプセルがプレイヤーに触れて取得された回数(TERM独自拡張)。
     /// 呼び出し側(Game)がこの回数ぶん`Player::collect_oxygen_capsule`を呼ぶ。
     pub oxygen_collected: usize,
+    /// このティックで自動消滅により消えたセルの座標(TERM独自拡張。ユーザー指摘:
+    /// 「ブロックが消える瞬間に消える演出してほしい」)。呼び出し側が消滅フラッシュ
+    /// 演出の対象として記録する。
+    pub vanished_cells: Vec<Pos>,
 }
 
 /// 重力落下の論理ティックを1回実行し、自動消滅のスコア加算・押し潰し判定・
@@ -305,6 +309,7 @@ pub fn process_gravity_tick(
         auto_vanished_rock_blocks: outcome.auto_vanished_rock_blocks,
         life_lost_to_crush: outcome.crushed && !invulnerable,
         oxygen_collected: outcome.oxygen_collected,
+        vanished_cells: outcome.vanished_cells,
     }
 }
 

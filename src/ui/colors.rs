@@ -105,6 +105,23 @@ pub fn star_bg(visible_ms: u32, grace_ms: u32, melt_duration_ms: u32) -> Color {
     Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
 }
 
+/// ブロックが消滅した瞬間の明るいフラッシュ色(TERM独自拡張。ユーザー指摘:
+/// 「ブロックが消える瞬間に消える演出してほしい」)。
+const VANISH_FLASH_BG: Color = Color::Rgb(255, 255, 255);
+
+/// 消滅フラッシュ演出の背景色を進捗(0.0=消滅直後、1.0=演出完了直前)から、
+/// フィールド背景色(`FIELD_EMPTY_BG`)へ向けて補間する。
+pub fn vanish_flash_bg(progress: f32) -> Color {
+    let t = progress.clamp(0.0, 1.0);
+    let Color::Rgb(ar, ag, ab) = VANISH_FLASH_BG else {
+        unreachable!("VANISH_FLASH_BGは常にColor::Rgb")
+    };
+    let Color::Rgb(br, bg, bb) = FIELD_EMPTY_BG else {
+        unreachable!("FIELD_EMPTY_BGは常にColor::Rgb")
+    };
+    Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+}
+
 /// プレイヤーの前景色。
 pub const PLAYER_FG: Color = Color::Rgb(255, 170, 40);
 

@@ -14,7 +14,8 @@ use crate::constants::{
     depth_fraction, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
     DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
-    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP,
+    BLOCK_VANISH_FLASH_MS, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
+    FALL_SPEED_DEPTH_MAX_SPEEDUP,
     FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS,
     LIVES_DEFAULT, LIVES_MAX,
     MOVE_ANIM_DURATION_MS, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
@@ -235,6 +236,10 @@ pub struct Game {
     /// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う)。次のティックが
     /// 来るまでの間、描画側がこれと`block_fall_progress()`を使って補間する。
     last_block_moves: Vec<BlockMove>,
+    /// 直近に消滅した(自動消滅・スター溶解)セルの座標と、消滅フラッシュ演出の残り時間
+    /// (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
+    /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
+    recently_vanished: Vec<(board::Pos, Duration)>,
     /// GameOverダイアログでの現在の選択項目(TERM独自拡張)。GameOver状態でのみ意味を持つ。
     game_over_selection: GameOverChoice,
 }
@@ -281,6 +286,7 @@ impl Game {
             render_anim_elapsed: move_anim_duration_secs(),
             render_anim_duration_secs: move_anim_duration_secs(),
             last_block_moves: Vec::new(),
+            recently_vanished: Vec::new(),
             game_over_selection: GameOverChoice::BackToTitle,
         }
     }
@@ -619,6 +625,10 @@ impl Game {
         // 描画側が最後まで追従できるよう、Playingガードより前に進めておく。
         self.crush_flash_remaining = self.crush_flash_remaining.saturating_sub(delta);
         self.render_anim_elapsed += delta.as_secs_f32();
+        for (_, remaining) in self.recently_vanished.iter_mut() {
+            *remaining = remaining.saturating_sub(delta);
+        }
+        self.recently_vanished.retain(|&(_, remaining)| remaining > Duration::ZERO);
 
         if self.status != GameStatus::Playing {
             return events;
@@ -749,6 +759,7 @@ impl Game {
                     blocks: result.auto_vanished_rock_blocks,
                 });
             }
+            self.note_vanished_cells(result.vanished_cells);
 
             if result.life_lost_to_crush {
                 self.apply_miss(&mut events, true);
@@ -765,8 +776,9 @@ impl Game {
         // このフレームの実経過時間`delta`そのもので進行させることで、深度によらず
         // 常に一定の猶予時間になる。
         let melted = tick_star_melting(&mut self.board, self.player.row, delta.as_millis() as u32);
-        if melted > 0 {
-            events.push(GameEvent::BlockDestroyed { blocks: melted });
+        if !melted.is_empty() {
+            events.push(GameEvent::BlockDestroyed { blocks: melted.len() });
+            self.note_vanished_cells(melted);
         }
 
         // プレイヤー自身の自由落下(spec.md 1章、TERM独自拡張)。ブロックの重力とは
@@ -864,6 +876,23 @@ impl Game {
     /// 補間描画に使う。次のティックが実行されるまで、このティックの内容を保持し続ける。
     pub fn recently_moved_blocks(&self) -> &[BlockMove] {
         &self.last_block_moves
+    }
+
+    /// 消滅したセルを消滅フラッシュ演出の対象として記録する(TERM独自拡張。
+    /// ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
+    fn note_vanished_cells(&mut self, cells: impl IntoIterator<Item = board::Pos>) {
+        let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS);
+        self.recently_vanished.extend(cells.into_iter().map(|pos| (pos, flash)));
+    }
+
+    /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=消滅直後、1.0=演出完了
+    /// 直前。TERM独自拡張)。対象でなければ`None`を返す。
+    pub fn vanish_flash_progress(&self, pos: board::Pos) -> Option<f32> {
+        let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS).as_secs_f32().max(0.001);
+        self.recently_vanished
+            .iter()
+            .find(|&&(p, _)| p == pos)
+            .map(|&(_, remaining)| (1.0 - remaining.as_secs_f32() / flash).clamp(0.0, 1.0))
     }
 
     /// 描画側が使う、ブロック落下ティックの進捗(0.0=直前のティック直後,
@@ -1567,6 +1596,60 @@ mod tests {
         assert_eq!(game.board.cell(999, 1), Cell::Empty);
         assert_eq!(game.board.cell(999, 2), Cell::Empty);
         assert_eq!(game.board.cell(999, 3), Cell::Empty);
+    }
+
+    #[test]
+    fn auto_vanished_cells_show_a_vanish_flash_that_expires_after_block_vanish_flash_ms() {
+        // ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」。自動消滅した
+        // セルは消滅直後にフラッシュ演出の対象になり、BLOCK_VANISH_FLASH_MS経過後に
+        // 対象から外れることを確認する。
+        let mut game = Game::new(12);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 11; // 落下グループから十分離す
+
+        game.board.rows[998][0] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][1] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][2] = Cell::Color(ColorKind::Red);
+        game.board.rows[999][3] = Cell::Color(ColorKind::Red); // 最深行=常に支持
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+
+        for col in 0..=3 {
+            assert!(
+                game.vanish_flash_progress((999, col)).is_some(),
+                "消滅直後のセル(999,{col})はフラッシュ演出の対象になっているはず"
+            );
+        }
+        assert!(
+            game.vanish_flash_progress((0, 0)).is_none(),
+            "無関係なセルはフラッシュ演出の対象ではないはず"
+        );
+
+        game.update(Duration::from_millis(crate::constants::BLOCK_VANISH_FLASH_MS + 10));
+        assert!(
+            game.vanish_flash_progress((999, 0)).is_none(),
+            "BLOCK_VANISH_FLASH_MS経過後はフラッシュ演出が終わっているはず"
+        );
+    }
+
+    #[test]
+    fn melted_star_cell_also_shows_a_vanish_flash() {
+        // スター溶解による消滅も、自動消滅と同様にフラッシュ演出の対象になることを確認する。
+        let mut game = Game::new(13);
+        clear_board(&mut game);
+        game.player.row = 999; // 最深行=常に支持される安定した足場にできる
+        game.player.col = 5;
+        game.board.rows[999][3] = Cell::Rock { hits: 0 }; // 最深行=常に支持
+        game.board.rows[998][3] = Cell::Star { visible_ms: 0 }; // 岩の上に乗った、支えのあるスター
+
+        game.update(Duration::from_millis(crate::constants::STAR_VISIBLE_GRACE_MS as u64 + crate::constants::STAR_MELT_DURATION_MS as u64));
+
+        assert_eq!(game.board.cell(998, 3), Cell::Empty, "溶け切ったスターは消えているはず");
+        assert!(
+            game.vanish_flash_progress((998, 3)).is_some(),
+            "溶けて消えたスターもフラッシュ演出の対象になっているはず"
+        );
     }
 
     #[test]
