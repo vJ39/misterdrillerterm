@@ -764,7 +764,10 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
         BoardCell::Empty => fill_block(buf, x, y, colors::FIELD_EMPTY_BG),
         BoardCell::Color(kind) => draw_color_block(buf, x, y, board, row, col, kind),
         BoardCell::Rock { hits } => draw_rock_block(buf, x, y, board, row, col, hits),
-        BoardCell::Oxygen => draw_fixed_unit(buf, x, y, [['○', '○'], ['○', '○']], colors::OXYGEN_FG, colors::OXYGEN_BG),
+        // AIRはカプセル(丸薬)らしいシルエットにする(TERM独自拡張。ユーザー指摘:
+        // 「AIRをカプセルのような形状にしたい」)。4分円グリフを組み合わせて楕円の
+        // 輪郭を描く。
+        BoardCell::Oxygen => draw_fixed_unit(buf, x, y, [['◜', '◝'], ['◟', '◞']], colors::OXYGEN_FG, colors::OXYGEN_BG),
         BoardCell::Diamond => draw_fixed_unit(buf, x, y, [['◆', '◆'], ['◆', '◆']], colors::DIAMOND_FG, colors::DIAMOND_BG),
         BoardCell::Star { visible_ms } => draw_fixed_unit(
             buf,
@@ -774,11 +777,15 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
             colors::STAR_FG,
             colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         ),
+        // アイテムブロックも他ブロック同様、効果ごとに専用の形状にする(TERM独自拡張。
+        // ユーザー指摘: 「他のアイテムも相手有無特有の形状にしたい」)。ClearAboveは
+        // 頭上を吹き飛ばすイメージで上向き矢印を、UnifyColorsは色が混ざり合う
+        // イメージで陰陽風の分割円を上段に添える。
         BoardCell::Item(ItemEffect::ClearAbove) => {
-            draw_fixed_unit(buf, x, y, [['R', 'R'], ['R', 'R']], colors::ITEM_CLEAR_ABOVE_FG, colors::ITEM_CLEAR_ABOVE_BG)
+            draw_fixed_unit(buf, x, y, [['↑', '↑'], ['R', 'R']], colors::ITEM_CLEAR_ABOVE_FG, colors::ITEM_CLEAR_ABOVE_BG)
         }
         BoardCell::Item(ItemEffect::UnifyColors) => {
-            draw_fixed_unit(buf, x, y, [['C', 'C'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG)
+            draw_fixed_unit(buf, x, y, [['◐', '◑'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG)
         }
     }
 }
