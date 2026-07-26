@@ -57,6 +57,16 @@ pub enum BombPhase {
     Ticking,
 }
 
+/// `push_bomb_in_the_way`の結果(TERM独自拡張。#161)。
+enum BombInTheWay {
+    /// ボムが無い、または押し出しに成功した。通常の物理判定(physics::move_lateral)
+    /// に進んでよい。
+    ClearToMove,
+    /// 押し出せず、段差登り判定を自分で行った(呼び出し側は通常の物理判定を
+    /// 呼ばない)。
+    HandledAsClimb,
+}
+
 /// 白ボンがランダムに投げ込むボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、
 /// 爆弾をランダムに投げてくるイメージで、敵は出現しないものとする」)。移動する
 /// 敵キャラは持たず、盤面上に設置されたこのボム自体だけを管理する。ブロックとは
@@ -487,9 +497,9 @@ impl Game {
             // 空いている(=次の自由落下tickで必ず1マス落ちる)間は横移動を受け付けない。
             return Vec::new();
         }
-        if !self.push_bomb_in_the_way(dir) {
-            // 押し出せなかった(押し出し先が塞がっている)ので、壁にぶつかった
-            // 時と同じ扱いでこの場に留まる(TERM独自拡張。#149)。
+        if matches!(self.push_bomb_in_the_way(dir), BombInTheWay::HandledAsClimb) {
+            // 押し出せなかった場合は段差登り判定を自分で処理済み(TERM独自拡張。
+            // #161)なので、通常の物理判定(physics::move_lateral)は呼ばない。
             return Vec::new();
         }
 
@@ -517,14 +527,15 @@ impl Game {
     /// ユーザー指摘: 「爆弾はキャラが押したらそっちに転がる」)。押し出したボムは
     /// Settling(左右バウンド中)へ遷移させ、以後は既存の重力・バウンド判定
     /// (#140/#143/#144)にそのまま委ねる。押し出し先が盤面外・ブロック・他の
-    /// ボムで塞がっていて動かせない場合は`false`を返し、呼び出し側で移動そのものを
-    /// 妨げる(壁にぶつかった時と同じ扱い)。ボムが無い、またはまだ登場・投擲演出中
-    /// であれば何もせず`true`を返す(移動を妨げない)。
-    fn push_bomb_in_the_way(&mut self, dir: Direction) -> bool {
+    /// ボムで塞がっていて動かせない場合は、岩ブロックと同じ段差登り判定を自分で
+    /// 行う(TERM独自拡張。#161。ユーザー指摘: 「爆弾をブロック扱いして、登れる
+    /// ...ようにして」)。ボムが無い、またはまだ登場・投擲演出中であれば何もせず
+    /// `ClearToMove`を返す(通常の物理判定に委ねる)。
+    fn push_bomb_in_the_way(&mut self, dir: Direction) -> BombInTheWay {
         let (_, dc) = dir.delta();
         let nc = self.player.col as isize + dc;
         if nc < 0 || nc as usize >= self.board.width() {
-            return true; // 盤面外は既存の境界チェック(physics::move_lateral)に任せる。
+            return BombInTheWay::ClearToMove; // 盤面外は既存の境界チェックに任せる。
         }
         let nc = nc as usize;
         let row = self.player.row;
@@ -532,29 +543,68 @@ impl Game {
         let Some(bomb_index) = self.bombs.iter().position(|b| {
             b.pos == (row, nc) && matches!(b.phase, BombPhase::Settling | BombPhase::Ticking)
         }) else {
-            return true;
+            return BombInTheWay::ClearToMove;
         };
 
         let push_c = nc as isize + dc;
-        if push_c < 0 || push_c as usize >= self.board.width() {
-            return false;
-        }
-        let push_pos = (row, push_c as usize);
-        let occupied_by_other_bomb = self
-            .bombs
-            .iter()
-            .enumerate()
-            .any(|(i, b)| i != bomb_index && b.pos == push_pos);
-        if self.board.cell(push_pos.0, push_pos.1) != Cell::Empty || occupied_by_other_bomb {
-            return false;
-        }
+        let push_pos = if push_c < 0 || push_c as usize >= self.board.width() {
+            None
+        } else {
+            let candidate = (row, push_c as usize);
+            let occupied_by_other_bomb = self
+                .bombs
+                .iter()
+                .enumerate()
+                .any(|(i, b)| i != bomb_index && b.pos == candidate);
+            (self.board.cell(candidate.0, candidate.1) == Cell::Empty && !occupied_by_other_bomb)
+                .then_some(candidate)
+        };
+
+        let Some(push_pos) = push_pos else {
+            self.climb_over_unpushable_bomb(dir, nc);
+            return BombInTheWay::HandledAsClimb;
+        };
 
         let bomb = &mut self.bombs[bomb_index];
         bomb.pos = push_pos;
         bomb.phase = BombPhase::Settling;
         bomb.phase_elapsed_ms = 0;
         bomb.settle_bounce_dir = if dc > 0 { 1 } else { -1 };
-        true
+        BombInTheWay::ClearToMove
+    }
+
+    /// 押し出せない静止中のボムに対し、岩ブロックと同じ「ぶつかって停止→同方向
+    /// 2回目で1段登る」段差登り判定を行う(TERM独自拡張。#161)。
+    /// `physics::move_lateral`の段差登りロジックと同じ判定式を踏襲しつつ、ボムは
+    /// Cellグリッド外のオーバーレイのため、対象をボムの有無に置き換える。
+    fn climb_over_unpushable_bomb(&mut self, dir: Direction, nc: usize) {
+        let was_bumped_same_dir = self.player.bumped_direction == Some(dir);
+        self.player.facing = dir;
+
+        if was_bumped_same_dir
+            && self.player.row > 0
+            && self.board.cell(self.player.row - 1, self.player.col) == Cell::Empty
+            && !self.settled_bomb_at(self.player.row - 1, self.player.col)
+        {
+            let landing = (self.player.row - 1, nc);
+            if self.board.cell(landing.0, landing.1) == Cell::Empty
+                && !self.settled_bomb_at(landing.0, landing.1)
+            {
+                self.player.row -= 1;
+                self.player.col = nc;
+                self.player.bumped_direction = None;
+                return;
+            }
+        }
+
+        self.player.bumped_direction = Some(dir);
+    }
+
+    /// 指定セルに静止中(Settling/Ticking)のボムがあるかどうか(TERM独自拡張。#161)。
+    fn settled_bomb_at(&self, row: usize, col: usize) -> bool {
+        self.bombs.iter().any(|b| {
+            b.pos == (row, col) && matches!(b.phase, BombPhase::Settling | BombPhase::Ticking)
+        })
     }
 
     /// ↑ キー: facingをUpに変更するのみ(移動・掘削は発生しない。spec.md 1章)。
@@ -590,6 +640,14 @@ impl Game {
         // 開始する。命中/空振りを問わず、入力があった事実に対して反応する。
         self.drill_flash_remaining = Duration::from_millis(DRILL_ANIM_MS);
 
+        if self.destroy_bomb_facing() {
+            // ボムを掘削で除去した(TERM独自拡張。#161。ユーザー指摘: 「爆弾を
+            // ブロック扱いして...掘れるようにして」)。岩ブロック等の通常の
+            // 掘削処理は行わない(プレイヤーの位置も変わらない)。
+            events.push(GameEvent::BlockDestroyed { blocks: 1 });
+            return events;
+        }
+
         let before = self.player.position();
         let outcome = physics::drill_facing(&mut self.board, &mut self.player, &self.gravity_state);
         self.push_drill_outcome_events(outcome, &mut events);
@@ -599,6 +657,31 @@ impl Game {
             self.check_level_and_clear(&mut events);
         }
         events
+    }
+
+    /// facing方向に静止中(Settling/Ticking)のボムがあれば掘削で除去する(TERM独自
+    /// 拡張。#161)。岩ブロックの破壊と違い爆発は誘発しない(単純に取り除くだけ)。
+    /// 除去した場合は`true`を返し、呼び出し側は通常の掘削処理をスキップする。
+    /// まだ登場・投擲演出中(Entering/Rolling)のボムは対象外。
+    fn destroy_bomb_facing(&mut self) -> bool {
+        let (dr, dc) = self.player.facing.delta();
+        let nr = self.player.row as isize + dr;
+        let nc = self.player.col as isize + dc;
+        if nr < 0
+            || nc < 0
+            || nr as usize >= self.board.depth_rows()
+            || nc as usize >= self.board.width()
+        {
+            return false;
+        }
+        let target = (nr as usize, nc as usize);
+        let Some(index) = self.bombs.iter().position(|b| {
+            b.pos == target && matches!(b.phase, BombPhase::Settling | BombPhase::Ticking)
+        }) else {
+            return false;
+        };
+        self.bombs.remove(index);
+        true
     }
 
     /// 移動系入力(MoveLeft/MoveRight)のクールダウン(spec.md 9.9)が明けているかを確認し、
@@ -4030,6 +4113,181 @@ mod tests {
             game.bombs[0].pos,
             (500, 6),
             "Enteringのボムの位置は変わらないはず"
+        );
+    }
+
+    #[test]
+    fn pressing_toward_an_unpushable_bomb_twice_climbs_over_it_on_the_second_press() {
+        // 押し出せないボムは岩ブロックと同じく、1回目はぶつかって停止するだけで、
+        // 同じ方向への2回目の入力で初めて1段登る(TERM独自拡張。#161。ユーザー指摘:
+        // 「爆弾をブロック扱いして、登れる...ようにして」)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][7] = Cell::Rock { hits: 0 }; // 押し出し先を塞ぐ壁
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        let first_events = game.try_move_right(); // 1回目: ぶつかって停止
+
+        assert_eq!(game.player.row, 500, "まだ登っていない");
+        assert_eq!(game.player.col, 5, "まだ移動していない");
+        assert_eq!(game.player.facing, Direction::Right);
+        assert!(first_events.is_empty());
+
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        let second_events = game.try_move_right(); // 2回目: 同じ方向への再入力で登る
+
+        assert_eq!(game.player.row, 499, "1段登った");
+        assert_eq!(game.player.col, 6);
+        assert_eq!(game.player.facing, Direction::Right);
+        assert!(
+            second_events.is_empty(),
+            "掘削・破壊イベントは一切発生しない"
+        );
+        assert_eq!(
+            game.bombs[0].pos,
+            (500, 6),
+            "ボムは押し出されず、その場に残ったまま"
+        );
+    }
+
+    #[test]
+    fn climbing_over_a_bomb_fails_when_the_players_own_head_is_blocked() {
+        // 頭上(自分の真上)が塞がっていれば、岩ブロックの既存仕様(#30)と同じく
+        // ボムでも登れないはず(TERM独自拡張。#161)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][7] = Cell::Rock { hits: 0 }; // 押し出し先を塞ぐ壁
+        game.board.rows[499][5] = Cell::Rock { hits: 0 }; // 自分の頭上を塞ぐ
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right();
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        game.try_move_right();
+
+        assert_eq!(game.player.row, 500, "頭上が塞がっているので登れないはず");
+        assert_eq!(game.player.col, 5, "移動しないはず");
+        assert_eq!(game.bombs[0].pos, (500, 6), "ボムも動かないはず");
+    }
+
+    #[test]
+    fn climbing_over_a_bomb_fails_when_the_landing_cell_has_another_bomb() {
+        // 登った先(1段上)に他のボムが居座っていれば、Cellのブロックで塞がっている
+        // 場合と同じく登れないはず(TERM独自拡張。#161)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][7] = Cell::Rock { hits: 0 }; // 押し出し先を塞ぐ壁
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+        game.bombs.push(Bomb {
+            pos: (499, 6), // 登った先を塞ぐボム
+            origin: (499, 0),
+            phase: BombPhase::Settling,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right();
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        game.try_move_right();
+
+        assert_eq!(
+            game.player.row, 500,
+            "登った先がボムで塞がっているので登れないはず"
+        );
+        assert_eq!(game.player.col, 5, "移動しないはず");
+    }
+
+    #[test]
+    fn drilling_a_settled_bomb_removes_it_without_triggering_an_explosion() {
+        // 静止中(Settling/Ticking)のボムは掘削で除去できる(TERM独自拡張。#161。
+        // ユーザー指摘: 「爆弾をブロック扱いして...掘れるようにして」)。爆発は
+        // 誘発せず、通常のブロック消滅と同じ`BlockDestroyed`のみ発生する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.facing = Direction::Right;
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        let events = game.try_drill();
+
+        assert!(game.bombs.is_empty(), "掘削したボムは除去されるはず");
+        assert!(
+            events.contains(&GameEvent::BlockDestroyed { blocks: 1 }),
+            "通常のブロック消滅と同じイベントが発生するはず: {events:?}"
+        );
+        assert!(
+            !events.contains(&GameEvent::BombExploded),
+            "掘削除去では爆発は誘発しないはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn drilling_toward_a_bomb_still_entering_does_not_destroy_it() {
+        // まだ登場・投擲演出中(Entering/Rolling)のボムは掘削の対象外(#149の
+        // 「静止していないと干渉しない」ルールをドリルにも適用。TERM独自拡張。#161)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.facing = Direction::Right;
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        let events = game.try_drill();
+
+        assert_eq!(
+            game.bombs.len(),
+            1,
+            "Enteringのボムは掘削の対象外で残るはず"
+        );
+        assert_eq!(game.bombs[0].pos, (500, 6));
+        assert!(
+            !events.contains(&GameEvent::BlockDestroyed { blocks: 1 }),
+            "掘削は素通りの空振りになるはず: {events:?}"
         );
     }
 
