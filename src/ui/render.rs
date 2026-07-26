@@ -211,8 +211,15 @@ fn on_off_label(enabled: bool) -> &'static str {
 // タイトル画面(spec.md 1章「Qキーはタイトルへ戻る」の受け皿)
 // ---------------------------------------------------------------------------
 
-/// タイトル画面を描画する(ゲーム名+スタート案内のみのシンプルな画面)。
-/// このタイトル画面上でのみ、Qキーがアプリ終了として扱われる(main.rsの画面遷移)。
+/// スプラッシュ画像を縮小表示するスケール(TERM独自拡張)。1.0だと画像だけで
+/// 画面がほぼ埋まってしまい、下のスタート案内と同時表示できないため縮小する
+/// (ユーザー指摘: 「スプラッシュとタイトル画面一緒にしよ」を受け、起動直後に
+/// 別画面としてスプラッシュを挟まず、タイトル画面へ統合した)。
+const TITLE_ART_SCALE: f32 = 0.5;
+
+/// タイトル画面を描画する(起動時スプラッシュ画像+ゲーム名+スタート案内を
+/// 1画面にまとめる)。このタイトル画面上でのみ、Qキーがアプリ終了として扱われる
+/// (main.rsの画面遷移)。
 pub fn draw_title(frame: &mut Frame) {
     let area = frame.area();
 
@@ -220,28 +227,39 @@ pub fn draw_title(frame: &mut Frame) {
         .buffer_mut()
         .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
 
-    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-    let title_area = centered_rect(70, 40, frame_rect);
-    frame.render_widget(Clear, title_area);
+    let canvas = intro::build_canvas();
+    let art_lines = canvas.to_lines(TITLE_ART_SCALE);
+    let art_rows = art_lines.len() as u16;
 
-    let title_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
-        .style(Style::default().bg(colors::LETTERBOX_BG));
-
-    let paragraph = Paragraph::new(vec![
-        Line::from(Span::styled("ミスタードリラーTERM", title_style)),
-        Line::from(Span::styled("MISTER DRILLER TERM", title_style)),
+    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let text_lines = vec![
+        Line::from(Span::styled("ミスタードリラーTERM", text_style)),
+        Line::from(Span::styled("MISTER DRILLER TERM", text_style)),
         Line::from(""),
-        Line::from(Span::styled("何かキーを押してスタート", title_style)),
-        Line::from(Span::styled("(Qキーで終了)", title_style)),
-        Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", title_style)),
-    ])
-    .block(block)
-    .style(Style::default().bg(colors::LETTERBOX_BG))
-    .alignment(Alignment::Center);
-    frame.render_widget(paragraph, title_area);
+        Line::from(Span::styled("何かキーを押してスタート", text_style)),
+        Line::from(Span::styled("(Qキーで終了)", text_style)),
+        Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
+    ];
+    let text_rows = text_lines.len() as u16;
+
+    let content_area = centered_fixed_rect(area.width, art_rows + 1 + text_rows, area);
+    let chunks = Layout::default()
+        .direction(LayoutDirection::Vertical)
+        .constraints([Constraint::Length(art_rows), Constraint::Length(1), Constraint::Length(text_rows)])
+        .split(content_area);
+
+    frame.render_widget(
+        Paragraph::new(Text::from(art_lines))
+            .style(Style::default().bg(colors::LETTERBOX_BG))
+            .alignment(Alignment::Center),
+        chunks[0],
+    );
+    frame.render_widget(
+        Paragraph::new(text_lines)
+            .style(Style::default().bg(colors::LETTERBOX_BG))
+            .alignment(Alignment::Center),
+        chunks[2],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -435,47 +453,6 @@ pub fn draw_settings(
     .style(Style::default().bg(colors::LETTERBOX_BG))
     .alignment(Alignment::Center);
     frame.render_widget(paragraph, settings_area);
-}
-
-/// 起動時のスプラッシュ画面(AAピクセルアート)。`Game`を経由しない独立した画面
-/// なので`GameStatus`には含めず、`crate::main`から起動直後に一度だけ直接呼ぶ
-/// (詳細は`ui::intro`参照)。
-pub fn draw_intro(frame: &mut Frame) {
-    let area = frame.area();
-
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
-
-    let canvas = intro::build_canvas();
-    let art_lines = canvas.to_lines(1.0);
-    let art_cols = art_lines.first().map(|line| line.spans.len()).unwrap_or(0) as u16;
-    let art_rows = art_lines.len() as u16;
-
-    let art_area = centered_fixed_rect(art_cols, art_rows, area);
-    frame.render_widget(
-        Paragraph::new(Text::from(art_lines))
-            .style(Style::default().bg(colors::LETTERBOX_BG))
-            .alignment(Alignment::Center),
-        art_area,
-    );
-
-    let hint_area = Rect {
-        x: area.x,
-        y: art_area.y.saturating_add(art_area.height),
-        width: area.width,
-        height: 1,
-    };
-    if hint_area.y < area.y + area.height {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "何かキーを押して開始",
-                Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG),
-            )))
-            .alignment(Alignment::Center),
-            hint_area,
-        );
-    }
 }
 
 fn draw_size_warning(frame: &mut Frame, area: Rect) {

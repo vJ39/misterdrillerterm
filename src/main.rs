@@ -35,10 +35,6 @@ fn main() -> io::Result<()> {
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
-    if !show_intro(terminal)? {
-        return Ok(()); // スプラッシュ画面でQキーが押されたので、そのままアプリを終了する。
-    }
-
     // 音声出力デバイスを開く。ヘッドレス環境等でデバイスが無い場合でも
     // ゲーム自体はプレイ続行できるよう、失敗時はNoneにして以後の再生をスキップする。
     let sink_handle = rodio::DeviceSinkBuilder::open_default_sink().ok();
@@ -486,24 +482,6 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     bgm_stop.store(true, Ordering::Relaxed);
 
     Ok(())
-}
-
-/// 起動時のスプラッシュ画面(AAピクセルアート、spec.md独自拡張)を表示し、
-/// 何らかのキー入力があるまでループする。`Ok(true)`なら通常通りタイトル画面へ
-/// 続行し、`Ok(false)`ならこの画面でQキーが押されたのでアプリを終了する。
-fn show_intro(terminal: &mut ratatui::DefaultTerminal) -> io::Result<bool> {
-    use input::AnyKeyAction;
-
-    loop {
-        terminal.draw(ui::render::draw_intro)?;
-
-        if let Some(action) = input::poll_any_key(FRAME_INTERVAL_MS)? {
-            match action {
-                AnyKeyAction::Quit => return Ok(false),
-                AnyKeyAction::Advance | AnyKeyAction::OpenSettings | AnyKeyAction::OpenHelp => return Ok(true),
-            }
-        }
-    }
 }
 
 /// アプリ全体の画面状態。タイトル画面・設定画面・プレイ中(Gameを保持)の3値
