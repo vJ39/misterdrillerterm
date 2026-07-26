@@ -259,7 +259,12 @@ fn fix_isolated_cells(base: &mut [Vec<Option<ColorKind>>]) {
 }
 
 /// 岩・酸素・ダイヤの上書き配置(spec.md 3.5)。マスごとに独立抽選する。
-fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row: usize) -> Cell {
+fn overlay_rock_oxygen_diamond(
+    rng: &mut ChaCha8Rng,
+    base_color: ColorKind,
+    row: usize,
+    item_caps: &mut ItemSpawnCaps,
+) -> Cell {
     overlay_rock_oxygen_diamond_with_rates(
         rng,
         base_color,
@@ -273,7 +278,41 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         0.0,
         true, // 初期生成の候補は常に「まだ色ブロック」なのでスター抽選の対象
+        item_caps,
     )
+}
+
+/// アイテムブロック3種の「盤面全体であと何個まで出現させてよいか」の残数
+/// (TERM独自拡張。ユーザー指摘: 「各種アイテムのキャラより上の位置には最大それぞれ
+/// 10個までとする」)。呼び出し側(`Board::generate`・`reroll_overlays_from_row`)が
+/// 処理開始前に盤面全体の既存個数を数えて`ITEM_MAX_COUNT_ON_BOARD`との差分で初期化し、
+/// 新たに1個出現させるたびに対応するフィールドを1減らす。0になったらその種類は
+/// それ以上出現しなくなる。
+struct ItemSpawnCaps {
+    clear_above_remaining: usize,
+    unify_colors_remaining: usize,
+    starify_screen_remaining: usize,
+}
+
+impl ItemSpawnCaps {
+    fn from_existing_counts(board: &Board) -> Self {
+        let max = crate::constants::ITEM_MAX_COUNT_ON_BOARD;
+        ItemSpawnCaps {
+            clear_above_remaining: max.saturating_sub(board.count_item(ItemEffect::ClearAbove)),
+            unify_colors_remaining: max.saturating_sub(board.count_item(ItemEffect::UnifyColors)),
+            starify_screen_remaining: max.saturating_sub(board.count_item(ItemEffect::StarifyScreen)),
+        }
+    }
+
+    /// まだ盤面に1個も無い状態からの新規生成(`Board::generate`)用。既存個数は常に0。
+    fn fresh() -> Self {
+        let max = crate::constants::ITEM_MAX_COUNT_ON_BOARD;
+        ItemSpawnCaps {
+            clear_above_remaining: max,
+            unify_colors_remaining: max,
+            starify_screen_remaining: max,
+        }
+    }
 }
 
 /// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/ダイヤ・アイテム3種の出現率を
@@ -305,6 +344,7 @@ fn overlay_rock_oxygen_diamond_with_rates(
     item_starify_screen_rate_percent: u32,
     rock_cluster_bonus: f32,
     allow_star: bool,
+    item_caps: &mut ItemSpawnCaps,
 ) -> Cell {
     let mut t = band_table(row);
     t.rock = (t.rock * rock_rate_percent as f32 / 100.0 + rock_cluster_bonus).clamp(0.0, 0.9);
@@ -317,11 +357,25 @@ fn overlay_rock_oxygen_diamond_with_rates(
     t.diamond = (t.diamond * diamond_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     // アイテムブロック3種(#98/#101/#107)は岩/AIR/スター/ダイヤの配分率設定とは独立した
     // ごく低確率の値だが、他ブロック同様に設定画面から個別調整できる(TERM独自拡張。
-    // ユーザー指摘: 「各種アイテムの出現頻度の設定項目増やして」)。
-    let item_clear_above = crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB * item_clear_above_rate_percent as f32 / 100.0;
-    let item_unify_colors = crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB * item_unify_colors_rate_percent as f32 / 100.0;
-    let item_starify_screen =
-        crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB * item_starify_screen_rate_percent as f32 / 100.0;
+    // ユーザー指摘: 「各種アイテムの出現頻度の設定項目増やして」)。盤面全体で
+    // `ITEM_MAX_COUNT_ON_BOARD`個に達した種類は、それ以上抽選対象にしない(TERM独自
+    // 拡張。ユーザー指摘: 「各種アイテムのキャラより上の位置には最大それぞれ10個
+    // までとする」)。
+    let item_clear_above = if item_caps.clear_above_remaining > 0 {
+        crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB * item_clear_above_rate_percent as f32 / 100.0
+    } else {
+        0.0
+    };
+    let item_unify_colors = if item_caps.unify_colors_remaining > 0 {
+        crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB * item_unify_colors_rate_percent as f32 / 100.0
+    } else {
+        0.0
+    };
+    let item_starify_screen = if item_caps.starify_screen_remaining > 0 {
+        crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB * item_starify_screen_rate_percent as f32 / 100.0
+    } else {
+        0.0
+    };
 
     // ルーレット式抽選(TERM独自拡張)。各候補の確率ぶんを順に積み上げ、rが最初に
     // 収まった区間を採用する。
@@ -344,14 +398,17 @@ fn overlay_rock_oxygen_diamond_with_rates(
     }
     threshold += item_clear_above;
     if r < threshold {
+        item_caps.clear_above_remaining -= 1;
         return Cell::Item(ItemEffect::ClearAbove);
     }
     threshold += item_unify_colors;
     if r < threshold {
+        item_caps.unify_colors_remaining -= 1;
         return Cell::Item(ItemEffect::UnifyColors);
     }
     threshold += item_starify_screen;
     if r < threshold {
+        item_caps.starify_screen_remaining -= 1;
         return Cell::Item(ItemEffect::StarifyScreen);
     }
     Cell::Color(base_color)
@@ -390,13 +447,17 @@ impl Board {
         let mut base = generate_base_colors(&mut rng, depth_rows, width);
         fix_isolated_cells(&mut base);
 
+        // 新規生成の盤面はまだアイテムを1つも含まないため、常に上限いっぱいから始める
+        // (TERM独自拡張。ユーザー指摘: 「各種アイテムのキャラより上の位置には最大
+        // それぞれ10個までとする」)。
+        let mut item_caps = ItemSpawnCaps::fresh();
         let rows = (0..depth_rows)
             .map(|row| {
                 let mut cells = vec![Cell::Empty; width];
                 for (col, cell) in cells.iter_mut().enumerate() {
                     *cell = match base[row][col] {
                         None => Cell::Empty, // 安全地帯(深度0〜1m)
-                        Some(color) => overlay_rock_oxygen_diamond(&mut rng, color, row),
+                        Some(color) => overlay_rock_oxygen_diamond(&mut rng, color, row, &mut item_caps),
                     };
                 }
                 ensure_row_is_not_fully_blocked_by_rock(&mut cells, &mut rng, ColorKind::ALL.len());
@@ -425,6 +486,12 @@ impl Board {
         self.rows[row][col] = cell;
     }
 
+    /// 盤面全体(全行)に存在する、指定した効果のアイテムブロックの個数(TERM独自拡張。
+    /// ユーザー指摘: 「各種アイテムのキャラより上の位置には最大それぞれ10個までとする」)。
+    /// 出現数の上限を判定するために使う。
+    fn count_item(&self, effect: ItemEffect) -> usize {
+        self.rows.iter().flatten().filter(|c| matches!(c, Cell::Item(e) if *e == effect)).count()
+    }
 
     /// `from_row`以降の未掘削マス(`Cell::Empty`以外の全セル)について、色・岩(X)・
     /// AIR・スター・ダイヤの内訳を指定の配分率(%、100=通常のまま)で丸ごと
@@ -456,7 +523,6 @@ impl Board {
     /// 拡張。ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」)。
     /// 0%なら深度に関わらず常に完全ランダム抽選(結合ゼロ)になる。
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
         from_row: usize,
@@ -475,6 +541,10 @@ impl Board {
         let seed: u64 = rand::rng().random();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let color_count = (color_count as usize).clamp(1, ColorKind::ALL.len());
+        // 盤面全体(from_rowより前の既存アイテムも含む)の既存個数を先に数えてから
+        // 上限を計算する(TERM独自拡張。ユーザー指摘: 「各種アイテムのキャラより上の
+        // 位置には最大それぞれ10個までとする」)。
+        let mut item_caps = ItemSpawnCaps::from_existing_counts(self);
 
         for row in from_row..self.rows.len() {
             let fraction = depth_fraction(row);
@@ -528,6 +598,7 @@ impl Board {
                     item_starify_screen_rate_percent,
                     rock_cluster_bonus,
                     allow_star,
+                    &mut item_caps,
                 );
             }
 
@@ -1303,6 +1374,69 @@ mod tests {
         assert_eq!(clear_above_count, 0, "ClearAbove配分率0%なら出現しないはず");
         assert!(unify_colors_count > 0, "UnifyColorsは100%のままなので出現し続けるはず");
         assert!(starify_screen_count > 0, "StarifyScreenは100%のままなので出現し続けるはず");
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_never_exceeds_the_per_item_type_cap_on_the_board() {
+        // ユーザー指摘: 「各種アイテムのキャラより上の位置には最大それぞれ10個までとする」。
+        // 出現率を極端に高くしても、盤面全体で種類ごとに上限個数を超えないことを確認する。
+        let mut board = empty_board(5000);
+        for row in 0..5000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 300, 300, 300, 4, 100, &GravityState::new());
+
+        for effect in [ItemEffect::ClearAbove, ItemEffect::UnifyColors, ItemEffect::StarifyScreen] {
+            let count = board.count_item(effect);
+            assert!(
+                count <= crate::constants::ITEM_MAX_COUNT_ON_BOARD,
+                "{effect:?}は上限{}個を超えてはいけないはず(実際={count})",
+                crate::constants::ITEM_MAX_COUNT_ON_BOARD
+            );
+        }
+    }
+
+    #[test]
+    fn board_generate_never_exceeds_the_per_item_type_cap() {
+        // 新規生成(`Board::generate`)でも同じ上限が効くことを確認する。
+        let board = Board::generate(1, 5000, FIELD_WIDTH);
+
+        for effect in [ItemEffect::ClearAbove, ItemEffect::UnifyColors, ItemEffect::StarifyScreen] {
+            let count = board.count_item(effect);
+            assert!(
+                count <= crate::constants::ITEM_MAX_COUNT_ON_BOARD,
+                "{effect:?}は上限{}個を超えてはいけないはず(実際={count})",
+                crate::constants::ITEM_MAX_COUNT_ON_BOARD
+            );
+        }
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_counts_pre_existing_items_toward_the_cap() {
+        // 既に盤面上にアイテムが置かれている場合、その個数も上限に含めて計算し、
+        // 残り枠ぶんしか新規出現させないことを確認する(#109調査で判明した「既存
+        // アイテムは再抽選対象外」との組み合わせ挙動)。
+        let mut board = empty_board(5000);
+        for row in 0..5000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+        let max = crate::constants::ITEM_MAX_COUNT_ON_BOARD;
+        for i in 0..max - 2 {
+            board.rows[0][i] = Cell::Item(ItemEffect::ClearAbove);
+        }
+
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 300, 0, 0, 4, 100, &GravityState::new());
+
+        let count = board.count_item(ItemEffect::ClearAbove);
+        assert!(
+            count <= max,
+            "既存分を含めても上限{max}個を超えてはいけないはず(実際={count})"
+        );
     }
 
     #[test]
