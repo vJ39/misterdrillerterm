@@ -402,6 +402,11 @@ impl Game {
             LateralOutcome::MovedLevelAndCollectedOxygen | LateralOutcome::ClimbedStepAndCollectedOxygen => {
                 vec![GameEvent::OxygenCollected]
             }
+            LateralOutcome::MovedLevelAndCollectedItem(effect) | LateralOutcome::ClimbedStepAndCollectedItem(effect) => {
+                let mut events = Vec::new();
+                self.apply_item_effect(effect, &mut events);
+                events
+            }
             _ => Vec::new(),
         }
     }
@@ -508,17 +513,22 @@ impl Game {
                 events.push(GameEvent::BlockDestroyed { blocks: 1 });
             }
             DrillOutcome::CrushedByUnstableOverhead => self.apply_miss(events),
-            DrillOutcome::ItemCollected(effect) => {
-                match effect {
-                    ItemEffect::ClearAbove => self.debug_clear_above_player(),
-                    ItemEffect::UnifyColors => {
-                        self.debug_unify_nearby_colors();
-                    }
-                }
-                events.push(GameEvent::DrillImpact);
-                events.push(GameEvent::ItemCollected(effect));
+            DrillOutcome::ItemUntouchedByDrill => {}
+        }
+    }
+
+    /// アイテムブロックの効果を実際に発動し、対応するイベントを追加する(TERM独自拡張。
+    /// AIRと同様「触れるだけで取得」のため、横移動・自由落下・重力ティックでの落下
+    /// 着地、いずれの取得経路からも共通で呼ばれる。ユーザー指摘: 「アイテムはAIRと
+    /// 同じ用に掘らなくても取得でき、上から振ってきても死なないように」)。
+    fn apply_item_effect(&mut self, effect: ItemEffect, events: &mut Vec<GameEvent>) {
+        match effect {
+            ItemEffect::ClearAbove => self.debug_clear_above_player(),
+            ItemEffect::UnifyColors => {
+                self.debug_unify_nearby_colors();
             }
         }
+        events.push(GameEvent::ItemCollected(effect));
     }
 
     /// 酸素が0になっていればミス処理(ライフ喪失/ゲームオーバー)を行う。
@@ -793,6 +803,9 @@ impl Game {
             if result.oxygen_collected > 0 {
                 events.push(GameEvent::OxygenCollected);
             }
+            for effect in result.items_collected {
+                self.apply_item_effect(effect, &mut events);
+            }
             if result.auto_vanished_blocks > 0 {
                 events.push(GameEvent::BlockDestroyed {
                     blocks: result.auto_vanished_blocks,
@@ -846,6 +859,9 @@ impl Game {
                 self.note_possible_move_with_duration(before_fall, self.player_fall_tick_ms as f32 / 1000.0);
                 if fall_outcome == FreeFallOutcome::FellAndCollectedOxygen {
                     events.push(GameEvent::OxygenCollected);
+                }
+                if let FreeFallOutcome::FellAndCollectedItem(effect) = fall_outcome {
+                    self.apply_item_effect(effect, &mut events);
                 }
                 if self.player.row != before_fall.0 {
                     self.check_level_and_clear(&mut events);
@@ -1286,49 +1302,66 @@ mod tests {
     }
 
     #[test]
-    fn drilling_a_clear_above_item_clears_blocks_above_the_player_and_emits_event() {
-        // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」。
+    fn drilling_an_item_does_nothing_like_air() {
+        // ユーザー指摘: 「アイテムはAIRと同じ用に掘らなくても取得でき」。AIR同様、
+        // 掘削では何も起きず、ブロックはそのまま残る。
         let mut game = Game::new(74);
         clear_board(&mut game);
         game.player.row = 500;
         game.player.col = 5;
         game.player.facing = Direction::Down;
         game.board.rows[501][5] = Cell::Item(ItemEffect::ClearAbove);
-        game.board.rows[200][4] = Cell::Color(ColorKind::Red);
 
         let events = game.try_drill();
 
-        assert!(matches!(game.board.cell(501, 5), Cell::Empty));
+        assert!(matches!(game.board.cell(501, 5), Cell::Item(ItemEffect::ClearAbove)), "掘削では取得されないはず");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn touching_a_clear_above_item_clears_blocks_above_the_player_and_emits_event() {
+        // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」「アイテムは
+        // AIRと同じ用に掘らなくても取得でき」。
+        let mut game = Game::new(74);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場(横移動には支持が必要)
+        game.board.rows[500][6] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[200][4] = Cell::Color(ColorKind::Red);
+
+        let events = game.try_move_right();
+
+        assert_eq!(game.player.col, 6, "AIRと同じく掘らずそのマスへ移動するはず");
+        assert!(matches!(game.board.cell(500, 6), Cell::Empty));
         assert!(
             matches!(game.board.cell(200, 4), Cell::Empty),
             "ショートカットRと同じく頭上のブロックが全クリアされるはず"
         );
-        assert!(events.iter().any(|e| matches!(e, GameEvent::DrillImpact)));
         assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::ClearAbove))));
     }
 
     #[test]
-    fn drilling_a_unify_colors_item_reduces_nearby_colors_to_two_and_emits_event() {
+    fn touching_a_unify_colors_item_reduces_nearby_colors_to_two_and_emits_event() {
         // ユーザー指摘: 「ショートカットC効果のアイテムも作って」。
         let mut game = Game::new(74);
         clear_board(&mut game);
         game.player.row = 500;
         game.player.col = 5;
-        game.player.facing = Direction::Down;
-        game.board.rows[501][5] = Cell::Item(ItemEffect::UnifyColors);
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][6] = Cell::Item(ItemEffect::UnifyColors);
         for (i, color) in [ColorKind::Red, ColorKind::Blue, ColorKind::Green, ColorKind::Yellow].into_iter().enumerate() {
-            game.board.rows[500][i] = Cell::Color(color);
+            game.board.rows[499][i] = Cell::Color(color);
         }
 
-        let events = game.try_drill();
+        let events = game.try_move_right();
 
         let mut distinct_colors: Vec<ColorKind> =
-            game.board.rows[500].iter().filter_map(|c| if let Cell::Color(k) = c { Some(*k) } else { None }).collect();
+            game.board.rows[499].iter().filter_map(|c| if let Cell::Color(k) = c { Some(*k) } else { None }).collect();
         distinct_colors.dedup();
         distinct_colors.sort_by_key(|k| ColorKind::ALL.iter().position(|c| c == k).unwrap());
         distinct_colors.dedup();
         assert!(distinct_colors.len() <= 2, "ショートカットCと同じく2色以内に統一されるはず: {distinct_colors:?}");
-        assert!(events.iter().any(|e| matches!(e, GameEvent::DrillImpact)));
         assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::UnifyColors))));
     }
 

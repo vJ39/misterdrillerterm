@@ -681,6 +681,11 @@ pub struct FallTickOutcome {
     /// 触れた場合も押し潰されず酸素回復扱いにする。ユーザー指摘「上から降ってきた
     /// AIRで回復してないバグ」の修正)。呼び出し側が酸素回復・スコア加算を行う。
     pub oxygen_collected: usize,
+    /// 落下してきたアイテムブロックがプレイヤー位置に重なり、取得された効果の一覧
+    /// (TERM独自拡張。ユーザー指摘: 「アイテムはAIRと同じ用に…上から振ってきても
+    /// 死なないように」)。AIRと同様、押し潰されず取得扱いになる。呼び出し側(Game)が
+    /// この効果を実際に発動する
+    pub items_collected: Vec<ItemEffect>,
     /// このティックで自動消滅(4連結以上の色ブロック・岩ブロック)により消えたセルの
     /// 座標(TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
     /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
@@ -933,6 +938,10 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
                     // 同様に押し潰し判定にせず取得(酸素回復)扱いにする(TERM独自拡張。
                     // ユーザー指摘「上から降ってきたAIRで回復してないバグ」の修正)。その場で消滅する。
                     outcome.oxygen_collected += 1;
+                } else if let Cell::Item(effect) = cell {
+                    // アイテムブロックもAIRと同じ扱いにする(TERM独自拡張。ユーザー指摘:
+                    // 「アイテムはAIRと同じ用に…上から振ってきても死なないように」)。
+                    outcome.items_collected.push(effect);
                 } else {
                     // 押し潰した側のセルは即座には消滅させず、プレイヤーの位置にそのまま
                     // 残す(TERM独自拡張。ユーザー指摘: 「潰れる直前で消えてしまう」
@@ -2255,6 +2264,22 @@ mod tests {
 
         assert!(!outcome.crushed, "酸素カプセルは押し潰し判定にならないはず");
         assert_eq!(board.cell(1, 0), Cell::Empty);
+    }
+
+    #[test]
+    fn falling_item_block_onto_player_does_not_crush_but_is_recorded_as_collected() {
+        // アイテムブロックもAIRと同じ扱いにする(TERM独自拡張。ユーザー指摘: 「アイテムは
+        // AIRと同じ用に…上から振ってきても死なないように」)。
+        let mut board = empty_board(2);
+        board.rows[0][0] = Cell::Item(ItemEffect::ClearAbove);
+        let mut gravity = GravityState::new();
+        let player_pos = (1, 0);
+
+        let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity);
+
+        assert!(!outcome.crushed, "アイテムブロックは押し潰し判定にならないはず");
+        assert_eq!(board.cell(1, 0), Cell::Empty);
+        assert_eq!(outcome.items_collected, vec![ItemEffect::ClearAbove]);
     }
 
     #[test]

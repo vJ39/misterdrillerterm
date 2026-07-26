@@ -39,9 +39,10 @@ pub enum DrillOutcome {
     /// スターブロックを掘削で破壊した(スコア+10はこの呼び出し内で適用済み、TERM独自
     /// 拡張)。放置しても画面内に入れば自然に溶けて消えるが、掘削でも即座に壊せる。
     StarDestroyed,
-    /// アイテムブロックを掘削で取得した(TERM独自拡張)。効果の発動自体はGame(呼び
-    /// 出し側)が行う。ここではブロックをEmptyにするだけ
-    ItemCollected(ItemEffect),
+    /// facing方向がアイテムブロックだったため、掘削としては何も起きなかった(TERM独自
+    /// 拡張。ユーザー指摘: 「アイテムはAIRと同じ用に掘らなくても取得でき」)。AIRと
+    /// 同様、掘る対象ではなく横移動・自由落下で「触れる」ことでのみ取得できる
+    ItemUntouchedByDrill,
 }
 
 /// 指定セルに対して掘削を1回実行し、盤面・プレイヤーのスコア/酸素へ反映する
@@ -74,11 +75,7 @@ fn drill_cell(board: &mut Board, player: &mut Player, target: (usize, usize)) ->
             player.award_drill_score(1);
             DrillOutcome::StarDestroyed
         }
-        Cell::Item(effect) => {
-            board.set(target.0, target.1, Cell::Empty);
-            player.award_drill_score(1);
-            DrillOutcome::ItemCollected(effect)
-        }
+        Cell::Item(_) => DrillOutcome::ItemUntouchedByDrill,
     }
 }
 
@@ -93,12 +90,20 @@ pub enum LateralOutcome {
     /// 隣接する同じ高さのマスが酸素カプセルだったため、掘削を伴わずそのマスへ移動しつつ
     /// 取得した(酸素+50・スコア加算はこの呼び出し内で適用済み。TERM独自拡張、下記参照)
     MovedLevelAndCollectedOxygen,
+    /// 隣接する同じ高さのマスがアイテムブロックだったため、掘削を伴わずそのマスへ
+    /// 移動しつつ取得した(AIRと同様「触れるだけで取得」。TERM独自拡張。ユーザー指摘:
+    /// 「アイテムはAIRと同じ用に掘らなくても取得でき」)。効果の発動自体はGame(呼び
+    /// 出し側)が行う
+    MovedLevelAndCollectedItem(ItemEffect),
     /// 直前に同じ方向へぶつかって停止していた状態で、再度同じ方向キーが入力され、
     /// かつその1段上(row-1)のマスがEmptyだったため、1段登って斜め上のマスへ移動した
     ClimbedStep,
     /// 上記と同様に1段登ったが、登った先(row-1)が酸素カプセルだったため取得も行った
     /// (TERM独自拡張、下記参照)
     ClimbedStepAndCollectedOxygen,
+    /// 上記と同様に1段登ったが、登った先(row-1)がアイテムブロックだったため取得も
+    /// 行った(TERM独自拡張)
+    ClimbedStepAndCollectedItem(ItemEffect),
     /// 隣接マスが塞がっていたため、その場に留まった(facingの変更のみ反映され、
     /// ブロックは一切破壊されない)。1段上が空いていても、まだ「同じ方向への
     /// 2回目の入力」でなければ登らない(下記move_lateralの2ステップ仕様を参照)
@@ -160,6 +165,12 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
             player.bumped_direction = None;
             return LateralOutcome::MovedLevelAndCollectedOxygen;
         }
+        Cell::Item(effect) => {
+            board.set(player.row, nc, Cell::Empty);
+            player.col = nc;
+            player.bumped_direction = None;
+            return LateralOutcome::MovedLevelAndCollectedItem(effect);
+        }
         _ => {}
     }
 
@@ -178,6 +189,13 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
                 player.col = nc;
                 player.bumped_direction = None;
                 return LateralOutcome::ClimbedStepAndCollectedOxygen;
+            }
+            Cell::Item(effect) => {
+                board.set(player.row - 1, nc, Cell::Empty);
+                player.row -= 1;
+                player.col = nc;
+                player.bumped_direction = None;
+                return LateralOutcome::ClimbedStepAndCollectedItem(effect);
             }
             _ => {}
         }
@@ -214,9 +232,11 @@ fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, u
         // 掘れはしないけどちゃんと取れてほしい。AIRに対しては掘っても無効化しておけば
         // いいだけ」)。不安定でも上向き掘削はdrill_cellのOxygenUntouchedByDrillへ
         // そのまま流れ、押し潰しにはならない。取得は歩み寄り・自由落下・重力ティックでの
-        // 自動取得を通じて行われる。
-        Cell::Oxygen => false,
-        Cell::Diamond | Cell::Star { .. } | Cell::Item(_) => {
+        // 自動取得を通じて行われる。アイテムブロックもAIRと同じ扱いにする(TERM独自
+        // 拡張。ユーザー指摘: 「アイテムはAIRと同じ用に…上から振ってきても死なない
+        // ように」)。
+        Cell::Oxygen | Cell::Item(_) => false,
+        Cell::Diamond | Cell::Star { .. } => {
             !is_supported(board, target, player_pos) && !gravity.is_shaking(target)
         }
     }
@@ -285,6 +305,10 @@ pub struct GravityTickResult {
     /// 落下してきた酸素カプセルがプレイヤーに触れて取得された回数(TERM独自拡張)。
     /// 呼び出し側(Game)がこの回数ぶん`Player::collect_oxygen_capsule`を呼ぶ。
     pub oxygen_collected: usize,
+    /// 落下してきたアイテムブロックがプレイヤーに触れて取得された効果の一覧
+    /// (TERM独自拡張。AIRと同様、押し潰されず取得扱いになる)。呼び出し側(Game)が
+    /// この効果を実際に発動する。
+    pub items_collected: Vec<ItemEffect>,
     /// このティックで自動消滅により消えたセルの座標(TERM独自拡張。ユーザー指摘:
     /// 「ブロックが消える瞬間に消える演出してほしい」)。呼び出し側が消滅フラッシュ
     /// 演出の対象として記録する。
@@ -321,6 +345,7 @@ pub fn process_gravity_tick(
         auto_vanished_rock_blocks: outcome.auto_vanished_rock_blocks,
         life_lost_to_crush: outcome.crushed && !invulnerable,
         oxygen_collected: outcome.oxygen_collected,
+        items_collected: outcome.items_collected,
         vanished_cells: outcome.vanished_cells,
     }
 }
@@ -337,6 +362,10 @@ pub enum FreeFallOutcome {
     /// 掘削しなくても自由落下だけでAIRの上に乗ればその場で取得される
     /// (ユーザー指摘反映: 「AIRがキャラの下にあるとき掘らないと行けないのはバグ」)。
     FellAndCollectedOxygen,
+    /// アイテムブロックのマスへ1マス落下すると同時に取得した(AIRと同様、TERM独自
+    /// 拡張。ユーザー指摘: 「アイテムはAIRと同じ用に掘らなくても取得でき」)。効果の
+    /// 発動自体はGame(呼び出し側)が行う。
+    FellAndCollectedItem(ItemEffect),
 }
 
 /// プレイヤー自身の自由落下(spec.md 1章・4章、TERM独自拡張)。
@@ -362,6 +391,11 @@ pub fn apply_player_free_fall(board: &mut Board, player: &mut Player) -> FreeFal
             player.row = below;
             player.collect_oxygen_capsule();
             FreeFallOutcome::FellAndCollectedOxygen
+        }
+        Cell::Item(effect) => {
+            board.set(below, player.col, Cell::Empty);
+            player.row = below;
+            FreeFallOutcome::FellAndCollectedItem(effect)
         }
         _ => FreeFallOutcome::DidNotFall,
     }
