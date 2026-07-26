@@ -47,6 +47,8 @@ pub enum ItemEffect {
     ClearAbove,
     /// ショートカットCと同じ: プレイヤー付近の色ブロックをランダムな2色に統一する
     UnifyColors,
+    /// ショートカットKと同じ: 画面内のXブロック・ダイヤブロックを100%スター化する
+    StarifyScreen,
 }
 
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
@@ -307,29 +309,40 @@ fn overlay_rock_oxygen_diamond_with_rates(
     };
     t.diamond = (t.diamond * diamond_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
 
+    // ルーレット式抽選(TERM独自拡張)。各候補の確率ぶんを順に積み上げ、rが最初に
+    // 収まった区間を採用する。アイテムブロック3種(#98/#101/#107)は岩/AIR/スター/
+    // ダイヤの配分率設定とは独立した、ごく低確率の固定値(現時点では設定画面の
+    // 調整対象外)。
     let r: f32 = rng.random_range(0.0..1.0);
-    if r < t.rock {
-        Cell::Rock { hits: 0 }
-    } else if r < t.rock + t.oxygen {
-        Cell::Oxygen
-    } else if r < t.rock + t.oxygen + t.diamond {
-        Cell::Diamond
-    } else if r < t.rock + t.oxygen + t.diamond + t.star {
-        Cell::Star { visible_ms: 0 }
-    } else if r < t.rock + t.oxygen + t.diamond + t.star + crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB {
-        Cell::Item(ItemEffect::ClearAbove)
-    } else if r
-        < t.rock
-            + t.oxygen
-            + t.diamond
-            + t.star
-            + crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB
-            + crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB
-    {
-        Cell::Item(ItemEffect::UnifyColors)
-    } else {
-        Cell::Color(base_color)
+    let mut threshold = t.rock;
+    if r < threshold {
+        return Cell::Rock { hits: 0 };
     }
+    threshold += t.oxygen;
+    if r < threshold {
+        return Cell::Oxygen;
+    }
+    threshold += t.diamond;
+    if r < threshold {
+        return Cell::Diamond;
+    }
+    threshold += t.star;
+    if r < threshold {
+        return Cell::Star { visible_ms: 0 };
+    }
+    threshold += crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB;
+    if r < threshold {
+        return Cell::Item(ItemEffect::ClearAbove);
+    }
+    threshold += crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB;
+    if r < threshold {
+        return Cell::Item(ItemEffect::UnifyColors);
+    }
+    threshold += crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB;
+    if r < threshold {
+        return Cell::Item(ItemEffect::StarifyScreen);
+    }
+    Cell::Color(base_color)
 }
 
 /// 行内の全マスが岩ブロックになっている場合、少なくとも1マスを色ブロックへ
@@ -1179,10 +1192,11 @@ mod tests {
     }
 
     #[test]
-    fn reroll_overlays_from_row_spawns_both_kinds_of_item_blocks() {
+    fn reroll_overlays_from_row_spawns_all_three_kinds_of_item_blocks() {
         // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」「ショートカット
-        // C効果のアイテムも作って」。出現率は岩/AIR/スター/ダイヤの配分率設定とは独立した
-        // ごく低確率の固定値のため、十分な行数で統計的に両方が出現することを確認する。
+        // C効果のアイテムも作って」「ショートカットKアイテムつくって」。出現率は岩/AIR/
+        // スター/ダイヤの配分率設定とは独立したごく低確率の固定値のため、十分な行数で
+        // 統計的に3種とも出現することを確認する。
         let mut board = empty_board(5000);
         for row in 0..5000 {
             for col in 0..FIELD_WIDTH {
@@ -1204,8 +1218,15 @@ mod tests {
             .flatten()
             .filter(|c| matches!(c, Cell::Item(ItemEffect::UnifyColors)))
             .count();
+        let starify_screen_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(ItemEffect::StarifyScreen)))
+            .count();
         assert!(clear_above_count > 0, "ClearAboveアイテムが1つも出現しないのは不自然");
         assert!(unify_colors_count > 0, "UnifyColorsアイテムが1つも出現しないのは不自然");
+        assert!(starify_screen_count > 0, "StarifyScreenアイテムが1つも出現しないのは不自然");
     }
 
     #[test]

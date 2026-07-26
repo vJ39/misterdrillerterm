@@ -96,6 +96,12 @@ pub const ITEM_CLEAR_ABOVE_FG: Color = Color::Rgb(255, 230, 245);
 pub const ITEM_UNIFY_COLORS_BG: Color = Color::Rgb(50, 160, 170);
 pub const ITEM_UNIFY_COLORS_FG: Color = Color::Rgb(230, 255, 250);
 
+/// アイテムブロック(StarifyScreen、ショートカットKと同じ効果)の背景・前景色
+/// (TERM独自拡張。ユーザー指摘: 「ショートカットKアイテムつくって」)。スターブロック
+/// (`STAR_FG`)を思わせる金色系にする。
+pub const ITEM_STARIFY_SCREEN_BG: Color = Color::Rgb(80, 70, 130);
+pub const ITEM_STARIFY_SCREEN_FG: Color = Color::Rgb(255, 215, 120);
+
 /// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
 /// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、
 /// その後`melt_duration_ms`かけて進行度が1.0(消滅)まで進む。

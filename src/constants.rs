@@ -195,6 +195,9 @@ pub const STAR_VISIBLE_RANGE_ROWS: usize = 14;
 /// 固定値とし、現時点では設定画面での調整対象にしない(要望があれば追加する)。
 pub const ITEM_CLEAR_ABOVE_SPAWN_PROB: f32 = 0.003;
 pub const ITEM_UNIFY_COLORS_SPAWN_PROB: f32 = 0.003;
+/// ショートカットKと同じ効果(画面内X/ダイヤ100%スター化)を持つアイテムの出現率
+/// (TERM独自拡張。ユーザー指摘: 「ショートカットKアイテムつくって」)。
+pub const ITEM_STARIFY_SCREEN_SPAWN_PROB: f32 = 0.003;
 
 /// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま。
 /// TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる

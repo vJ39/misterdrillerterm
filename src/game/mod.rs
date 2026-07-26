@@ -527,6 +527,7 @@ impl Game {
             ItemEffect::UnifyColors => {
                 self.debug_unify_nearby_colors();
             }
+            ItemEffect::StarifyScreen => self.debug_starify_visible_screen(),
         }
         events.push(GameEvent::ItemCollected(effect));
     }
@@ -1372,6 +1373,25 @@ mod tests {
         distinct_colors.dedup();
         assert!(distinct_colors.len() <= 2, "ショートカットCと同じく2色以内に統一されるはず: {distinct_colors:?}");
         assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::UnifyColors))));
+    }
+
+    #[test]
+    fn touching_a_starify_screen_item_converts_visible_rock_and_diamond_to_stars_and_emits_event() {
+        // ユーザー指摘: 「ショートカットKアイテムつくって」。
+        let mut game = Game::new(74);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][6] = Cell::Item(ItemEffect::StarifyScreen);
+        game.board.rows[495][3] = Cell::Rock { hits: 1 };
+        game.board.rows[498][4] = Cell::Diamond;
+
+        let events = game.try_move_right();
+
+        assert!(matches!(game.board.cell(495, 3), Cell::Star { .. }));
+        assert!(matches!(game.board.cell(498, 4), Cell::Star { .. }));
+        assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::StarifyScreen))));
     }
 
     #[test]

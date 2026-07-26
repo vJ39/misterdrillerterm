@@ -787,6 +787,10 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
         BoardCell::Item(ItemEffect::UnifyColors) => {
             draw_fixed_unit(buf, x, y, [['◐', '◑'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG)
         }
+        // StarifyScreenはスターブロックを連想させる☆をあしらう。
+        BoardCell::Item(ItemEffect::StarifyScreen) => {
+            draw_fixed_unit(buf, x, y, [['☆', '☆'], ['K', 'K']], colors::ITEM_STARIFY_SCREEN_FG, colors::ITEM_STARIFY_SCREEN_BG)
+        }
     }
 }
 
@@ -949,6 +953,7 @@ fn natural_cell_bg(cell: BoardCell) -> Color {
         BoardCell::Star { visible_ms } => colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         BoardCell::Item(ItemEffect::ClearAbove) => colors::ITEM_CLEAR_ABOVE_BG,
         BoardCell::Item(ItemEffect::UnifyColors) => colors::ITEM_UNIFY_COLORS_BG,
+        BoardCell::Item(ItemEffect::StarifyScreen) => colors::ITEM_STARIFY_SCREEN_BG,
     }
 }
 
