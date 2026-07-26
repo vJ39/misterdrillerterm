@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::constants::{
-    COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT,
-    SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
+    COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT,
+    MOVE_COOLDOWN_MS_DEFAULT, SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
 };
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
@@ -114,11 +114,15 @@ impl Settings {
             return default;
         };
         Settings {
-            music_enabled: parse_bool_field(&text, "music_enabled").unwrap_or(default.music_enabled),
+            music_enabled: parse_bool_field(&text, "music_enabled")
+                .unwrap_or(default.music_enabled),
             se_enabled: parse_bool_field(&text, "se_enabled").unwrap_or(default.se_enabled),
-            block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms").unwrap_or(default.block_fall_tick_ms),
-            player_fall_tick_ms: parse_u64_field(&text, "player_fall_tick_ms").unwrap_or(default.player_fall_tick_ms),
-            shake_duration_ms: parse_u64_field(&text, "shake_duration_ms").unwrap_or(default.shake_duration_ms),
+            block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms")
+                .unwrap_or(default.block_fall_tick_ms),
+            player_fall_tick_ms: parse_u64_field(&text, "player_fall_tick_ms")
+                .unwrap_or(default.player_fall_tick_ms),
+            shake_duration_ms: parse_u64_field(&text, "shake_duration_ms")
+                .unwrap_or(default.shake_duration_ms),
             rock_spawn_rate_percent: parse_u64_field(&text, "rock_spawn_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.rock_spawn_rate_percent),
@@ -134,20 +138,28 @@ impl Settings {
             item_clear_above_rate_percent: parse_u64_field(&text, "item_clear_above_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.item_clear_above_rate_percent),
-            item_unify_colors_rate_percent: parse_u64_field(&text, "item_unify_colors_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.item_unify_colors_rate_percent),
-            item_starify_screen_rate_percent: parse_u64_field(&text, "item_starify_screen_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.item_starify_screen_rate_percent),
+            item_unify_colors_rate_percent: parse_u64_field(
+                &text,
+                "item_unify_colors_rate_percent",
+            )
+            .map(|v| v as u32)
+            .unwrap_or(default.item_unify_colors_rate_percent),
+            item_starify_screen_rate_percent: parse_u64_field(
+                &text,
+                "item_starify_screen_rate_percent",
+            )
+            .map(|v| v as u32)
+            .unwrap_or(default.item_starify_screen_rate_percent),
             color_count: parse_u64_field(&text, "color_count")
                 .map(|v| v as u8)
                 .unwrap_or(default.color_count),
             color_cluster_rate_percent: parse_u64_field(&text, "color_cluster_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.color_cluster_rate_percent),
-            dodge_recovery_ms: parse_u64_field(&text, "dodge_recovery_ms").unwrap_or(default.dodge_recovery_ms),
-            move_cooldown_ms: parse_u64_field(&text, "move_cooldown_ms").unwrap_or(default.move_cooldown_ms),
+            dodge_recovery_ms: parse_u64_field(&text, "dodge_recovery_ms")
+                .unwrap_or(default.dodge_recovery_ms),
+            move_cooldown_ms: parse_u64_field(&text, "move_cooldown_ms")
+                .unwrap_or(default.move_cooldown_ms),
             field_width: parse_u64_field(&text, "field_width")
                 .map(|v| v as usize)
                 .unwrap_or(default.field_width),
@@ -213,7 +225,9 @@ fn parse_bool_field(text: &str, key: &str) -> Option<bool> {
 /// 手書きの最小限JSONパーサ: `"key": 123`の形の非負整数フィールドを1つ読む。
 fn parse_u64_field(text: &str, key: &str) -> Option<u64> {
     let after_colon = value_after_key(text, key)?;
-    let digits_end = after_colon.find(|c: char| !c.is_ascii_digit()).unwrap_or(after_colon.len());
+    let digits_end = after_colon
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after_colon.len());
     after_colon[..digits_end].parse().ok()
 }
 
@@ -240,12 +254,27 @@ mod tests {
         assert_eq!(settings.rock_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.air_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.star_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
-        assert_eq!(settings.diamond_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
-        assert_eq!(settings.item_clear_above_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
-        assert_eq!(settings.item_unify_colors_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
-        assert_eq!(settings.item_starify_screen_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(
+            settings.diamond_spawn_rate_percent,
+            SPAWN_RATE_PERCENT_DEFAULT
+        );
+        assert_eq!(
+            settings.item_clear_above_rate_percent,
+            SPAWN_RATE_PERCENT_DEFAULT
+        );
+        assert_eq!(
+            settings.item_unify_colors_rate_percent,
+            SPAWN_RATE_PERCENT_DEFAULT
+        );
+        assert_eq!(
+            settings.item_starify_screen_rate_percent,
+            SPAWN_RATE_PERCENT_DEFAULT
+        );
         assert_eq!(settings.color_count, COLOR_COUNT_DEFAULT);
-        assert_eq!(settings.color_cluster_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(
+            settings.color_cluster_rate_percent,
+            SPAWN_RATE_PERCENT_DEFAULT
+        );
         assert_eq!(settings.dodge_recovery_ms, DODGE_RECOVERY_MS_DEFAULT);
         assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_DEFAULT);
         assert_eq!(settings.field_width, FIELD_WIDTH_DEFAULT);
@@ -253,7 +282,10 @@ mod tests {
 
     #[test]
     fn parse_bool_field_reads_true() {
-        assert_eq!(parse_bool_field("{\"music_enabled\": true}", "music_enabled"), Some(true));
+        assert_eq!(
+            parse_bool_field("{\"music_enabled\": true}", "music_enabled"),
+            Some(true)
+        );
     }
 
     #[test]
@@ -272,7 +304,10 @@ mod tests {
 
     #[test]
     fn parse_u64_field_reads_value() {
-        assert_eq!(parse_u64_field("{\"block_fall_tick_ms\": 275}", "block_fall_tick_ms"), Some(275));
+        assert_eq!(
+            parse_u64_field("{\"block_fall_tick_ms\": 275}", "block_fall_tick_ms"),
+            Some(275)
+        );
     }
 
     #[test]
@@ -285,7 +320,10 @@ mod tests {
     /// ユニークな名前を渡し、並行実行される他テストのファイルと衝突しないようにする。
     fn temp_settings_path(tag: &str) -> PathBuf {
         std::env::temp_dir()
-            .join(format!("misterdrillerterm-settings-test-{tag}-{}", std::process::id()))
+            .join(format!(
+                "misterdrillerterm-settings-test-{tag}-{}",
+                std::process::id()
+            ))
             .join(SETTINGS_FILE_NAME)
     }
 
@@ -379,7 +417,11 @@ mod tests {
         let path = temp_settings_path("partial");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, "{\"music_enabled\": maybe, \"block_fall_tick_ms\": 300}").unwrap();
+        std::fs::write(
+            &path,
+            "{\"music_enabled\": maybe, \"block_fall_tick_ms\": 300}",
+        )
+        .unwrap();
 
         let loaded = Settings::load_from(&path);
 

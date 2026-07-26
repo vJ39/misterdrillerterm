@@ -20,7 +20,9 @@ pub const SE_VOLUME: f32 = 0.7;
 /// 指定サンプルレート・長さ(ms)から、総サンプル数とフェードサンプル数を求める。
 fn sample_counts(sample_rate: u32, duration_ms: u64) -> (u64, u64) {
     let total = (sample_rate as u64 * duration_ms / 1000).max(1);
-    let fade = (sample_rate as u64 * FADE_MS / 1000).clamp(1, total / 2 + 1).min(total);
+    let fade = (sample_rate as u64 * FADE_MS / 1000)
+        .clamp(1, total / 2 + 1)
+        .min(total);
     (total, fade)
 }
 
@@ -103,7 +105,8 @@ impl Oscillator {
     }
 
     fn envelope(&self) -> f32 {
-        self.attack_decay_level() * tail_envelope(self.sample_index, self.total_samples, self.fade_samples)
+        self.attack_decay_level()
+            * tail_envelope(self.sample_index, self.total_samples, self.fade_samples)
     }
 
     fn advance(&mut self) {
@@ -162,7 +165,13 @@ impl SquareWave {
     ) -> Self {
         SquareWave {
             freq,
-            osc: Oscillator::new_with_envelope(duration_ms, amplitude, attack_ms, decay_ms, sustain_level),
+            osc: Oscillator::new_with_envelope(
+                duration_ms,
+                amplitude,
+                attack_ms,
+                decay_ms,
+                sustain_level,
+            ),
         }
     }
 }
@@ -176,7 +185,11 @@ impl Iterator for SquareWave {
         }
         let t = self.osc.sample_index as f32 / self.osc.sample_rate as f32;
         let phase = (t * self.freq).fract();
-        let raw = if phase < 0.5 { self.osc.amplitude } else { -self.osc.amplitude };
+        let raw = if phase < 0.5 {
+            self.osc.amplitude
+        } else {
+            -self.osc.amplitude
+        };
         let value = raw * self.osc.envelope();
         self.osc.advance();
         Some(value)
@@ -215,7 +228,11 @@ impl Iterator for SquareChirp {
         let progress = self.osc.sample_index as f32 / self.osc.total_samples as f32;
         let freq = self.freq_start + (self.freq_end - self.freq_start) * progress;
         self.phase = (self.phase + freq / self.osc.sample_rate as f32).fract();
-        let raw = if self.phase < 0.5 { self.osc.amplitude } else { -self.osc.amplitude };
+        let raw = if self.phase < 0.5 {
+            self.osc.amplitude
+        } else {
+            -self.osc.amplitude
+        };
         let value = raw * self.osc.envelope();
         self.osc.advance();
         Some(value)
@@ -283,7 +300,13 @@ impl TriangleWave {
     ) -> Self {
         TriangleWave {
             freq,
-            osc: Oscillator::new_with_envelope(duration_ms, amplitude, attack_ms, decay_ms, sustain_level),
+            osc: Oscillator::new_with_envelope(
+                duration_ms,
+                amplitude,
+                attack_ms,
+                decay_ms,
+                sustain_level,
+            ),
         }
     }
 }
@@ -298,7 +321,11 @@ impl Iterator for TriangleWave {
         let t = self.osc.sample_index as f32 / self.osc.sample_rate as f32;
         let phase = (t * self.freq).fract();
         // 標準的な三角波: 0→1で-1→1へ線形上昇、1→0.5→1(次周期)で1→-1へ線形下降。
-        let raw = if phase < 0.5 { -1.0 + 4.0 * phase } else { 3.0 - 4.0 * phase };
+        let raw = if phase < 0.5 {
+            -1.0 + 4.0 * phase
+        } else {
+            3.0 - 4.0 * phase
+        };
         let value = raw * self.osc.amplitude * self.osc.envelope();
         self.osc.advance();
         Some(value)
@@ -325,7 +352,13 @@ impl SineChord {
     ) -> Self {
         SineChord {
             freqs,
-            osc: Oscillator::new_with_envelope(duration_ms, amplitude, attack_ms, decay_ms, sustain_level),
+            osc: Oscillator::new_with_envelope(
+                duration_ms,
+                amplitude,
+                attack_ms,
+                decay_ms,
+                sustain_level,
+            ),
         }
     }
 }
@@ -367,7 +400,14 @@ pub fn square_tone_enveloped(
     decay_ms: u64,
     sustain_level: f32,
 ) -> SquareWave {
-    SquareWave::with_envelope(freq, duration_ms, amplitude, attack_ms, decay_ms, sustain_level)
+    SquareWave::with_envelope(
+        freq,
+        duration_ms,
+        amplitude,
+        attack_ms,
+        decay_ms,
+        sustain_level,
+    )
 }
 
 /// アタック・ディケイ付きの三角波を作る(BGMのベースライン用)。
@@ -379,7 +419,14 @@ pub fn triangle_tone_enveloped(
     decay_ms: u64,
     sustain_level: f32,
 ) -> TriangleWave {
-    TriangleWave::with_envelope(freq, duration_ms, amplitude, attack_ms, decay_ms, sustain_level)
+    TriangleWave::with_envelope(
+        freq,
+        duration_ms,
+        amplitude,
+        attack_ms,
+        decay_ms,
+        sustain_level,
+    )
 }
 
 /// アタック・ディケイ付きのサイン波和音を作る(BGMのハーモニー/パッド用)。
@@ -391,11 +438,23 @@ pub fn sine_chord(
     decay_ms: u64,
     sustain_level: f32,
 ) -> SineChord {
-    SineChord::with_envelope(freqs.to_vec(), duration_ms, amplitude, attack_ms, decay_ms, sustain_level)
+    SineChord::with_envelope(
+        freqs.to_vec(),
+        duration_ms,
+        amplitude,
+        attack_ms,
+        decay_ms,
+        sustain_level,
+    )
 }
 
 /// 周波数が線形に変化する矩形波(チャープ)を作る。
-pub fn square_chirp(freq_start: f32, freq_end: f32, duration_ms: u64, amplitude: f32) -> SquareChirp {
+pub fn square_chirp(
+    freq_start: f32,
+    freq_end: f32,
+    duration_ms: u64,
+    amplitude: f32,
+) -> SquareChirp {
     SquareChirp::new(freq_start, freq_end, duration_ms, amplitude)
 }
 
@@ -453,7 +512,8 @@ pub fn play_destroy(mixer: &Mixer, blocks: usize) {
     let tones: Vec<Box<dyn Source<Item = f32> + Send>> = (0..chirp_count)
         .map(|i| {
             let start = 220.0 - i as f32 * 30.0;
-            Box::new(square_chirp(start, start * 0.5, 45, 0.5)) as Box<dyn Source<Item = f32> + Send>
+            Box::new(square_chirp(start, start * 0.5, 45, 0.5))
+                as Box<dyn Source<Item = f32> + Send>
         })
         .collect();
     play_sequence(mixer, tones, SE_VOLUME);

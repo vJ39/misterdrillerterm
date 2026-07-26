@@ -11,17 +11,18 @@ pub mod player;
 use std::time::Duration;
 
 use crate::constants::{
-    depth_fraction, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
-    DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
-    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
-    BLOCK_VANISH_FLASH_MS, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
-    FALL_SPEED_DEPTH_MAX_SPEEDUP,
-    FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS,
-    INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX,
-    MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
+    BLOCK_VANISH_FLASH_MS, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
+    DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
+    DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
+    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
+    FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
+    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
+    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
+    MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
+    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS, depth_fraction,
 };
-use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect};
+use board::{BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, tick_star_melting};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
@@ -414,10 +415,12 @@ impl Game {
         self.note_possible_move(before);
 
         match outcome {
-            LateralOutcome::MovedLevelAndCollectedOxygen | LateralOutcome::ClimbedStepAndCollectedOxygen => {
+            LateralOutcome::MovedLevelAndCollectedOxygen
+            | LateralOutcome::ClimbedStepAndCollectedOxygen => {
                 vec![GameEvent::OxygenCollected]
             }
-            LateralOutcome::MovedLevelAndCollectedItem(effect) | LateralOutcome::ClimbedStepAndCollectedItem(effect) => {
+            LateralOutcome::MovedLevelAndCollectedItem(effect)
+            | LateralOutcome::ClimbedStepAndCollectedItem(effect) => {
                 let mut events = Vec::new();
                 self.apply_item_effect(effect, &mut events);
                 events
@@ -606,9 +609,13 @@ impl Game {
             // 押し潰したブロック自体は演出中ずっと見えるようにその場に残していた
             // (ユーザー指摘: 「潰れる直前で消えてしまう」「潰した様子が認識できる
             // ように」)。復活するのでここで消す。
-            self.board.set(self.player.row, self.player.col, Cell::Empty);
+            self.board
+                .set(self.player.row, self.player.col, Cell::Empty);
             let game_over = self.player.lose_life();
-            debug_assert!(!game_over, "ライフ0のケースはapply_missで即座に処理済みのはず");
+            debug_assert!(
+                !game_over,
+                "ライフ0のケースはapply_missで即座に処理済みのはず"
+            );
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
             // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に
             // 発火済みのため、ここでは重複して発火しない。復活した瞬間のSEは
@@ -709,7 +716,8 @@ impl Game {
         for (_, remaining) in self.recently_vanished.iter_mut() {
             *remaining = remaining.saturating_sub(delta);
         }
-        self.recently_vanished.retain(|&(_, remaining)| remaining > Duration::ZERO);
+        self.recently_vanished
+            .retain(|&(_, remaining)| remaining > Duration::ZERO);
 
         if self.status != GameStatus::Playing {
             return events;
@@ -752,7 +760,8 @@ impl Game {
             // 移動クールダウンは設定で変えられるため、上限も現在の値の1.5倍で都度計算する
             // (TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
             // 掘削クールダウンは引き続き固定値なので、既存の定数上限のままでよい。
-            let move_accum_cap = Duration::from_millis(self.move_cooldown_ms + self.move_cooldown_ms / 2);
+            let move_accum_cap =
+                Duration::from_millis(self.move_cooldown_ms + self.move_cooldown_ms / 2);
             let drill_accum_cap = Duration::from_millis(INPUT_COOLDOWN_ACCUM_CAP_MS);
             self.move_cooldown_accum = (self.move_cooldown_accum + delta).min(move_accum_cap);
             self.drill_cooldown_accum = (self.drill_cooldown_accum + delta).min(drill_accum_cap);
@@ -762,9 +771,12 @@ impl Game {
             // 「進むにつれてAIRの減る速度が早い」)。経過時間そのものを実効倍率ぶん
             // 引き伸ばすことで、`OXYGEN_DECAY_PER_SEC`(秒あたりの基準減少量)は変えずに
             // 実質的な減少速度だけを深度に応じて上げる。
-            let oxygen_decay_multiplier =
-                1.0 + depth_fraction(self.player.depth_m()) * (OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER - 1.0);
-            physics::apply_oxygen_decay(&mut self.player, delta.as_secs_f32() * oxygen_decay_multiplier);
+            let oxygen_decay_multiplier = 1.0
+                + depth_fraction(self.player.depth_m()) * (OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER - 1.0);
+            physics::apply_oxygen_decay(
+                &mut self.player,
+                delta.as_secs_f32() * oxygen_decay_multiplier,
+            );
 
             if self.player.oxygen > 0.0 && self.player.oxygen <= OXYGEN_WARNING_THRESHOLD {
                 self.oxygen_warning_accum += delta;
@@ -799,7 +811,8 @@ impl Game {
             // その間に別の塊が同じ地点へ落ちてきても二重にライフを失わないよう、
             // 演出中は無敵として扱う(既存の`invulnerability_ticks_remaining`と同じ仕組み)。
             let invulnerable = self.invulnerability_ticks_remaining > 0 || self.is_dying();
-            let shake_ticks = (self.shake_duration_ms / effective_tick_ms.max(1)).min(u8::MAX as u64) as u8;
+            let shake_ticks =
+                (self.shake_duration_ms / effective_tick_ms.max(1)).min(u8::MAX as u64) as u8;
             let result = physics::process_gravity_tick(
                 &mut self.board,
                 &mut self.player,
@@ -826,7 +839,10 @@ impl Game {
                 && !self.is_dying()
                 && self.dodge_stage == DodgeStage::None
                 && let Some(watch_cell) = self.dodge_watch_cell
-                && result.moved_cells.iter().any(|&(to, _)| to == watch_cell && to != self.player.position())
+                && result
+                    .moved_cells
+                    .iter()
+                    .any(|&(to, _)| to == watch_cell && to != self.player.position())
             {
                 self.dodge_stage = DodgeStage::Sliding;
                 self.dodge_stage_remaining = Duration::from_millis(DODGE_SLIDE_MS);
@@ -879,7 +895,9 @@ impl Game {
         // 常に一定の猶予時間になる。
         let melted = tick_star_melting(&mut self.board, self.player.row, delta.as_millis() as u32);
         if !melted.is_empty() {
-            events.push(GameEvent::BlockDestroyed { blocks: melted.len() });
+            events.push(GameEvent::BlockDestroyed {
+                blocks: melted.len(),
+            });
             self.note_vanished_cells(melted);
         }
 
@@ -897,8 +915,12 @@ impl Game {
                 self.player_fall_tick_accum -= player_tick;
 
                 let before_fall = self.player.position();
-                let fall_outcome = physics::apply_player_free_fall(&mut self.board, &mut self.player);
-                self.note_possible_move_with_duration(before_fall, self.player_fall_tick_ms as f32 / 1000.0);
+                let fall_outcome =
+                    physics::apply_player_free_fall(&mut self.board, &mut self.player);
+                self.note_possible_move_with_duration(
+                    before_fall,
+                    self.player_fall_tick_ms as f32 / 1000.0,
+                );
                 if fall_outcome == FreeFallOutcome::FellAndCollectedOxygen {
                     events.push(GameEvent::OxygenCollected);
                 }
@@ -927,7 +949,10 @@ impl Game {
         if below >= self.board.depth_rows() {
             return true;
         }
-        !matches!(self.board.cell(below, self.player.col), Cell::Empty | Cell::Oxygen)
+        !matches!(
+            self.board.cell(below, self.player.col),
+            Cell::Empty | Cell::Oxygen
+        )
     }
 
     /// プレイヤーの位置が`before`から変化していれば、移動の見た目補間アニメーションを
@@ -1025,19 +1050,26 @@ impl Game {
                     continue;
                 }
                 let neighbor = (nr as usize, nc as usize);
-                if let Some(entry) = self.recently_vanished.iter_mut().find(|(p, _)| *p == neighbor) {
+                if let Some(entry) = self
+                    .recently_vanished
+                    .iter_mut()
+                    .find(|(p, _)| *p == neighbor)
+                {
                     entry.1 = flash;
                 }
             }
         }
 
-        self.recently_vanished.extend(new_cells.into_iter().map(|(pos, _)| (pos, flash)));
+        self.recently_vanished
+            .extend(new_cells.into_iter().map(|(pos, _)| (pos, flash)));
     }
 
     /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=消滅直後、1.0=演出完了
     /// 直前。TERM独自拡張)。対象でなければ`None`を返す。
     pub fn vanish_flash_progress(&self, pos: board::Pos) -> Option<f32> {
-        let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS).as_secs_f32().max(0.001);
+        let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS)
+            .as_secs_f32()
+            .max(0.001);
         self.recently_vanished
             .iter()
             .find(|&&(p, _)| p == pos)
@@ -1085,7 +1117,8 @@ impl Game {
         if self.drill_flash_remaining <= Duration::ZERO {
             return None;
         }
-        let elapsed_ms = DRILL_ANIM_MS.saturating_sub(self.drill_flash_remaining.as_millis() as u64);
+        let elapsed_ms =
+            DRILL_ANIM_MS.saturating_sub(self.drill_flash_remaining.as_millis() as u64);
         Some((elapsed_ms / DRILL_ANIM_FRAME_MS.max(1)).is_multiple_of(2))
     }
 
@@ -1230,7 +1263,8 @@ impl Game {
         self.shake_duration_ms = if longer {
             (self.shake_duration_ms + DEBUG_SHAKE_DURATION_STEP_MS).min(DEBUG_SHAKE_DURATION_MS_MAX)
         } else {
-            self.shake_duration_ms.saturating_sub(DEBUG_SHAKE_DURATION_STEP_MS)
+            self.shake_duration_ms
+                .saturating_sub(DEBUG_SHAKE_DURATION_STEP_MS)
         };
     }
 
@@ -1299,10 +1333,15 @@ impl Game {
         let all = ColorKind::ALL;
         let first = all[rng.random_range(0..all.len())];
         let second_offset = 1 + rng.random_range(0..all.len() - 1);
-        let second = all[(all.iter().position(|&c| c == first).unwrap() + second_offset) % all.len()];
+        let second =
+            all[(all.iter().position(|&c| c == first).unwrap() + second_offset) % all.len()];
 
-        let start_row = self.player.row.saturating_sub(DEBUG_UNIFY_COLORS_RANGE_ROWS);
-        let end_row = (self.player.row + DEBUG_UNIFY_COLORS_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
+        let start_row = self
+            .player
+            .row
+            .saturating_sub(DEBUG_UNIFY_COLORS_RANGE_ROWS);
+        let end_row = (self.player.row + DEBUG_UNIFY_COLORS_RANGE_ROWS)
+            .min(self.board.depth_rows().saturating_sub(1));
         for row in start_row..=end_row {
             for col in 0..self.board.width() {
                 if matches!(self.board.cell(row, col), Cell::Color(_)) {
@@ -1325,7 +1364,8 @@ impl Game {
         // 消滅させなくていい」というユーザー指摘により廃止した。連結の再計算(揺れ状態の
         // リセット)だけ行い、実際の消滅判定は通常の重力ティック(支えを失って落下・
         // 着地した場合のみ)に委ねる。
-        let current_shake_ticks = (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
+        let current_shake_ticks =
+            (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
         self.gravity_state.reset_shake_progress(current_shake_ticks);
 
         Vec::new()
@@ -1343,9 +1383,12 @@ impl Game {
         if self.status != GameStatus::Playing {
             return;
         }
-        let start_row = self.player.row.saturating_sub(crate::constants::STAR_VISIBLE_RANGE_ROWS);
-        let end_row =
-            (self.player.row + crate::constants::STAR_VISIBLE_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
+        let start_row = self
+            .player
+            .row
+            .saturating_sub(crate::constants::STAR_VISIBLE_RANGE_ROWS);
+        let end_row = (self.player.row + crate::constants::STAR_VISIBLE_RANGE_ROWS)
+            .min(self.board.depth_rows().saturating_sub(1));
         for row in start_row..=end_row {
             for col in 0..self.board.width() {
                 if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond)
@@ -1362,7 +1405,8 @@ impl Game {
 /// (`faster`がtrueならtick間隔を短く=速く、falseなら長く=遅くする)。
 fn adjust_fall_tick_ms(ms: u64, faster: bool) -> u64 {
     if faster {
-        ms.saturating_sub(DEBUG_FALL_TICK_STEP_MS).max(DEBUG_FALL_TICK_MS_MIN)
+        ms.saturating_sub(DEBUG_FALL_TICK_STEP_MS)
+            .max(DEBUG_FALL_TICK_MS_MIN)
     } else {
         (ms + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
     }
@@ -1376,9 +1420,9 @@ fn move_anim_duration_secs() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use board::{Cell, ColorKind};
     use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
     use crate::constants::{ROCK_HITS_TO_BREAK, SHAKE_TICKS};
+    use board::{Cell, ColorKind};
 
     /// テスト用ヘルパー: 盤面全体を`Cell::Empty`にクリアする。`Game::new`はランダム
     /// 生成された盤面を持つため、テストが制御していない場所(意図した数行の外側)にも
@@ -1421,7 +1465,10 @@ mod tests {
 
         let events = game.try_drill();
 
-        assert!(matches!(game.board.cell(501, 5), Cell::Item(ItemEffect::ClearAbove)), "掘削では取得されないはず");
+        assert!(
+            matches!(game.board.cell(501, 5), Cell::Item(ItemEffect::ClearAbove)),
+            "掘削では取得されないはず"
+        );
         assert!(events.is_empty());
     }
 
@@ -1439,13 +1486,20 @@ mod tests {
 
         let events = game.try_move_right();
 
-        assert_eq!(game.player.col, 6, "AIRと同じく掘らずそのマスへ移動するはず");
+        assert_eq!(
+            game.player.col, 6,
+            "AIRと同じく掘らずそのマスへ移動するはず"
+        );
         assert!(matches!(game.board.cell(500, 6), Cell::Empty));
         assert!(
             matches!(game.board.cell(200, 4), Cell::Empty),
             "ショートカットRと同じく頭上のブロックが全クリアされるはず"
         );
-        assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::ClearAbove))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::ClearAbove)))
+        );
     }
 
     #[test]
@@ -1457,19 +1511,42 @@ mod tests {
         game.player.col = 5;
         game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
         game.board.rows[500][6] = Cell::Item(ItemEffect::UnifyColors);
-        for (i, color) in [ColorKind::Red, ColorKind::Blue, ColorKind::Green, ColorKind::Yellow].into_iter().enumerate() {
+        for (i, color) in [
+            ColorKind::Red,
+            ColorKind::Blue,
+            ColorKind::Green,
+            ColorKind::Yellow,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             game.board.rows[499][i] = Cell::Color(color);
         }
 
         let events = game.try_move_right();
 
-        let mut distinct_colors: Vec<ColorKind> =
-            game.board.rows[499].iter().filter_map(|c| if let Cell::Color(k) = c { Some(*k) } else { None }).collect();
+        let mut distinct_colors: Vec<ColorKind> = game.board.rows[499]
+            .iter()
+            .filter_map(|c| {
+                if let Cell::Color(k) = c {
+                    Some(*k)
+                } else {
+                    None
+                }
+            })
+            .collect();
         distinct_colors.dedup();
         distinct_colors.sort_by_key(|k| ColorKind::ALL.iter().position(|c| c == k).unwrap());
         distinct_colors.dedup();
-        assert!(distinct_colors.len() <= 2, "ショートカットCと同じく2色以内に統一されるはず: {distinct_colors:?}");
-        assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::UnifyColors))));
+        assert!(
+            distinct_colors.len() <= 2,
+            "ショートカットCと同じく2色以内に統一されるはず: {distinct_colors:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::UnifyColors)))
+        );
     }
 
     #[test]
@@ -1488,7 +1565,11 @@ mod tests {
 
         assert!(matches!(game.board.cell(495, 3), Cell::Star { .. }));
         assert!(matches!(game.board.cell(498, 4), Cell::Star { .. }));
-        assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::StarifyScreen))));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::StarifyScreen)))
+        );
     }
 
     #[test]
@@ -1512,10 +1593,25 @@ mod tests {
             elapsed_ms += FRAME_MS;
         }
 
-        let item_count = game.board.rows.iter().flatten().filter(|c| matches!(c, Cell::Item(_))).count();
-        assert_eq!(item_count, 1, "ダイヤと一緒に落下してもアイテムが消えないはず");
-        assert!(matches!(game.board.cell(999, 0), Cell::Item(ItemEffect::ClearAbove)), "アイテムは最深行まで落ちて残るはず");
-        assert!(matches!(game.board.cell(998, 0), Cell::Diamond), "ダイヤはアイテムのすぐ上に着地するはず");
+        let item_count = game
+            .board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(_)))
+            .count();
+        assert_eq!(
+            item_count, 1,
+            "ダイヤと一緒に落下してもアイテムが消えないはず"
+        );
+        assert!(
+            matches!(game.board.cell(999, 0), Cell::Item(ItemEffect::ClearAbove)),
+            "アイテムは最深行まで落ちて残るはず"
+        );
+        assert!(
+            matches!(game.board.cell(998, 0), Cell::Diamond),
+            "ダイヤはアイテムのすぐ上に着地するはず"
+        );
     }
 
     #[test]
@@ -1531,10 +1627,15 @@ mod tests {
 
         assert_eq!(game.status, GameStatus::Playing);
         assert!(game.is_dying(), "酸素切れでも天に召される演出中のはず");
-        assert_eq!(game.player.lives, lives_before, "演出完了までライフ減算は遅延されるはず");
+        assert_eq!(
+            game.player.lives, lives_before,
+            "演出完了までライフ減算は遅延されるはず"
+        );
         assert!(events.iter().any(|e| matches!(e, GameEvent::LifeLost)));
 
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
 
         assert_eq!(game.player.lives, lives_before - 1);
         assert_eq!(game.player.oxygen, crate::constants::OXYGEN_MAX);
@@ -1626,10 +1727,16 @@ mod tests {
     fn set_move_cooldown_ms_clamps_to_min_and_max() {
         let mut game = Game::new(4);
         game.set_move_cooldown_ms(0);
-        assert_eq!(game.move_cooldown_ms, crate::constants::MOVE_COOLDOWN_MS_MIN);
+        assert_eq!(
+            game.move_cooldown_ms,
+            crate::constants::MOVE_COOLDOWN_MS_MIN
+        );
 
         game.set_move_cooldown_ms(u64::MAX);
-        assert_eq!(game.move_cooldown_ms, crate::constants::MOVE_COOLDOWN_MS_MAX);
+        assert_eq!(
+            game.move_cooldown_ms,
+            crate::constants::MOVE_COOLDOWN_MS_MAX
+        );
     }
 
     #[test]
@@ -1650,7 +1757,10 @@ mod tests {
         game.update(Duration::from_millis(30));
         game.try_move_right();
 
-        assert_ne!(game.player.col, col_after_first, "短いクールダウン設定なら次の移動が通るはず");
+        assert_ne!(
+            game.player.col, col_after_first,
+            "短いクールダウン設定なら次の移動が通るはず"
+        );
     }
 
     #[test]
@@ -1672,13 +1782,19 @@ mod tests {
         game.update(Duration::from_millis(INPUT_COOLDOWN_MS + 30));
         game.try_move_left();
         let col_after_second = game.player.col;
-        assert_ne!(col_after_second, col_after_first, "2回目は受理されるはず(accumが30msへ繰り越される)");
+        assert_ne!(
+            col_after_second, col_after_first,
+            "2回目は受理されるはず(accumが30msへ繰り越される)"
+        );
 
         // 3回目: 繰り越された30msぶん、フルの80ms待たなくても(50ms経過だけで)受理されるはず
         // (30+50=80msでちょうどスロットに達する)。
         game.update(Duration::from_millis(INPUT_COOLDOWN_MS - 30));
         game.try_move_right();
-        assert_ne!(game.player.col, col_after_second, "繰り越し分により50ms経過でも受理されるはず");
+        assert_ne!(
+            game.player.col, col_after_second,
+            "繰り越し分により50ms経過でも受理されるはず"
+        );
     }
 
     #[test]
@@ -1739,7 +1855,11 @@ mod tests {
         game.try_drill(); // 掘るだけでは移動しない
         let events = game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下でdepth=31 -> level 2へ
 
-        assert!(events.iter().any(|e| matches!(e, GameEvent::LevelUp { level: 2 })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LevelUp { level: 2 }))
+        );
     }
 
     #[test]
@@ -1762,7 +1882,7 @@ mod tests {
         assert!(first_events.is_empty());
 
         game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
-            game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS); // クールダウンを明ける(本テストの本題ではない)
+        game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS); // クールダウンを明ける(本テストの本題ではない)
         let second_events = game.try_move_right(); // 2回目: 同じ方向への再入力で登る
 
         assert_eq!(game.player.row, 0); // 1段登った
@@ -1800,7 +1920,10 @@ mod tests {
         game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
         game.try_move_right(); // 2回目: 同じ方向への再入力で登る
 
-        assert_eq!(game.player.row, 0, "掘削を挟んでも段差登りがキャンセルされてはいけない");
+        assert_eq!(
+            game.player.row, 0,
+            "掘削を挟んでも段差登りがキャンセルされてはいけない"
+        );
         assert_eq!(game.player.col, target_col);
     }
 
@@ -1821,7 +1944,7 @@ mod tests {
         assert!(first_events.is_empty());
 
         game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
-            game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS); // クールダウンを明ける(本テストの本題ではない)
+        game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS); // クールダウンを明ける(本テストの本題ではない)
         let second_events = game.try_move_left(); // 2回目: 同じ方向への再入力で登る
 
         assert_eq!(game.player.row, 0); // 1段登った
@@ -1829,7 +1952,10 @@ mod tests {
         assert_eq!(game.player.facing, Direction::Left);
         assert_eq!(game.player.score, 0); // 掘削していないので加点なし
         assert!(second_events.is_empty()); // 掘削・破壊イベントは一切発生しない
-        assert_eq!(game.board.cell(1, target_col), Cell::Color(ColorKind::Green)); // ブロックは残る
+        assert_eq!(
+            game.board.cell(1, target_col),
+            Cell::Color(ColorKind::Green)
+        ); // ブロックは残る
     }
 
     #[test]
@@ -1846,10 +1972,17 @@ mod tests {
         let events = game.try_move_right();
 
         assert_eq!(game.player.col, target_col);
-        assert_eq!(game.player.oxygen, 40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE);
+        assert_eq!(
+            game.player.oxygen,
+            40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
+        );
         assert_eq!(game.player.score, 100);
         assert_eq!(game.board.cell(game.player.row, target_col), Cell::Empty);
-        assert!(events.iter().any(|e| matches!(e, GameEvent::OxygenCollected)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::OxygenCollected))
+        );
     }
 
     #[test]
@@ -1866,7 +1999,10 @@ mod tests {
         assert_eq!(game.player.col, target_col - 1); // 移動していない
         assert_eq!(game.player.facing, Direction::Right); // facingだけは反映される
         assert!(events.is_empty());
-        assert!(matches!(game.board.cell(1, target_col), Cell::Rock { hits: 0 })); // 壊れない
+        assert!(matches!(
+            game.board.cell(1, target_col),
+            Cell::Rock { hits: 0 }
+        )); // 壊れない
     }
 
     #[test]
@@ -1886,8 +2022,15 @@ mod tests {
                 matches!(game.board.cell(target_row, col), Cell::Rock { hits } if hits == hit),
                 "{hit}回目のヒット後もhitsが蓄積されているはず"
             );
-            assert_eq!(game.player.oxygen, oxygen_before, "{hit}回目のヒットでは酸素は減らない");
-            assert_eq!(game.player.row, target_row - 1, "岩が壊れるまでは降下しない");
+            assert_eq!(
+                game.player.oxygen, oxygen_before,
+                "{hit}回目のヒットでは酸素は減らない"
+            );
+            assert_eq!(
+                game.player.row,
+                target_row - 1,
+                "岩が壊れるまでは降下しない"
+            );
             assert!(events.iter().any(|e| matches!(e, GameEvent::RockHitIntact)));
             // 次のヒットのためクールダウンを明ける(spec.md 9.9のクールダウンは本テストの本題ではない)
             game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
@@ -1899,9 +2042,11 @@ mod tests {
         assert_eq!(game.board.cell(target_row, col), Cell::Empty);
         assert_eq!(game.player.oxygen, oxygen_before - 20.0);
         assert_eq!(game.player.row, target_row - 1, "掘っただけでは移動しない");
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 1 })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 1 }))
+        );
 
         game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下で開いたマスへ進む
         assert_eq!(game.player.row, target_row, "自由落下で続けて1マス下降する");
@@ -1930,11 +2075,17 @@ mod tests {
             Cell::Rock { hits: 0 },
             "連結していた岩ブロックは影響を受けない"
         );
-        assert_eq!(game.player.oxygen, oxygen_before - 20.0, "酸素ペナルティは1回分のみ");
+        assert_eq!(
+            game.player.oxygen,
+            oxygen_before - 20.0,
+            "酸素ペナルティは1回分のみ"
+        );
         assert_eq!(game.player.score, 0, "岩ブロックの消滅は得点対象外");
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 1 })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 1 }))
+        );
     }
 
     #[test]
@@ -1953,9 +2104,14 @@ mod tests {
         game.board.rows[999][3] = Cell::Rock { hits: 3 }; // 最深行=常に支持
         let score_before = game.player.score;
 
-        let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
 
-        assert_eq!(game.player.score, score_before, "岩ブロックの自動消滅はスコア対象外");
+        assert_eq!(
+            game.player.score, score_before,
+            "岩ブロックの自動消滅はスコア対象外"
+        );
         assert!(
             events
                 .iter()
@@ -1984,12 +2140,16 @@ mod tests {
         game.board.rows[999][3] = Cell::Color(ColorKind::Red); // 最深行=常に支持
 
         // SHAKE_TICKSぶんは揺れるだけで、その次の周期で落下+着地+自動消滅する
-        let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
 
         assert_eq!(game.player.score, 4 * 30);
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 }))
+        );
         assert_eq!(game.board.cell(999, 0), Cell::Empty);
         assert_eq!(game.board.cell(999, 1), Cell::Empty);
         assert_eq!(game.board.cell(999, 2), Cell::Empty);
@@ -2011,7 +2171,9 @@ mod tests {
         game.board.rows[998][2] = Cell::Color(ColorKind::Red);
         game.board.rows[999][3] = Cell::Color(ColorKind::Red); // 最深行=常に支持
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
 
         for col in 0..=3 {
             assert!(
@@ -2024,7 +2186,9 @@ mod tests {
             "無関係なセルはフラッシュ演出の対象ではないはず"
         );
 
-        game.update(Duration::from_millis(crate::constants::BLOCK_VANISH_FLASH_MS + 10));
+        game.update(Duration::from_millis(
+            crate::constants::BLOCK_VANISH_FLASH_MS + 10,
+        ));
         assert!(
             game.vanish_flash_progress((999, 0)).is_none(),
             "BLOCK_VANISH_FLASH_MS経過後はフラッシュ演出が終わっているはず"
@@ -2046,8 +2210,14 @@ mod tests {
         // 隣接セル(0,1)が新たに消滅 → (0,0)の残り時間もリセットされて延長されるはず。
         game.note_vanished_cells(vec![((0, 1), Cell::Color(ColorKind::Red))]);
         let progress_after = game.vanish_flash_progress((0, 0)).unwrap();
-        assert!(progress_after < progress_before, "隣接消滅で演出が延長され、進捗が巻き戻るはず");
-        assert!(game.vanish_flash_progress((0, 1)).is_some(), "新しく消滅したセルもフラッシュ中のはず");
+        assert!(
+            progress_after < progress_before,
+            "隣接消滅で演出が延長され、進捗が巻き戻るはず"
+        );
+        assert!(
+            game.vanish_flash_progress((0, 1)).is_some(),
+            "新しく消滅したセルもフラッシュ中のはず"
+        );
     }
 
     #[test]
@@ -2076,9 +2246,16 @@ mod tests {
         game.board.rows[999][3] = Cell::Rock { hits: 0 }; // 最深行=常に支持
         game.board.rows[998][3] = Cell::Star { visible_ms: 0 }; // 岩の上に乗った、支えのあるスター
 
-        game.update(Duration::from_millis(crate::constants::STAR_VISIBLE_GRACE_MS as u64 + crate::constants::STAR_MELT_DURATION_MS as u64));
+        game.update(Duration::from_millis(
+            crate::constants::STAR_VISIBLE_GRACE_MS as u64
+                + crate::constants::STAR_MELT_DURATION_MS as u64,
+        ));
 
-        assert_eq!(game.board.cell(998, 3), Cell::Empty, "溶け切ったスターは消えているはず");
+        assert_eq!(
+            game.board.cell(998, 3),
+            Cell::Empty,
+            "溶け切ったスターは消えているはず"
+        );
         assert!(
             game.vanish_flash_progress((998, 3)).is_some(),
             "溶けて消えたスターもフラッシュ演出の対象になっているはず"
@@ -2101,9 +2278,15 @@ mod tests {
 
         // スターが溶けきるまで進める(実時間ベース)。
         game.update(Duration::from_millis(
-            crate::constants::STAR_VISIBLE_GRACE_MS as u64 + crate::constants::STAR_MELT_DURATION_MS as u64 + 10,
+            crate::constants::STAR_VISIBLE_GRACE_MS as u64
+                + crate::constants::STAR_MELT_DURATION_MS as u64
+                + 10,
         ));
-        assert_eq!(game.board.cell(998, 3), Cell::Empty, "スターは溶けて消えているはず");
+        assert_eq!(
+            game.board.cell(998, 3),
+            Cell::Empty,
+            "スターは溶けて消えているはず"
+        );
 
         // スターが消えた直後もまだ揺れ猶予中のはずなので、揺れ+落下ぶんのブロック
         // 落下tickが経過するまで細かく進める(実際のフレームレートに近い刻みで)。
@@ -2159,12 +2342,22 @@ mod tests {
         }
 
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 5 })),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 5 })),
             "縦5個での自動消滅イベントが発生していない"
         );
-        assert_eq!(game.player.score, 5 * 30, "5個ぶんの自動消滅スコアが入っているはず");
+        assert_eq!(
+            game.player.score,
+            5 * 30,
+            "5個ぶんの自動消滅スコアが入っているはず"
+        );
         for row in [997, 998, 999] {
-            assert_eq!(game.board.cell(row, 0), Cell::Empty, "row={row}が消えていない");
+            assert_eq!(
+                game.board.cell(row, 0),
+                Cell::Empty,
+                "row={row}が消えていない"
+            );
         }
     }
 
@@ -2184,10 +2377,16 @@ mod tests {
         game.player.col = 5;
         game.board.rows[0][3] = Cell::Color(ColorKind::Red);
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
 
         let moves = game.recently_moved_blocks();
-        assert_eq!(moves, &[((1, 3), (0, 3))], "揺れが明けて1マス落下した直後のはず");
+        assert_eq!(
+            moves,
+            &[((1, 3), (0, 3))],
+            "揺れが明けて1マス落下した直後のはず"
+        );
         assert!(
             game.block_fall_progress() < 0.2,
             "ティック開始直後なのでprogressは小さいはず: {}",
@@ -2217,7 +2416,11 @@ mod tests {
         // ちょうど1回ぶんの自由落下tickを発生させる。
         game.update(Duration::from_millis(410));
         assert_eq!(game.player.row, 11, "1マス落下しているはず");
-        assert_eq!(game.move_anim_progress(), 0.0, "落下tick直後は補間がまだ始まったばかりのはず");
+        assert_eq!(
+            game.move_anim_progress(),
+            0.0,
+            "落下tick直後は補間がまだ始まったばかりのはず"
+        );
 
         // 次のtick(400ms後)がまだ来ない150ms経過時点でも、補間が完了していないはず
         // (固定100msのままなら、ここで既に1.0=完了してしまう)。
@@ -2249,7 +2452,11 @@ mod tests {
 
         assert_eq!(game.player.row, 13);
         assert_eq!(game.player.col, col);
-        assert!(!events.iter().any(|e| matches!(e, GameEvent::LifeLost | GameEvent::GameOverMiss)));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost | GameEvent::GameOverMiss))
+        );
     }
 
     #[test]
@@ -2292,7 +2499,10 @@ mod tests {
             worst_stall <= 10,
             "支えを失ったプレイヤーが{worst_stall}フレーム連続で静止した(床に到達済みでないのに浮いたまま)"
         );
-        assert!(max_row_seen > 100, "プレイヤーは一度も動かなかった(浮いたまま)");
+        assert!(
+            max_row_seen > 100,
+            "プレイヤーは一度も動かなかった(浮いたまま)"
+        );
     }
 
     #[test]
@@ -2352,19 +2562,46 @@ mod tests {
         game.board.rows[999][7] = Cell::Color(ColorKind::Green);
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         // 押し潰し直後は「天に召される」演出中で、ライフ減算・3列クリアは演出が
         // 終わるまで遅延される(TERM独自拡張)。演出の完了を待つ。
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
 
-        assert_eq!(game.player.lives, 1, "押し潰されてライフを1つ失っているはず");
+        assert_eq!(
+            game.player.lives, 1,
+            "押し潰されてライフを1つ失っているはず"
+        );
         for row in 0..999 {
-            assert_eq!(game.board.cell(row, 4), Cell::Empty, "row={row} col=4はクリアされているはず");
-            assert_eq!(game.board.cell(row, 5), Cell::Empty, "row={row} col=5はクリアされているはず");
-            assert_eq!(game.board.cell(row, 6), Cell::Empty, "row={row} col=6はクリアされているはず");
+            assert_eq!(
+                game.board.cell(row, 4),
+                Cell::Empty,
+                "row={row} col=4はクリアされているはず"
+            );
+            assert_eq!(
+                game.board.cell(row, 5),
+                Cell::Empty,
+                "row={row} col=5はクリアされているはず"
+            );
+            assert_eq!(
+                game.board.cell(row, 6),
+                Cell::Empty,
+                "row={row} col=6はクリアされているはず"
+            );
         }
-        assert_eq!(game.board.cell(999, 3), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
-        assert_eq!(game.board.cell(999, 7), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+        assert_eq!(
+            game.board.cell(999, 3),
+            Cell::Color(ColorKind::Green),
+            "対象外の列はクリアされない"
+        );
+        assert_eq!(
+            game.board.cell(999, 7),
+            Cell::Color(ColorKind::Green),
+            "対象外の列はクリアされない"
+        );
     }
 
     #[test]
@@ -2387,19 +2624,47 @@ mod tests {
 
         game.update(Duration::from_secs(1)); // 酸素切れでミス(押し潰しではない)
 
-        assert!(game.is_dying(), "酸素切れでも押し潰しと同様、天に召される演出中のはず");
-        assert_eq!(game.player.lives, 2, "演出完了までライフ減算は遅延されるはず");
+        assert!(
+            game.is_dying(),
+            "酸素切れでも押し潰しと同様、天に召される演出中のはず"
+        );
+        assert_eq!(
+            game.player.lives, 2,
+            "演出完了までライフ減算は遅延されるはず"
+        );
 
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
 
         assert_eq!(game.player.lives, 1, "酸素切れでライフを1つ失っているはず");
         for row in 0..999 {
-            assert_eq!(game.board.cell(row, 4), Cell::Empty, "row={row} col=4はクリアされているはず");
-            assert_eq!(game.board.cell(row, 5), Cell::Empty, "row={row} col=5はクリアされているはず");
-            assert_eq!(game.board.cell(row, 6), Cell::Empty, "row={row} col=6はクリアされているはず");
+            assert_eq!(
+                game.board.cell(row, 4),
+                Cell::Empty,
+                "row={row} col=4はクリアされているはず"
+            );
+            assert_eq!(
+                game.board.cell(row, 5),
+                Cell::Empty,
+                "row={row} col=5はクリアされているはず"
+            );
+            assert_eq!(
+                game.board.cell(row, 6),
+                Cell::Empty,
+                "row={row} col=6はクリアされているはず"
+            );
         }
-        assert_eq!(game.board.cell(999, 3), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
-        assert_eq!(game.board.cell(999, 7), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+        assert_eq!(
+            game.board.cell(999, 3),
+            Cell::Color(ColorKind::Green),
+            "対象外の列はクリアされない"
+        );
+        assert_eq!(
+            game.board.cell(999, 7),
+            Cell::Color(ColorKind::Green),
+            "対象外の列はクリアされない"
+        );
     }
 
     #[test]
@@ -2414,16 +2679,27 @@ mod tests {
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし(押し潰す)
         game.board.rows[990][5] = Cell::Oxygen; // クリア範囲内のAIR(支えなし、押し潰しと並行して自然落下もする)
 
-        let mut events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        let mut events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         // 天に召される演出中も周囲の重力処理は止まらない(#68)ため、この1回の
         // updateだけでAIRが最後まで落下しきる可能性もある。
-        events.extend(game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10)));
+        events.extend(game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        )));
         assert_eq!(game.player.lives, 1, "演出完了でライフが減っているはず");
 
         // AIRは3列クリアで消滅させられたわけではなく、通常の重力に従って落下を
         // 続け、最終的にプレイヤーへ到達して取得(酸素回復)される。単に消滅した
         // のではなく、正規のイベントとして処理されることを確認する。
-        let oxygen_count = |game: &Game| game.board.rows.iter().flatten().filter(|c| **c == Cell::Oxygen).count();
+        let oxygen_count = |game: &Game| {
+            game.board
+                .rows
+                .iter()
+                .flatten()
+                .filter(|c| **c == Cell::Oxygen)
+                .count()
+        };
         for _ in 0..50 {
             if oxygen_count(&game) == 0 {
                 break;
@@ -2431,7 +2707,9 @@ mod tests {
             events.extend(game.update(Duration::from_millis(FALL_TICK_MS)));
         }
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::OxygenCollected)),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::OxygenCollected)),
             "AIRは消滅させられたのではなく、落下し続けて最終的に取得イベントが発生するはず"
         );
     }
@@ -2448,15 +2726,22 @@ mod tests {
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし(押し潰す)
         game.board.rows[500][0] = Cell::Color(ColorKind::Blue); // 押し潰しとは無関係な、遠く離れた落下ブロック
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         assert!(game.is_dying(), "押し潰し直後は天に召される演出中のはず");
         let row_during_ascend_start = (0..game.board.depth_rows())
             .find(|&r| game.board.cell(r, 0) == Cell::Color(ColorKind::Blue))
             .expect("無関係なブロックはまだ盤面のどこかに存在するはず");
 
         // 演出が完了するよりずっと前の、演出継続中の時点で確認する。
-        game.update(Duration::from_millis(FALL_TICK_MS * (SHAKE_TICKS as u64 + 3)));
-        assert!(game.is_dying(), "演出はまだ続いているはず(CRUSH_ASCEND_MSに対して十分短い経過時間)");
+        game.update(Duration::from_millis(
+            FALL_TICK_MS * (SHAKE_TICKS as u64 + 3),
+        ));
+        assert!(
+            game.is_dying(),
+            "演出はまだ続いているはず(CRUSH_ASCEND_MSに対して十分短い経過時間)"
+        );
 
         let row_during_ascend_later = (0..game.board.depth_rows())
             .find(|&r| game.board.cell(r, 0) == Cell::Color(ColorKind::Blue))
@@ -2479,8 +2764,16 @@ mod tests {
 
         game.debug_clear_above_player();
 
-        assert_eq!(game.board.cell(10, 5), Cell::Oxygen, "AIRは消えずに残るはず");
-        assert_eq!(game.board.cell(10, 6), Cell::Empty, "AIR以外は通常通り消えるはず");
+        assert_eq!(
+            game.board.cell(10, 5),
+            Cell::Oxygen,
+            "AIRは消えずに残るはず"
+        );
+        assert_eq!(
+            game.board.cell(10, 6),
+            Cell::Empty,
+            "AIR以外は通常通り消えるはず"
+        );
     }
 
     #[test]
@@ -2498,10 +2791,26 @@ mod tests {
 
         game.debug_clear_above_player();
 
-        assert_eq!(game.board.cell(10, 5), Cell::Item(ItemEffect::ClearAbove), "Rアイテムは消えずに残るはず");
-        assert_eq!(game.board.cell(11, 5), Cell::Item(ItemEffect::UnifyColors), "Cアイテムは消えずに残るはず");
-        assert_eq!(game.board.cell(12, 5), Cell::Item(ItemEffect::StarifyScreen), "Kアイテムは消えずに残るはず");
-        assert_eq!(game.board.cell(10, 6), Cell::Empty, "アイテム以外は通常通り消えるはず");
+        assert_eq!(
+            game.board.cell(10, 5),
+            Cell::Item(ItemEffect::ClearAbove),
+            "Rアイテムは消えずに残るはず"
+        );
+        assert_eq!(
+            game.board.cell(11, 5),
+            Cell::Item(ItemEffect::UnifyColors),
+            "Cアイテムは消えずに残るはず"
+        );
+        assert_eq!(
+            game.board.cell(12, 5),
+            Cell::Item(ItemEffect::StarifyScreen),
+            "Kアイテムは消えずに残るはず"
+        );
+        assert_eq!(
+            game.board.cell(10, 6),
+            Cell::Empty,
+            "アイテム以外は通常通り消えるはず"
+        );
     }
 
     #[test]
@@ -2571,7 +2880,10 @@ mod tests {
 
         game.debug_starify_visible_screen();
 
-        assert!(matches!(game.board.cell(900, 3), Cell::Rock { .. }), "画面外のブロックは変化しないはず");
+        assert!(
+            matches!(game.board.cell(900, 3), Cell::Rock { .. }),
+            "画面外のブロックは変化しないはず"
+        );
     }
 
     #[test]
@@ -2585,7 +2897,10 @@ mod tests {
 
         game.debug_starify_visible_screen();
 
-        assert!(matches!(game.board.cell(990, 3), Cell::Color(ColorKind::Red)));
+        assert!(matches!(
+            game.board.cell(990, 3),
+            Cell::Color(ColorKind::Red)
+        ));
         assert!(matches!(game.board.cell(991, 3), Cell::Oxygen));
     }
 
@@ -2603,7 +2918,10 @@ mod tests {
 
         game.debug_starify_visible_screen();
 
-        assert!(matches!(game.board.cell(498, 5), Cell::Rock { .. }), "揺れ中のセルは変化しないはず");
+        assert!(
+            matches!(game.board.cell(498, 5), Cell::Rock { .. }),
+            "揺れ中のセルは変化しないはず"
+        );
     }
 
     #[test]
@@ -2619,7 +2937,10 @@ mod tests {
 
         game.debug_starify_visible_screen();
 
-        assert!(matches!(game.board.cell(990, 3), Cell::Rock { .. }), "GameOver中は変化しないはず");
+        assert!(
+            matches!(game.board.cell(990, 3), Cell::Rock { .. }),
+            "GameOver中は変化しないはず"
+        );
     }
 
     #[test]
@@ -2631,7 +2952,9 @@ mod tests {
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
         // SHAKE_TICKSぶんの揺れ+落下の1ティックで押し潰しが発生する
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         assert!(game.crush_flash_active(), "押し潰し直後は演出が有効なはず");
 
         // ライフが残っているので「天に召される」演出(CRUSH_ASCEND_MS)が動く。
@@ -2643,8 +2966,13 @@ mod tests {
         );
 
         // CRUSH_ASCEND_MSぶん時間を進めると演出は終わる
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
-        assert!(!game.crush_flash_active(), "CRUSH_ASCEND_MS経過後は演出が終わっているはず");
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+        assert!(
+            !game.crush_flash_active(),
+            "CRUSH_ASCEND_MS経過後は演出が終わっているはず"
+        );
     }
 
     #[test]
@@ -2658,9 +2986,15 @@ mod tests {
         game.player.col = 5;
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
 
-        assert_eq!(game.status, GameStatus::GameOver, "演出を待たず即座にGameOverになるはず");
+        assert_eq!(
+            game.status,
+            GameStatus::GameOver,
+            "演出を待たず即座にGameOverになるはず"
+        );
         assert_eq!(game.player.lives, 0);
     }
 
@@ -2674,7 +3008,9 @@ mod tests {
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
         // (999,4)はclear_board済みでEmptyのまま=フリーズしていなければ普通に移動できる。
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         assert_eq!(game.player.lives, 2, "演出中はまだライフ減算前のはず");
 
         // 演出中は移動入力を受け付けない。
@@ -2683,7 +3019,9 @@ mod tests {
         assert_eq!(game.player.col, 5, "演出中は移動できないはず");
 
         // 演出が終われば通常のプレイに戻り、ライフも減っている。
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert_eq!(game.player.lives, 1, "演出完了時にライフが減るはず");
         assert_eq!(game.status, GameStatus::Playing);
     }
@@ -2700,14 +3038,21 @@ mod tests {
         game.player.col = 5;
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
-        let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         assert!(
             events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
             "押し潰された直後(演出開始時点)にLifeLostが発火するはず"
         );
-        assert_eq!(game.player.lives, 2, "この時点ではまだライフは減っていないはず(演出完了時に減る)");
+        assert_eq!(
+            game.player.lives, 2,
+            "この時点ではまだライフは減っていないはず(演出完了時に減る)"
+        );
 
-        let events = game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        let events = game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert!(
             !events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
             "演出完了時に重複してLifeLostが発火してはいけない"
@@ -2724,13 +3069,17 @@ mod tests {
         game.player.col = 5;
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
-        let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
         assert!(
             !events.iter().any(|e| matches!(e, GameEvent::Revived)),
             "押し潰された直後(演出開始時点)ではまだ復活していないはず"
         );
 
-        let events = game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        let events = game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert!(
             events.iter().any(|e| matches!(e, GameEvent::Revived)),
             "演出完了時にRevivedが発火するはず"
@@ -2752,22 +3101,45 @@ mod tests {
         game.board.rows[998][6] = Cell::Color(ColorKind::Red); // AIRの真上のブロック
 
         let events = game.try_move_right();
-        assert!(events.iter().any(|e| matches!(e, GameEvent::OxygenCollected)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::OxygenCollected))
+        );
         assert_eq!(game.player.col, 6, "AIRのマスへ移動しているはず");
-        assert_eq!(game.player.lives, LIVES_DEFAULT, "移動しただけではまだ潰されていない");
+        assert_eq!(
+            game.player.lives, LIVES_DEFAULT,
+            "移動しただけではまだ潰されていない"
+        );
 
         // 支えを失った直後、SHAKE_TICKSぶんはまだ落下しない(押し潰されない)。
         game.update(Duration::from_millis(SHAKE_TICKS as u64 * FALL_TICK_MS));
-        assert_eq!(game.player.lives, LIVES_DEFAULT, "揺れている間は押し潰されないはず");
-        assert_eq!(game.board.cell(998, 6), Cell::Color(ColorKind::Red), "まだ落下していない");
+        assert_eq!(
+            game.player.lives, LIVES_DEFAULT,
+            "揺れている間は押し潰されないはず"
+        );
+        assert_eq!(
+            game.board.cell(998, 6),
+            Cell::Color(ColorKind::Red),
+            "まだ落下していない"
+        );
 
         // 揺れが明けた次のティックで初めて落下し、押し潰される。
         game.update(Duration::from_millis(FALL_TICK_MS + 10));
-        assert_eq!(game.player.lives, LIVES_DEFAULT, "押し潰し直後は「天に召される」演出中でまだライフ減算前のはず");
+        assert_eq!(
+            game.player.lives, LIVES_DEFAULT,
+            "押し潰し直後は「天に召される」演出中でまだライフ減算前のはず"
+        );
 
         // 演出が終わるとライフが減る。
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
-        assert_eq!(game.player.lives, LIVES_DEFAULT - 1, "演出後に押し潰されるはず");
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+        assert_eq!(
+            game.player.lives,
+            LIVES_DEFAULT - 1,
+            "演出後に押し潰されるはず"
+        );
     }
 
     // --- 掘削アニメーション(TERM独自拡張、9章) ---
@@ -2775,7 +3147,11 @@ mod tests {
     #[test]
     fn drilling_frame_is_none_before_any_drill_input() {
         let game = Game::new(60);
-        assert_eq!(game.drilling_frame(), None, "掘削していなければアニメーションフレームは無いはず");
+        assert_eq!(
+            game.drilling_frame(),
+            None,
+            "掘削していなければアニメーションフレームは無いはず"
+        );
     }
 
     #[test]
@@ -2790,13 +3166,27 @@ mod tests {
         game.player.col = 5;
 
         game.try_drill();
-        assert_eq!(game.drilling_frame(), Some(true), "掘削直後は最初のフレームのはず");
+        assert_eq!(
+            game.drilling_frame(),
+            Some(true),
+            "掘削直後は最初のフレームのはず"
+        );
 
         game.update(Duration::from_millis(DRILL_ANIM_FRAME_MS));
-        assert_eq!(game.drilling_frame(), Some(false), "1フレーム経過で切り替わるはず");
+        assert_eq!(
+            game.drilling_frame(),
+            Some(false),
+            "1フレーム経過で切り替わるはず"
+        );
 
-        game.update(Duration::from_millis(DRILL_ANIM_MS - DRILL_ANIM_FRAME_MS + 10));
-        assert_eq!(game.drilling_frame(), None, "DRILL_ANIM_MS経過後は通常表示に戻るはず");
+        game.update(Duration::from_millis(
+            DRILL_ANIM_MS - DRILL_ANIM_FRAME_MS + 10,
+        ));
+        assert_eq!(
+            game.drilling_frame(),
+            None,
+            "DRILL_ANIM_MS経過後は通常表示に戻るはず"
+        );
     }
 
     // --- ヒヤリ回避スライダー演出(TERM独自拡張、9章) ---
@@ -2825,14 +3215,30 @@ mod tests {
             assert!(!game.is_dodge_sliding(), "揺れている間はまだ発火しないはず");
         }
 
-        assert!(!game.is_dodge_sliding(), "落下前はまだスライダー演出は発火していないはず");
+        assert!(
+            !game.is_dodge_sliding(),
+            "落下前はまだスライダー演出は発火していないはず"
+        );
         let events = game.update(Duration::from_millis(FALL_TICK_MS + 10)); // 揺れが明けて実際に落下するティック
 
-        assert!(game.is_dodge_sliding(), "旧位置へ実際に脅威だったブロックが着地したので発火するはず");
-        assert_eq!(game.board.cell(5, 5), Cell::Color(ColorKind::Red), "ブロックは旧位置(5,5)へ着地しているはず");
-        assert_eq!(game.status, GameStatus::Playing, "プレイヤー自身は無事なはず");
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::DodgeTriggered)),
+            game.is_dodge_sliding(),
+            "旧位置へ実際に脅威だったブロックが着地したので発火するはず"
+        );
+        assert_eq!(
+            game.board.cell(5, 5),
+            Cell::Color(ColorKind::Red),
+            "ブロックは旧位置(5,5)へ着地しているはず"
+        );
+        assert_eq!(
+            game.status,
+            GameStatus::Playing,
+            "プレイヤー自身は無事なはず"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DodgeTriggered)),
             "ユーザー指摘: 「キャラがスライディングした瞬間...専用SEを鳴らす」。発動と同時に\
              GameEvent::DodgeTriggeredが発火するはず"
         );
@@ -2854,7 +3260,10 @@ mod tests {
         assert_eq!(game.player.position(), (5, 4));
 
         game.update(Duration::from_millis(FALL_TICK_MS * 10));
-        assert!(!game.is_dodge_sliding(), "脅威が無かった移動ではスライダー演出は発火しないはず");
+        assert!(
+            !game.is_dodge_sliding(),
+            "脅威が無かった移動ではスライダー演出は発火しないはず"
+        );
     }
 
     #[test]
@@ -2881,7 +3290,11 @@ mod tests {
 
         game.player.facing = Direction::Down; // 目印としてfacingを固定しておく
         game.face_up(); // フリーズ中はfacingが変わらないはず
-        assert_eq!(game.player.facing, Direction::Down, "スライダー中は入力を凍結しているはず");
+        assert_eq!(
+            game.player.facing,
+            Direction::Down,
+            "スライダー中は入力を凍結しているはず"
+        );
 
         // tick_dodgeは呼び出しごとにSliding/Recoveringのどちらか一方の残時間しか消費しない
         // (超過分は次の段階へ繰り越さない)ため、Sliding→Recoveringの遷移をまず1回、
@@ -2890,7 +3303,11 @@ mod tests {
         game.update(Duration::from_millis(300 + 20)); // Recovering -> None
 
         game.face_up();
-        assert_eq!(game.player.facing, Direction::Up, "硬直が明ければ再び入力が通るはず");
+        assert_eq!(
+            game.player.facing,
+            Direction::Up,
+            "硬直が明ければ再び入力が通るはず"
+        );
     }
 
     // --- 移動の見た目補間アニメーション(TERM独自拡張、9章) ---
@@ -2946,13 +3363,30 @@ mod tests {
 
         let events = game.try_move_right();
         assert!(events.is_empty());
-        assert_ne!(game.player.position(), before, "前提: 実際に移動しているはず");
+        assert_ne!(
+            game.player.position(),
+            before,
+            "前提: 実際に移動しているはず"
+        );
 
-        assert_eq!(game.render_prev_position(), before, "補間の起点は移動前の位置のはず");
-        assert!(game.move_anim_progress() < 1.0, "移動直後は補間がまだ完了していないはず");
+        assert_eq!(
+            game.render_prev_position(),
+            before,
+            "補間の起点は移動前の位置のはず"
+        );
+        assert!(
+            game.move_anim_progress() < 1.0,
+            "移動直後は補間がまだ完了していないはず"
+        );
 
-        game.update(Duration::from_millis(crate::constants::MOVE_ANIM_DURATION_MS + 10));
-        assert_eq!(game.move_anim_progress(), 1.0, "MOVE_ANIM_DURATION_MS経過後は補間が完了しているはず");
+        game.update(Duration::from_millis(
+            crate::constants::MOVE_ANIM_DURATION_MS + 10,
+        ));
+        assert_eq!(
+            game.move_anim_progress(),
+            1.0,
+            "MOVE_ANIM_DURATION_MS経過後は補間が完了しているはず"
+        );
     }
 
     // --- ショートカットC: 2色化+結合再計算(TERM独自拡張) ---
@@ -2976,7 +3410,10 @@ mod tests {
 
             let events = game.debug_unify_nearby_colors();
 
-            assert!(events.is_empty(), "塗り替えだけで自動消滅イベントは発生しないはず");
+            assert!(
+                events.is_empty(),
+                "塗り替えだけで自動消滅イベントは発生しないはず"
+            );
 
             let mut colors_seen: Vec<ColorKind> = Vec::new();
             for c in 0..4 {
@@ -2986,9 +3423,16 @@ mod tests {
                     colors_seen.push(k);
                 }
             }
-            assert!(colors_seen.len() <= 2, "2色より多い色が残っている: {colors_seen:?}");
+            assert!(
+                colors_seen.len() <= 2,
+                "2色より多い色が残っている: {colors_seen:?}"
+            );
             for c in 0..4 {
-                assert_ne!(game.board.cell(500, c), Cell::Empty, "塗り替えただけで消滅してはいけない");
+                assert_ne!(
+                    game.board.cell(500, c),
+                    Cell::Empty,
+                    "塗り替えただけで消滅してはいけない"
+                );
             }
 
             if colors_seen.len() == 1 {

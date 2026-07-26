@@ -21,7 +21,9 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Down => InputAction::FaceDown,
         // 掘削キー(TERM独自拡張。ユーザー指摘: 「掘るボタンはXとZキー(どちらも
         // 掘れる)」)。どちらのキーでも同じ掘削として扱う。
-        KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('z') | KeyCode::Char('Z') => InputAction::Drill,
+        KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Char('z') | KeyCode::Char('Z') => {
+            InputAction::Drill
+        }
         // 一時停止(TERM独自拡張。ユーザー指摘: 「スペースはポーズ」)。既存のPキーも
         // 引き続き有効(併用)。
         KeyCode::Char(' ') => InputAction::TogglePause,
@@ -131,18 +133,39 @@ mod tests {
     #[test]
     fn action_from_key_code_maps_known_shortcuts() {
         assert_eq!(action_from_key_code(KeyCode::Left), InputAction::MoveLeft);
-        assert_eq!(action_from_key_code(KeyCode::Char('p')), InputAction::TogglePause);
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('p')),
+            InputAction::TogglePause
+        );
         // ユーザー指摘: 「掘るボタンはXとZキー(どちらも掘れる)」「スペースはポーズ」。
         assert_eq!(action_from_key_code(KeyCode::Char('x')), InputAction::Drill);
         assert_eq!(action_from_key_code(KeyCode::Char('X')), InputAction::Drill);
         assert_eq!(action_from_key_code(KeyCode::Char('z')), InputAction::Drill);
         assert_eq!(action_from_key_code(KeyCode::Char('Z')), InputAction::Drill);
-        assert_eq!(action_from_key_code(KeyCode::Char(' ')), InputAction::TogglePause);
-        assert_eq!(action_from_key_code(KeyCode::Char('r')), InputAction::DebugClearAbovePlayer);
-        assert_eq!(action_from_key_code(KeyCode::Char('a')), InputAction::DebugFillAir);
-        assert_eq!(action_from_key_code(KeyCode::Char('A')), InputAction::DebugFillAir);
-        assert_eq!(action_from_key_code(KeyCode::Char('k')), InputAction::DebugStarifyVisibleScreen);
-        assert_eq!(action_from_key_code(KeyCode::Char('K')), InputAction::DebugStarifyVisibleScreen);
+        assert_eq!(
+            action_from_key_code(KeyCode::Char(' ')),
+            InputAction::TogglePause
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('r')),
+            InputAction::DebugClearAbovePlayer
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('a')),
+            InputAction::DebugFillAir
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('A')),
+            InputAction::DebugFillAir
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('k')),
+            InputAction::DebugStarifyVisibleScreen
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('K')),
+            InputAction::DebugStarifyVisibleScreen
+        );
         // ユーザー指摘: 「メニューから進むのEnter」「他のボタンで進んではいけない」。
         assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::Confirm);
     }
@@ -153,6 +176,9 @@ mod tests {
         // 任意のキー入力でも解除されるように」。既知のショートカットに割り当てられて
         // いないキーはUnboundKeyになる(main.rs側で一時停止中の再開トリガーに使う)。
         assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::UnboundKey);
-        assert_eq!(action_from_key_code(KeyCode::Char('y')), InputAction::UnboundKey);
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('y')),
+            InputAction::UnboundKey
+        );
     }
 }

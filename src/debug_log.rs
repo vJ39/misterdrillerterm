@@ -65,7 +65,10 @@ impl DebugLog {
              );",
         )
         .ok()?;
-        Some(DebugLog { conn, in_transaction: StdCell::new(false) })
+        Some(DebugLog {
+            conn,
+            in_transaction: StdCell::new(false),
+        })
     }
 
     /// フレーム開始時に呼ぶ(TERM独自拡張)。前フレームぶんのトランザクションが
@@ -131,12 +134,20 @@ mod tests {
 
     fn temp_log_path(tag: &str) -> PathBuf {
         std::env::temp_dir()
-            .join(format!("misterdrillerterm-debug-log-test-{tag}-{}", std::process::id()))
+            .join(format!(
+                "misterdrillerterm-debug-log-test-{tag}-{}",
+                std::process::id()
+            ))
             .join(LOG_FILE_NAME)
     }
 
     fn count_rows(conn: &Connection, kind: &str) -> i64 {
-        conn.query_row("SELECT COUNT(*) FROM block_events WHERE kind = ?1", [kind], |row| row.get(0)).unwrap()
+        conn.query_row(
+            "SELECT COUNT(*) FROM block_events WHERE kind = ?1",
+            [kind],
+            |row| row.get(0),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -152,9 +163,11 @@ mod tests {
         assert_eq!(count_rows(&log.conn, "vanish"), 1);
         let (frame, cell_kind): (i64, String) = log
             .conn
-            .query_row("SELECT frame, cell_kind FROM block_events WHERE kind = 'move'", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                "SELECT frame, cell_kind FROM block_events WHERE kind = 'move'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!(frame, 10);
         assert_eq!(cell_kind, "Color(Red)");
@@ -175,7 +188,11 @@ mod tests {
         drop(log);
 
         let log = DebugLog::open_fresh_at(&path).expect("既存ファイルがあっても作り直せるはず");
-        assert_eq!(count_rows(&log.conn, "move"), 0, "前回の内容は破棄されているはず");
+        assert_eq!(
+            count_rows(&log.conn, "move"),
+            0,
+            "前回の内容は破棄されているはず"
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -190,11 +207,16 @@ mod tests {
 
         let (row, col, facing, status): (i64, i64, String, String) = log
             .conn
-            .query_row("SELECT row, col, facing, status FROM player_state WHERE frame = 3", [], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
+            .query_row(
+                "SELECT row, col, facing, status FROM player_state WHERE frame = 3",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .unwrap();
-        assert_eq!((row, col, facing.as_str(), status.as_str()), (10, 2, "Down", "Playing"));
+        assert_eq!(
+            (row, col, facing.as_str(), status.as_str()),
+            (10, 2, "Down", "Playing")
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -215,7 +237,11 @@ mod tests {
         drop(log);
 
         let conn = Connection::open(&path).unwrap();
-        assert_eq!(count_rows(&conn, "move"), 2, "前フレーム・現フレームどちらの書き込みも残っているはず");
+        assert_eq!(
+            count_rows(&conn, "move"),
+            2,
+            "前フレーム・現フレームどちらの書き込みも残っているはず"
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

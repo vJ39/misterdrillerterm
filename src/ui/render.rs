@@ -5,14 +5,18 @@
 
 use std::collections::HashMap;
 
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Constraint, Direction as LayoutDirection, Layout, Position, Rect};
+use ratatui::layout::{
+    Alignment, Constraint, Direction as LayoutDirection, Layout, Position, Rect,
+};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-use ratatui::Frame;
 
-use crate::constants::{OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS};
+use crate::constants::{
+    OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
+};
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
 use crate::game::{Game, GameOverChoice, GameStatus};
@@ -85,7 +89,10 @@ fn compute_layout(area: Rect, field_width: usize) -> LayoutPlan {
 
         let cols = Layout::default()
             .direction(LayoutDirection::Horizontal)
-            .constraints([Constraint::Length(field_pane_w), Constraint::Length(HUD_PANE_W)])
+            .constraints([
+                Constraint::Length(field_pane_w),
+                Constraint::Length(HUD_PANE_W),
+            ])
             .split(frame_rect);
         let field_col = cols[0];
         let hud_rect = cols[1];
@@ -116,7 +123,10 @@ fn compute_layout(area: Rect, field_width: usize) -> LayoutPlan {
             width: field_width_px,
             height: area.height,
         };
-        let hud_width = area.width.saturating_sub(field_width_px).max(HUD_PANE_W_MIN);
+        let hud_width = area
+            .width
+            .saturating_sub(field_width_px)
+            .max(HUD_PANE_W_MIN);
         let hud_rect = Rect {
             x: area.x + field_width_px,
             y: area.y,
@@ -177,9 +187,12 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
 
     // 9.6実装上の注意: まずフレーム全体を明示的な背景色で塗りつぶしてから、その上に
     // ゲーム画面を重ねる(ターミナルのデフォルト背景色が縁に残ることを防ぐ)。
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
 
     if area.width < MIN_TERMINAL_W || area.height < MIN_TERMINAL_H {
         draw_size_warning(frame, area);
@@ -211,7 +224,9 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
             draw_game_over_overlay(frame, plan.game_frame, game.game_over_selection())
         }
         GameStatus::GameOver => {}
-        GameStatus::Cleared => draw_overlay(frame, plan.game_frame, "CLEAR !", &["Qキーでタイトルへ"]),
+        GameStatus::Cleared => {
+            draw_overlay(frame, plan.game_frame, "CLEAR !", &["Qキーでタイトルへ"])
+        }
         GameStatus::Playing => {}
     }
 }
@@ -236,35 +251,95 @@ fn on_off_label(enabled: bool) -> &'static str {
 /// (art_rows(24行)+区切り(1行)+案内文(6行)=31行)。
 const TITLE_ART_SCALE: f32 = 0.75;
 
+/// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント
+/// (3行×3列、TERM独自拡張。ユーザー指摘: 「TERMMAPみたいにかっこいい題字
+/// つくってくれ」)。T/E/R/Mは`vJ39/termmap`のワードマーク(`keymap.rs`の`LOGO`)と
+/// 同じ字形をそのまま流用し、I/S/Dは同じ作法(角・ヒゲの罫線文字)で新規に起こした。
+/// 半角スペースは2列ぶんの空白で単語の区切りに使う。
+fn title_logo_glyph(c: char) -> &'static [&'static str; 3] {
+    match c {
+        'M' => &["┏┳┓", "┃┃┃", "╹╹╹"],
+        'I' => &["╺┳╸", " ┃ ", "╺┻╸"],
+        'S' => &["┏━╸", "┗━┓", "╺━┛"],
+        'D' => &["┏━┓", "┃ ┃", "┗━┛"],
+        'R' => &["┏━┓", "┣┳┛", "╹┗╸"],
+        'T' => &["╺┳╸", " ┃ ", " ╹ "],
+        'E' => &["┏━╸", "┣╸ ", "┗━╸"],
+        _ => &["  ", "  ", "  "],
+    }
+}
+
+/// "MISDRI TERM"のワードマーク3行を、上ほど明るい金〜赤銅色のグラデーションで組む
+/// (termmapの緑グラデーションと同じ発想。ゲーム内のダイヤブロック配色(黄土色系、#62)
+/// に寄せた色にした)。
+fn build_title_logo_lines() -> [Line<'static>; 3] {
+    const GRADIENT: [Color; 3] = [
+        Color::Rgb(255, 210, 90),
+        Color::Rgb(225, 145, 55),
+        Color::Rgb(165, 85, 35),
+    ];
+    let mut rows = [String::new(), String::new(), String::new()];
+    for c in "MISDRI TERM".chars() {
+        let glyph = title_logo_glyph(c);
+        for (row, text) in rows.iter_mut().zip(glyph.iter()) {
+            row.push_str(text);
+        }
+    }
+    let [row0, row1, row2] = rows;
+    [
+        Line::from(Span::styled(
+            row0,
+            Style::default().fg(GRADIENT[0]).bg(colors::LETTERBOX_BG),
+        )),
+        Line::from(Span::styled(
+            row1,
+            Style::default().fg(GRADIENT[1]).bg(colors::LETTERBOX_BG),
+        )),
+        Line::from(Span::styled(
+            row2,
+            Style::default().fg(GRADIENT[2]).bg(colors::LETTERBOX_BG),
+        )),
+    ]
+}
+
 /// タイトル画面を描画する(起動時スプラッシュ画像+ゲーム名+スタート案内を
 /// 1画面にまとめる)。このタイトル画面上でのみ、Qキーがアプリ終了として扱われる
 /// (main.rsの画面遷移)。
 pub fn draw_title(frame: &mut Frame) {
     let area = frame.area();
 
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
 
     let canvas = intro::build_canvas();
     let art_lines = canvas.to_lines(TITLE_ART_SCALE);
     let art_rows = art_lines.len() as u16;
 
-    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
-    let text_lines = vec![
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let mut text_lines = build_title_logo_lines().to_vec();
+    text_lines.extend([
         Line::from(Span::styled("ミスドリTERM", text_style)),
-        Line::from(Span::styled("MISDRI TERM", text_style)),
         Line::from(""),
         Line::from(Span::styled("Enterキーを押してスタート", text_style)),
         Line::from(Span::styled("(Qキーで終了)", text_style)),
         Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
-    ];
+    ]);
     let text_rows = text_lines.len() as u16;
 
     let content_area = centered_fixed_rect(area.width, art_rows + 1 + text_rows, area);
     let chunks = Layout::default()
         .direction(LayoutDirection::Vertical)
-        .constraints([Constraint::Length(art_rows), Constraint::Length(1), Constraint::Length(text_rows)])
+        .constraints([
+            Constraint::Length(art_rows),
+            Constraint::Length(1),
+            Constraint::Length(text_rows),
+        ])
         .split(content_area);
 
     frame.render_widget(
@@ -289,19 +364,30 @@ pub fn draw_title(frame: &mut Frame) {
 pub fn draw_help(frame: &mut Frame) {
     let area = frame.area();
 
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
     let help_area = centered_rect(90, 90, frame_rect);
     frame.render_widget(Clear, help_area);
 
-    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
-    let heading_style = Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG);
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default()
+        .fg(colors::PANEL_BORDER)
+        .bg(colors::LETTERBOX_BG);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
     let line = |text: &str| Line::from(Span::styled(text.to_string(), text_style));
@@ -461,9 +547,12 @@ pub fn draw_settings(
 ) {
     let area = frame.area();
 
-    frame
-        .buffer_mut()
-        .set_style(area, Style::default().fg(colors::LETTERBOX_BG).bg(colors::LETTERBOX_BG));
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
     // 設定項目が増えるたびに縦に伸びてきた(#108でアイテム3種のrate行を追加した際、
@@ -473,36 +562,67 @@ pub fn draw_settings(
     let settings_area = centered_rect(60, 90, frame_rect);
     frame.render_widget(Clear, settings_area);
 
-    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
-    let selected_style = Style::default().fg(colors::LETTERBOX_BG).bg(colors::PANEL_TEXT);
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default()
+        .fg(colors::LETTERBOX_BG)
+        .bg(colors::PANEL_TEXT);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
     let toggle_line = |label: &str, enabled: bool, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
-        let style = if is_selected { selected_style } else { text_style };
-        Line::from(Span::styled(format!("{prefix}{label}: {}", on_off_label(enabled)), style))
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
+        Line::from(Span::styled(
+            format!("{prefix}{label}: {}", on_off_label(enabled)),
+            style,
+        ))
     };
     let rate_line = |label: &str, percent: u32, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
-        let style = if is_selected { selected_style } else { text_style };
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
         Line::from(Span::styled(format!("{prefix}{label}: {percent}%"), style))
     };
     let count_line = |label: &str, count: u8, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
-        let style = if is_selected { selected_style } else { text_style };
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
         Line::from(Span::styled(format!("{prefix}{label}: {count}"), style))
     };
     let width_line = |label: &str, width: usize, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
-        let style = if is_selected { selected_style } else { text_style };
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
         Line::from(Span::styled(format!("{prefix}{label}: {width}"), style))
     };
     let ms_line = |label: &str, ms: u64, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
-        let style = if is_selected { selected_style } else { text_style };
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
         Line::from(Span::styled(format!("{prefix}{label}: {ms}ms"), style))
     };
 
@@ -511,10 +631,26 @@ pub fn draw_settings(
         Line::from(""),
         toggle_line("MUSIC", music_enabled, selection == SettingsChoice::Music),
         toggle_line("SE", se_enabled, selection == SettingsChoice::Se),
-        rate_line("Xブロック配分", rock_rate_percent, selection == SettingsChoice::RockRate),
-        rate_line("AIR配分", air_rate_percent, selection == SettingsChoice::AirRate),
-        rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
-        rate_line("ダイヤ配分", diamond_rate_percent, selection == SettingsChoice::DiamondRate),
+        rate_line(
+            "Xブロック配分",
+            rock_rate_percent,
+            selection == SettingsChoice::RockRate,
+        ),
+        rate_line(
+            "AIR配分",
+            air_rate_percent,
+            selection == SettingsChoice::AirRate,
+        ),
+        rate_line(
+            "スター配分",
+            star_rate_percent,
+            selection == SettingsChoice::StarRate,
+        ),
+        rate_line(
+            "ダイヤ配分",
+            diamond_rate_percent,
+            selection == SettingsChoice::DiamondRate,
+        ),
         rate_line(
             "Rアイテム配分",
             item_clear_above_rate_percent,
@@ -536,7 +672,11 @@ pub fn draw_settings(
             color_cluster_rate_percent,
             selection == SettingsChoice::ColorClusterRate,
         ),
-        width_line("列数(次回開始時に反映)", field_width, selection == SettingsChoice::FieldWidth),
+        width_line(
+            "列数(次回開始時に反映)",
+            field_width,
+            selection == SettingsChoice::FieldWidth,
+        ),
         ms_line(
             "ブロック落下速度(小さいほど速い)",
             block_fall_tick_ms,
@@ -558,8 +698,14 @@ pub fn draw_settings(
             selection == SettingsChoice::DodgeRecoveryMs,
         ),
         Line::from(""),
-        Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceか←→でトグル", text_style)),
-        Line::from(Span::styled("配分・色数は←→で調整 / Qでタイトルへ", text_style)),
+        Line::from(Span::styled(
+            "↑↓で選択 / MUSIC・SEはSpaceか←→でトグル",
+            text_style,
+        )),
+        Line::from(Span::styled(
+            "配分・色数は←→で調整 / Qでタイトルへ",
+            text_style,
+        )),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))
@@ -572,7 +718,9 @@ fn draw_size_warning(frame: &mut Frame, area: Rect) {
         "ターミナルサイズが不足しています(現在 {}x{} / 最小 {}x{} / 推奨 {}x{})。ウィンドウを広げてください",
         area.width, area.height, MIN_TERMINAL_W, MIN_TERMINAL_H, TOTAL_SCREEN_W, TOTAL_SCREEN_H
     );
-    let style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
     let paragraph = Paragraph::new(message)
         .style(style)
         .alignment(Alignment::Center)
@@ -587,7 +735,11 @@ fn draw_size_warning(frame: &mut Frame, area: Rect) {
 fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
         .style(Style::default().bg(colors::FIELD_EMPTY_BG));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -596,7 +748,8 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
         return;
     }
 
-    let player_screen_row = (visible_rows * PLAYER_SCREEN_ROW_RATIO_NUM / PLAYER_SCREEN_ROW_RATIO_DEN)
+    let player_screen_row = (visible_rows * PLAYER_SCREEN_ROW_RATIO_NUM
+        / PLAYER_SCREEN_ROW_RATIO_DEN)
         .min(visible_rows.saturating_sub(1));
     let top_row = game.player.row.saturating_sub(player_screen_row);
 
@@ -640,7 +793,10 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             // までのアニメーションぐらぐらしてほしい(各種ブロック)」)。
             let draw_x = if game.is_cell_shaking(board_row, col) {
                 let jitter = shake_jitter_x(game.player.elapsed_seconds, board_row, col);
-                (x as i32 + jitter).clamp(inner.x as i32, (inner.x + inner.width).saturating_sub(CELL_W) as i32) as u16
+                (x as i32 + jitter).clamp(
+                    inner.x as i32,
+                    (inner.x + inner.width).saturating_sub(CELL_W) as i32,
+                ) as u16
             } else {
                 x
             };
@@ -783,7 +939,13 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
     } else if game.is_dodge_sliding() {
         draw_player_sprite(buf, x, y, DODGE_SPRITE, bg);
     } else {
-        draw_player_sprite(buf, x, y, player_sprite(game.player.facing, game.drilling_frame()), bg);
+        draw_player_sprite(
+            buf,
+            x,
+            y,
+            player_sprite(game.player.facing, game.drilling_frame()),
+            bg,
+        );
     }
 }
 
@@ -794,7 +956,15 @@ const DODGE_SLIDE_OFFSET_CELLS: f32 = 0.6;
 const ASCEND_RISE_CELLS: f32 = 2.0;
 
 /// 1論理セルぶん(4文字×2行)を描画する。
-fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize, cell: BoardCell) {
+fn draw_logical_cell(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    board: &Board,
+    row: usize,
+    col: usize,
+    cell: BoardCell,
+) {
     match cell {
         BoardCell::Empty => fill_block(buf, x, y, colors::FIELD_EMPTY_BG),
         BoardCell::Color(kind) => draw_color_block(buf, x, y, board, row, col, kind),
@@ -802,8 +972,22 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
         // AIRはカプセル(丸薬)らしいシルエットにする(TERM独自拡張。ユーザー指摘:
         // 「AIRをカプセルのような形状にしたい」)。4分円グリフを組み合わせて楕円の
         // 輪郭を描く。
-        BoardCell::Oxygen => draw_fixed_unit(buf, x, y, [['◜', '◝'], ['◟', '◞']], colors::OXYGEN_FG, colors::OXYGEN_BG),
-        BoardCell::Diamond => draw_fixed_unit(buf, x, y, [['◆', '◆'], ['◆', '◆']], colors::DIAMOND_FG, colors::DIAMOND_BG),
+        BoardCell::Oxygen => draw_fixed_unit(
+            buf,
+            x,
+            y,
+            [['◜', '◝'], ['◟', '◞']],
+            colors::OXYGEN_FG,
+            colors::OXYGEN_BG,
+        ),
+        BoardCell::Diamond => draw_fixed_unit(
+            buf,
+            x,
+            y,
+            [['◆', '◆'], ['◆', '◆']],
+            colors::DIAMOND_FG,
+            colors::DIAMOND_BG,
+        ),
         BoardCell::Star { visible_ms } => draw_fixed_unit(
             buf,
             x,
@@ -816,16 +1000,31 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
         // ユーザー指摘: 「他のアイテムも相手有無特有の形状にしたい」)。ClearAboveは
         // 頭上を吹き飛ばすイメージで上向き矢印を、UnifyColorsは色が混ざり合う
         // イメージで陰陽風の分割円を上段に添える。
-        BoardCell::Item(ItemEffect::ClearAbove) => {
-            draw_fixed_unit(buf, x, y, [['↑', '↑'], ['R', 'R']], colors::ITEM_CLEAR_ABOVE_FG, colors::ITEM_CLEAR_ABOVE_BG)
-        }
-        BoardCell::Item(ItemEffect::UnifyColors) => {
-            draw_fixed_unit(buf, x, y, [['◐', '◑'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG)
-        }
+        BoardCell::Item(ItemEffect::ClearAbove) => draw_fixed_unit(
+            buf,
+            x,
+            y,
+            [['↑', '↑'], ['R', 'R']],
+            colors::ITEM_CLEAR_ABOVE_FG,
+            colors::ITEM_CLEAR_ABOVE_BG,
+        ),
+        BoardCell::Item(ItemEffect::UnifyColors) => draw_fixed_unit(
+            buf,
+            x,
+            y,
+            [['◐', '◑'], ['C', 'C']],
+            colors::ITEM_UNIFY_COLORS_FG,
+            colors::ITEM_UNIFY_COLORS_BG,
+        ),
         // StarifyScreenはスターブロックを連想させる☆をあしらう。
-        BoardCell::Item(ItemEffect::StarifyScreen) => {
-            draw_fixed_unit(buf, x, y, [['☆', '☆'], ['K', 'K']], colors::ITEM_STARIFY_SCREEN_FG, colors::ITEM_STARIFY_SCREEN_BG)
-        }
+        BoardCell::Item(ItemEffect::StarifyScreen) => draw_fixed_unit(
+            buf,
+            x,
+            y,
+            [['☆', '☆'], ['K', 'K']],
+            colors::ITEM_STARIFY_SCREEN_FG,
+            colors::ITEM_STARIFY_SCREEN_BG,
+        ),
     }
 }
 
@@ -868,9 +1067,18 @@ struct ConnMask {
 
 /// `same`(隣接セルが自分と同種と言えるか)を基準に4方向の接続有無を求める共通処理。
 /// 色ブロック(同色判定)・岩ブロック(hitsを問わずRockかどうかの判定)の両方で使う。
-fn conn_mask_by(board: &Board, row: usize, col: usize, same: impl Fn(BoardCell) -> bool) -> ConnMask {
+fn conn_mask_by(
+    board: &Board,
+    row: usize,
+    col: usize,
+    same: impl Fn(BoardCell) -> bool,
+) -> ConnMask {
     let check = |r: isize, c: isize| -> bool {
-        r >= 0 && (r as usize) < board.depth_rows() && c >= 0 && (c as usize) < board.width() && same(board.cell(r as usize, c as usize))
+        r >= 0
+            && (r as usize) < board.depth_rows()
+            && c >= 0
+            && (c as usize) < board.width()
+            && same(board.cell(r as usize, c as usize))
     };
     ConnMask {
         up: check(row as isize - 1, col as isize),
@@ -887,11 +1095,20 @@ fn conn_mask(board: &Board, row: usize, col: usize, kind: ColorKind) -> ConnMask
 /// 岩ブロック用の接続判定。ヒット数(hits)が違っていても同じ岩ブロック種別として
 /// 連結しているとみなす(spec.md 4章「岩ブロックもhitsを問わず連結対象」、game::board::hit_rock参照)。
 fn conn_mask_rock(board: &Board, row: usize, col: usize) -> ConnMask {
-    conn_mask_by(board, row, col, |cell| matches!(cell, BoardCell::Rock { .. }))
+    conn_mask_by(board, row, col, |cell| {
+        matches!(cell, BoardCell::Rock { .. })
+    })
 }
 
-
-fn draw_color_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize, kind: ColorKind) {
+fn draw_color_block(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    board: &Board,
+    row: usize,
+    col: usize,
+    kind: ColorKind,
+) {
     let mask = conn_mask(board, row, col, kind);
     let bg = colors::fill_color(kind);
     let border_fg = colors::highlight_color(kind);
@@ -912,7 +1129,16 @@ fn draw_color_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize,
 /// 角1マスぶんの罫線文字を決めて描く(spec.md 9.3の表)。
 /// `a_conn`/`b_conn`はこの角に関係する2方向(例: 左上角ならup, left)の接続有無。
 #[allow(clippy::too_many_arguments)] // 描画座標・接続フラグ・グリフ・配色をまとめた薄いヘルパーのため許容する
-fn put_corner(buf: &mut Buffer, x: u16, y: u16, a_conn: bool, b_conn: bool, none_glyph: char, fg: Color, bg: Color) {
+fn put_corner(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    a_conn: bool,
+    b_conn: bool,
+    none_glyph: char,
+    fg: Color,
+    bg: Color,
+) {
     let ch = match (a_conn, b_conn) {
         (false, false) => none_glyph,
         (false, true) => '─',
@@ -932,7 +1158,14 @@ fn put_edge(buf: &mut Buffer, x: u16, y: u16, connected: bool, fg: Color, bg: Co
 
 /// 岩・酸素・ダイヤ共通: 常に4方向とも非接続(=フルに縁取られた独立ユニット)として描く。
 /// 角は丸罫線、辺の位置(中央2列×2行)には種類ごとの記号を敷き詰める(spec.md 9.4)。
-fn draw_fixed_unit(buf: &mut Buffer, x: u16, y: u16, content: [[char; 2]; 2], fg: Color, bg: Color) {
+fn draw_fixed_unit(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    content: [[char; 2]; 2],
+    fg: Color,
+    bg: Color,
+) {
     put(buf, x, y, '╭', fg, bg);
     put(buf, x + 3, y, '╮', fg, bg);
     put(buf, x, y + 1, '╰', fg, bg);
@@ -958,7 +1191,15 @@ fn rock_glyphs(hits: u8) -> [[char; 2]; 2] {
 /// 接続させ1つの塊として繋がって見えるようにする(ユーザー指摘反映: 「Xブロックも接触
 /// したら結合しないと」・横方向も対象)。ヒビ/Xマーク(rock_glyphs)は視認性を優先し、
 /// 接続の有無に関わらず中央2列には常に表示する(色ブロックのように空白へは置き換えない)。
-fn draw_rock_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize, hits: u8) {
+fn draw_rock_block(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    board: &Board,
+    row: usize,
+    col: usize,
+    hits: u8,
+) {
     let mask = conn_mask_rock(board, row, col);
     let bg = colors::rock_bg(hits);
     let fg = colors::ROCK_X_FG;
@@ -985,7 +1226,9 @@ fn natural_cell_bg(cell: BoardCell) -> Color {
         BoardCell::Rock { hits } => colors::rock_bg(hits),
         BoardCell::Oxygen => colors::OXYGEN_BG,
         BoardCell::Diamond => colors::DIAMOND_BG,
-        BoardCell::Star { visible_ms } => colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
+        BoardCell::Star { visible_ms } => {
+            colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS)
+        }
         BoardCell::Item(ItemEffect::ClearAbove) => colors::ITEM_CLEAR_ABOVE_BG,
         BoardCell::Item(ItemEffect::UnifyColors) => colors::ITEM_UNIFY_COLORS_BG,
         BoardCell::Item(ItemEffect::StarifyScreen) => colors::ITEM_STARIFY_SCREEN_BG,
@@ -1042,7 +1285,11 @@ fn draw_crushed_sprite(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
 fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
         .style(Style::default().bg(colors::LETTERBOX_BG));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1052,7 +1299,9 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
     }
 
     let buf = frame.buffer_mut();
-    let label_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let label_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
     let mut row: u16 = 0;
 
     write_line(buf, inner, &mut row, "DEPTH", label_style);
@@ -1077,7 +1326,9 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
 
     write_line(buf, inner, &mut row, "AIR", label_style);
     let ratio = (game.player.oxygen / OXYGEN_MAX).clamp(0.0, 1.0);
-    let air_style = Style::default().fg(colors::oxygen_bar_color(ratio)).bg(colors::LETTERBOX_BG);
+    let air_style = Style::default()
+        .fg(colors::oxygen_bar_color(ratio))
+        .bg(colors::LETTERBOX_BG);
     let gauge = air_gauge_string(ratio, game.player.oxygen_display());
     let air_text = if ratio < 0.3 {
         format!("  {gauge} \u{2620}") // ☠ 骸骨アイコン(spec.md 9.7・6章)
@@ -1088,19 +1339,37 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
     write_line(buf, inner, &mut row, "", label_style);
 
     write_line(buf, inner, &mut row, "LIVES", label_style);
-    write_line(buf, inner, &mut row, &format!("  \u{2665} \u{d7}{}", game.player.lives), label_style);
+    write_line(
+        buf,
+        inner,
+        &mut row,
+        &format!("  \u{2665} \u{d7}{}", game.player.lives),
+        label_style,
+    );
     write_line(buf, inner, &mut row, "", label_style);
 
     write_line(buf, inner, &mut row, "TIME", label_style);
     let elapsed = game.player.elapsed_seconds as u32;
-    write_line(buf, inner, &mut row, &format!("  {:02}:{:02}", elapsed / 60, elapsed % 60), label_style);
+    write_line(
+        buf,
+        inner,
+        &mut row,
+        &format!("  {:02}:{:02}", elapsed / 60, elapsed % 60),
+        label_style,
+    );
     write_line(buf, inner, &mut row, "", label_style);
 
     // #85(揺れているブロックが浮いたまま落下しない)の調査用(TERM独自拡張。
     // ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
     // ブロック状態遷移ログ(debug_log)の記録と突き合わせるための番号を表示する。
     write_line(buf, inner, &mut row, "FRAME", label_style);
-    write_line(buf, inner, &mut row, &format!("  {}", game.debug_frame()), label_style);
+    write_line(
+        buf,
+        inner,
+        &mut row,
+        &format!("  {}", game.debug_frame()),
+        label_style,
+    );
 }
 
 /// `inner`の`*row`行目(0始まり)へ、幅いっぱいにパディングした1行を明示スタイルで書く。
@@ -1124,7 +1393,12 @@ fn air_gauge_string(ratio: f32, percent: u32) -> String {
     const TOTAL: usize = 10;
     let filled = ((ratio * TOTAL as f32).round() as usize).min(TOTAL);
     let empty = TOTAL - filled;
-    format!("[{}{}] {}%", "#".repeat(filled), "\u{2591}".repeat(empty), percent)
+    format!(
+        "[{}{}] {}%",
+        "#".repeat(filled),
+        "\u{2591}".repeat(empty),
+        percent
+    )
 }
 
 /// スコアを3桁区切りカンマ付きで表示する(spec.md 9.7の表示例「1,230」)。
@@ -1149,14 +1423,24 @@ fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hints: &[&str]) {
     let overlay_area = centered_rect(40, 20, area);
     frame.render_widget(Clear, overlay_area);
 
-    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
     let mut lines = vec![Line::from(Span::styled(title, text_style))];
-    lines.extend(hints.iter().map(|hint| Line::from(Span::styled(*hint, text_style))));
+    lines.extend(
+        hints
+            .iter()
+            .map(|hint| Line::from(Span::styled(*hint, text_style))),
+    );
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -1171,16 +1455,28 @@ fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoi
     let overlay_area = centered_rect(40, 25, area);
     frame.render_widget(Clear, overlay_area);
 
-    let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
-    let selected_style = Style::default().fg(colors::LETTERBOX_BG).bg(colors::PANEL_TEXT);
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default()
+        .fg(colors::LETTERBOX_BG)
+        .bg(colors::PANEL_TEXT);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(colors::PANEL_BORDER).bg(colors::LETTERBOX_BG))
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
     let choice_line = |label: &str, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
-        let style = if is_selected { selected_style } else { text_style };
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
         Line::from(Span::styled(format!("{prefix}{label}"), style))
     };
 
@@ -1248,7 +1544,10 @@ mod tests {
         draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
 
         let has_diamond_glyph = buf.content.iter().any(|cell| cell.symbol() == "◆");
-        assert!(has_diamond_glyph, "落下中もダイヤの◆グリフが描画されているはず");
+        assert!(
+            has_diamond_glyph,
+            "落下中もダイヤの◆グリフが描画されているはず"
+        );
     }
 
     // --- 設定画面のカーソル移動(TERM独自拡張) ---
@@ -1330,7 +1629,10 @@ mod tests {
             for row in 0..3 {
                 for col in 0..3 {
                     let jitter = shake_jitter_x(elapsed, row, col);
-                    assert!((-1..=1).contains(&jitter), "jitterは-1〜1の範囲のはず: {jitter}");
+                    assert!(
+                        (-1..=1).contains(&jitter),
+                        "jitterは-1〜1の範囲のはず: {jitter}"
+                    );
                 }
             }
         }
@@ -1391,14 +1693,20 @@ mod tests {
         for y in [0u16, 1] {
             for x in [3u16, 4] {
                 let symbol = buf.cell(Position::new(x, y)).unwrap().symbol();
-                assert_eq!(symbol, "─", "継ぎ目(x={x},y={y})は縦線で区切られず、横線で繋がっているはず");
+                assert_eq!(
+                    symbol, "─",
+                    "継ぎ目(x={x},y={y})は縦線で区切られず、横線で繋がっているはず"
+                );
             }
         }
 
         // 継ぎ目をまたぐ左右の背景色も一致し、色ムラなく1つの塊に見える。
         let left_bg = buf.cell(Position::new(3, 0)).unwrap().bg;
         let right_bg = buf.cell(Position::new(4, 0)).unwrap().bg;
-        assert_eq!(left_bg, right_bg, "継ぎ目の左右で背景色(シェーディング)が食い違ってはいけない");
+        assert_eq!(
+            left_bg, right_bg,
+            "継ぎ目の左右で背景色(シェーディング)が食い違ってはいけない"
+        );
     }
 
     #[test]

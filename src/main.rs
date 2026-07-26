@@ -11,21 +11,24 @@ mod ui;
 
 use std::io;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
-    DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
-    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
-    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
-    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
+    FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
+    MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
+    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -43,7 +46,8 @@ fn main() -> io::Result<()> {
     // 曖昧になり得るため、対応ターミナル(kitty/WezTerm/Alacritty/foot等)では
     // DISAMBIGUATE_ESCAPE_CODESで曖昧さを解消する。非対応ターミナルでは何もしない
     // (`supports_keyboard_enhancement`がfalse/Errの場合は従来通り)。
-    let keyboard_enhancement_enabled = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+    let keyboard_enhancement_enabled = crossterm::terminal::supports_keyboard_enhancement()
+        .unwrap_or(false)
         && execute!(
             io::stdout(),
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -72,7 +76,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 起動直後はタイトル画面から始まるため、MUSIC設定がONでも実際に鳴らす値は
     // `effective_music_enabled`経由でタイトル画面ぶん無音にしておく(TERM独自拡張。
     // ユーザー指摘: 「タイトル画面ではMUSIC無し」)。
-    let music_enabled = Arc::new(AtomicBool::new(effective_music_enabled(settings.music_enabled, &Screen::Title)));
+    let music_enabled = Arc::new(AtomicBool::new(effective_music_enabled(
+        settings.music_enabled,
+        &Screen::Title,
+    )));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
@@ -127,7 +134,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     // ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、ショートカット設定
                     // されていない任意のキー入力でも解除されるように」。オーバーレイ
                     // (設定/ヘルプ)表示中は対象外にする(そちらはQ/S/Hで明示的に閉じる)。
-                    InputAction::UnboundKey if game.status == GameStatus::Paused && pause_overlay == PauseOverlay::None => {
+                    InputAction::UnboundKey
+                        if game.status == GameStatus::Paused
+                            && pause_overlay == PauseOverlay::None =>
+                    {
                         game.toggle_pause();
                     }
                     InputAction::UnboundKey => {}
@@ -252,19 +262,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         let increase = action == InputAction::MoveRight;
                         match settings_selection {
                             ui::render::SettingsChoice::BlockFallSpeed => {
-                                settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                                settings.block_fall_tick_ms =
+                                    adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
                                 game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                             }
                             ui::render::SettingsChoice::PlayerFallSpeed => {
-                                settings.player_fall_tick_ms = adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
+                                settings.player_fall_tick_ms =
+                                    adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
                                 game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                             }
                             ui::render::SettingsChoice::MoveSpeed => {
-                                settings.move_cooldown_ms = adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
+                                settings.move_cooldown_ms =
+                                    adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
                                 game.set_move_cooldown_ms(settings.move_cooldown_ms);
                             }
                             ui::render::SettingsChoice::DodgeRecoveryMs => {
-                                settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
+                                settings.dodge_recovery_ms =
+                                    adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                                 game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
                             }
                             _ => {}
@@ -303,16 +317,25 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         let increase = action == InputAction::MoveRight;
                         match settings_selection {
                             ui::render::SettingsChoice::RockRate => {
-                                settings.rock_spawn_rate_percent =
-                                    adjust_rate_percent(settings.rock_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
+                                settings.rock_spawn_rate_percent = adjust_rate_percent(
+                                    settings.rock_spawn_rate_percent,
+                                    increase,
+                                    SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::AirRate => {
-                                settings.air_spawn_rate_percent =
-                                    adjust_rate_percent(settings.air_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
+                                settings.air_spawn_rate_percent = adjust_rate_percent(
+                                    settings.air_spawn_rate_percent,
+                                    increase,
+                                    SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::StarRate => {
-                                settings.star_spawn_rate_percent =
-                                    adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
+                                settings.star_spawn_rate_percent = adjust_rate_percent(
+                                    settings.star_spawn_rate_percent,
+                                    increase,
+                                    STAR_SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::DiamondRate => {
                                 settings.diamond_spawn_rate_percent = adjust_rate_percent(
@@ -343,7 +366,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 );
                             }
                             ui::render::SettingsChoice::ColorCount => {
-                                settings.color_count = adjust_color_count(settings.color_count, increase);
+                                settings.color_count =
+                                    adjust_color_count(settings.color_count, increase);
                             }
                             ui::render::SettingsChoice::ColorClusterRate => {
                                 settings.color_cluster_rate_percent = adjust_rate_percent(
@@ -372,7 +396,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
                     // (TERM独自拡張。ユーザー指摘: 「タイトルに戻るか、その場から復活して
                     // 再開するか、ダイアログ表示してカーソルで選べるように」)。
-                    InputAction::FaceUp | InputAction::FaceDown if game.status == GameStatus::GameOver => {
+                    InputAction::FaceUp | InputAction::FaceDown
+                        if game.status == GameStatus::GameOver =>
+                    {
                         game.toggle_game_over_selection();
                     }
                     InputAction::Confirm if game.status == GameStatus::GameOver => {
@@ -516,34 +542,32 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::FaceDown => {
                         settings_selection = settings_selection.cycle();
                     }
-                    InputAction::Drill => {
-                        match settings_selection {
-                            ui::render::SettingsChoice::Music => {
-                                settings.music_enabled = !settings.music_enabled;
-                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
-                                settings.save();
-                            }
-                            ui::render::SettingsChoice::Se => {
-                                settings.se_enabled = !settings.se_enabled;
-                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
-                                settings.save();
-                            }
-                            ui::render::SettingsChoice::RockRate
-                            | ui::render::SettingsChoice::AirRate
-                            | ui::render::SettingsChoice::StarRate
-                            | ui::render::SettingsChoice::DiamondRate
-                            | ui::render::SettingsChoice::ItemClearAboveRate
-                            | ui::render::SettingsChoice::ItemUnifyColorsRate
-                            | ui::render::SettingsChoice::ItemStarifyScreenRate
-                            | ui::render::SettingsChoice::ColorCount
-                            | ui::render::SettingsChoice::ColorClusterRate
-                            | ui::render::SettingsChoice::FieldWidth
-                            | ui::render::SettingsChoice::BlockFallSpeed
-                            | ui::render::SettingsChoice::PlayerFallSpeed
-                            | ui::render::SettingsChoice::MoveSpeed
-                            | ui::render::SettingsChoice::DodgeRecoveryMs => {}
+                    InputAction::Drill => match settings_selection {
+                        ui::render::SettingsChoice::Music => {
+                            settings.music_enabled = !settings.music_enabled;
+                            music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                            settings.save();
                         }
-                    }
+                        ui::render::SettingsChoice::Se => {
+                            settings.se_enabled = !settings.se_enabled;
+                            se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                            settings.save();
+                        }
+                        ui::render::SettingsChoice::RockRate
+                        | ui::render::SettingsChoice::AirRate
+                        | ui::render::SettingsChoice::StarRate
+                        | ui::render::SettingsChoice::DiamondRate
+                        | ui::render::SettingsChoice::ItemClearAboveRate
+                        | ui::render::SettingsChoice::ItemUnifyColorsRate
+                        | ui::render::SettingsChoice::ItemStarifyScreenRate
+                        | ui::render::SettingsChoice::ColorCount
+                        | ui::render::SettingsChoice::ColorClusterRate
+                        | ui::render::SettingsChoice::FieldWidth
+                        | ui::render::SettingsChoice::BlockFallSpeed
+                        | ui::render::SettingsChoice::PlayerFallSpeed
+                        | ui::render::SettingsChoice::MoveSpeed
+                        | ui::render::SettingsChoice::DodgeRecoveryMs => {}
+                    },
                     // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
                     // 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで切り替えできる
                     // ように」)。トグルなので方向は問わず、押されたら反転する。
@@ -585,16 +609,25 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         let increase = action == InputAction::MoveRight;
                         match settings_selection {
                             ui::render::SettingsChoice::RockRate => {
-                                settings.rock_spawn_rate_percent =
-                                    adjust_rate_percent(settings.rock_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
+                                settings.rock_spawn_rate_percent = adjust_rate_percent(
+                                    settings.rock_spawn_rate_percent,
+                                    increase,
+                                    SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::AirRate => {
-                                settings.air_spawn_rate_percent =
-                                    adjust_rate_percent(settings.air_spawn_rate_percent, increase, SPAWN_RATE_PERCENT_MIN);
+                                settings.air_spawn_rate_percent = adjust_rate_percent(
+                                    settings.air_spawn_rate_percent,
+                                    increase,
+                                    SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::StarRate => {
-                                settings.star_spawn_rate_percent =
-                                    adjust_rate_percent(settings.star_spawn_rate_percent, increase, STAR_SPAWN_RATE_PERCENT_MIN);
+                                settings.star_spawn_rate_percent = adjust_rate_percent(
+                                    settings.star_spawn_rate_percent,
+                                    increase,
+                                    STAR_SPAWN_RATE_PERCENT_MIN,
+                                );
                             }
                             ui::render::SettingsChoice::DiamondRate => {
                                 settings.diamond_spawn_rate_percent = adjust_rate_percent(
@@ -625,7 +658,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 );
                             }
                             ui::render::SettingsChoice::ColorCount => {
-                                settings.color_count = adjust_color_count(settings.color_count, increase);
+                                settings.color_count =
+                                    adjust_color_count(settings.color_count, increase);
                             }
                             ui::render::SettingsChoice::ColorClusterRate => {
                                 settings.color_cluster_rate_percent = adjust_rate_percent(
@@ -635,19 +669,24 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 );
                             }
                             ui::render::SettingsChoice::FieldWidth => {
-                                settings.field_width = adjust_field_width(settings.field_width, increase);
+                                settings.field_width =
+                                    adjust_field_width(settings.field_width, increase);
                             }
                             ui::render::SettingsChoice::BlockFallSpeed => {
-                                settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
+                                settings.block_fall_tick_ms =
+                                    adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
                             }
                             ui::render::SettingsChoice::PlayerFallSpeed => {
-                                settings.player_fall_tick_ms = adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
+                                settings.player_fall_tick_ms =
+                                    adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
                             }
                             ui::render::SettingsChoice::MoveSpeed => {
-                                settings.move_cooldown_ms = adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
+                                settings.move_cooldown_ms =
+                                    adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
                             }
                             ui::render::SettingsChoice::DodgeRecoveryMs => {
-                                settings.dodge_recovery_ms = adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
+                                settings.dodge_recovery_ms =
+                                    adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                             }
                             _ => {}
                         }
@@ -719,7 +758,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが
         // 参照する実効MUSIC状態を毎フレーム同期する(TERM独自拡張。ユーザー指摘:
         // 「タイトル画面ではMUSIC無し」)。
-        music_enabled.store(effective_music_enabled(settings.music_enabled, &screen), Ordering::Relaxed);
+        music_enabled.store(
+            effective_music_enabled(settings.music_enabled, &screen),
+            Ordering::Relaxed,
+        );
     }
 
     bgm_stop.store(true, Ordering::Relaxed);
@@ -792,7 +834,9 @@ fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
     if increase {
         (current + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
     } else {
-        current.saturating_sub(DEBUG_FALL_TICK_STEP_MS).max(DEBUG_FALL_TICK_MS_MIN)
+        current
+            .saturating_sub(DEBUG_FALL_TICK_STEP_MS)
+            .max(DEBUG_FALL_TICK_MS_MIN)
     }
 }
 
@@ -803,7 +847,9 @@ fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
     if increase {
         (current + MOVE_COOLDOWN_MS_STEP).min(MOVE_COOLDOWN_MS_MAX)
     } else {
-        current.saturating_sub(MOVE_COOLDOWN_MS_STEP).max(MOVE_COOLDOWN_MS_MIN)
+        current
+            .saturating_sub(MOVE_COOLDOWN_MS_STEP)
+            .max(MOVE_COOLDOWN_MS_MIN)
     }
 }
 
@@ -813,7 +859,9 @@ fn adjust_field_width(current: usize, increase: bool) -> usize {
     if increase {
         (current + FIELD_WIDTH_STEP).min(FIELD_WIDTH_MAX)
     } else {
-        current.saturating_sub(FIELD_WIDTH_STEP).max(FIELD_WIDTH_MIN)
+        current
+            .saturating_sub(FIELD_WIDTH_STEP)
+            .max(FIELD_WIDTH_MIN)
     }
 }
 
@@ -882,11 +930,17 @@ mod tests {
     #[test]
     fn effective_music_enabled_is_true_while_playing_or_paused() {
         let game = Game::new(1);
-        assert!(effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+        assert!(effective_music_enabled(
+            true,
+            &Screen::Playing(Box::new(game))
+        ));
 
         let mut game = Game::new(1);
         game.status = GameStatus::Paused;
-        assert!(effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+        assert!(effective_music_enabled(
+            true,
+            &Screen::Playing(Box::new(game))
+        ));
     }
 
     #[test]
@@ -895,7 +949,10 @@ mod tests {
         // MUSIC停止」。
         let mut game = Game::new(1);
         game.status = GameStatus::GameOver;
-        assert!(!effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+        assert!(!effective_music_enabled(
+            true,
+            &Screen::Playing(Box::new(game))
+        ));
     }
 
     #[test]
@@ -904,6 +961,9 @@ mod tests {
         // クリア時はBGMを止め、ファンファーレはSEとして別途再生する。
         let mut game = Game::new(1);
         game.status = GameStatus::Cleared;
-        assert!(!effective_music_enabled(true, &Screen::Playing(Box::new(game))));
+        assert!(!effective_music_enabled(
+            true,
+            &Screen::Playing(Box::new(game))
+        ));
     }
 }

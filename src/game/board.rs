@@ -9,8 +9,8 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    depth_fraction, COLOR_CLUSTER_DEPTH_START_PROB, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
-    STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS,
+    COLOR_CLUSTER_DEPTH_START_PROB, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
+    STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS, depth_fraction,
 };
 
 /// フィールド1マスの内容。
@@ -21,7 +21,9 @@ pub enum Cell {
     /// 岩ブロック(Xブロック)。破壊されるまでの累積ヒット数(0〜4、spec.md 2章・4章)。
     /// 5回目のヒットで破壊される(確定事実: "require five strikes before they break")。
     /// 落下・着地してもこの値は保持されたまま移動する(spec.md 4.8)。
-    Rock { hits: u8 },
+    Rock {
+        hits: u8,
+    },
     Oxygen,
     /// ダイヤブロック。TERM独自拡張(初代の確定事実には存在しない要素)。
     Diamond,
@@ -32,7 +34,9 @@ pub enum Cell {
     /// `visible_ms`は画面内に入ってからの経過時間(ms)。ブロック落下tickの間隔(深度
     /// によって変わる、TERM独自拡張)とは独立した実時間で管理するため、tick数ではなく
     /// 経過ミリ秒で持つ。掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
-    Star { visible_ms: u32 },
+    Star {
+        visible_ms: u32,
+    },
     /// アイテムブロック(TERM独自拡張。ユーザー指摘: 「ショートカットRと同じ効果の
     /// あるアイテムつくろ」「ショートカットC効果のアイテムも作って」)。ドリルで
     /// 取得すると即座に対応するデバッグショートカットと同じ効果が発動する。ダイヤ・
@@ -62,7 +66,12 @@ pub enum ColorKind {
 
 impl ColorKind {
     /// 全色種の一覧(生成時の走査・UIパレット参照に使う)。
-    pub const ALL: [ColorKind; 4] = [ColorKind::Red, ColorKind::Blue, ColorKind::Green, ColorKind::Yellow];
+    pub const ALL: [ColorKind; 4] = [
+        ColorKind::Red,
+        ColorKind::Blue,
+        ColorKind::Green,
+        ColorKind::Yellow,
+    ];
 }
 
 /// 深度帯ごとの岩・酸素・ダイヤの出現確率テーブル(spec.md 3.1)。
@@ -139,16 +148,22 @@ const TOP_INHERIT_PROB_CEIL: f32 = 0.90;
 /// - `r < LEFT_INHERIT_PROB`(0.65) かつ左隣が色ブロックなら左隣と同色
 /// - それ以外で `r < TOP_INHERIT_PROB_CEIL`(0.90) かつ上隣が色ブロックなら上隣と同色
 /// - どちらにも該当しなければ4色から均等ランダム
-fn pick_base_color(rng: &mut ChaCha8Rng, left: Option<ColorKind>, top: Option<ColorKind>) -> ColorKind {
+fn pick_base_color(
+    rng: &mut ChaCha8Rng,
+    left: Option<ColorKind>,
+    top: Option<ColorKind>,
+) -> ColorKind {
     let r: f32 = rng.random_range(0.0..1.0);
     if r < LEFT_INHERIT_PROB
-        && let Some(c) = left {
-            return c;
-        }
+        && let Some(c) = left
+    {
+        return c;
+    }
     if r < TOP_INHERIT_PROB_CEIL
-        && let Some(c) = top {
-            return c;
-        }
+        && let Some(c) = top
+    {
+        return c;
+    }
     ColorKind::ALL[rng.random_range(0..4)]
 }
 
@@ -194,7 +209,11 @@ fn color_of(cell: Cell) -> Option<ColorKind> {
 /// 常に`None`のままにする。これにより3.2の「上隣が存在し色ブロックである」という
 /// 条件判定が、安全地帯を挟んでも自然にfalseになる(安全地帯にダミー色を置いて
 /// しまうと、実際には存在しない色ブロックから3行目以降の生成が影響を受けてしまう)。
-fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize, width: usize) -> Vec<Vec<Option<ColorKind>>> {
+fn generate_base_colors(
+    rng: &mut ChaCha8Rng,
+    depth_rows: usize,
+    width: usize,
+) -> Vec<Vec<Option<ColorKind>>> {
     let mut base: Vec<Vec<Option<ColorKind>>> = vec![vec![None; width]; depth_rows];
 
     for row in 2..depth_rows {
@@ -210,7 +229,12 @@ fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize, width: usize) -
             ];
             let top2 = [base[row - 1][col], base[row - 2][col]];
 
-            base[row][col] = Some(resolve_run_limits(candidate, left3, top2, ColorKind::ALL.len()));
+            base[row][col] = Some(resolve_run_limits(
+                candidate,
+                left3,
+                top2,
+                ColorKind::ALL.len(),
+            ));
         }
     }
 
@@ -218,26 +242,34 @@ fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize, width: usize) -
 }
 
 /// マス`(row, col)`の上下左右のうち、盤内かつ色ブロックであるものの色一覧(spec.md 3.4)。
-fn same_color_neighbor_candidates(base: &[Vec<Option<ColorKind>>], row: usize, col: usize) -> Vec<ColorKind> {
+fn same_color_neighbor_candidates(
+    base: &[Vec<Option<ColorKind>>],
+    row: usize,
+    col: usize,
+) -> Vec<ColorKind> {
     let rows = base.len();
     let width = base[row].len();
     let mut neighbors = Vec::with_capacity(4);
     if row > 0
-        && let Some(c) = base[row - 1][col] {
-            neighbors.push(c);
-        }
+        && let Some(c) = base[row - 1][col]
+    {
+        neighbors.push(c);
+    }
     if row + 1 < rows
-        && let Some(c) = base[row + 1][col] {
-            neighbors.push(c);
-        }
+        && let Some(c) = base[row + 1][col]
+    {
+        neighbors.push(c);
+    }
     if col > 0
-        && let Some(c) = base[row][col - 1] {
-            neighbors.push(c);
-        }
+        && let Some(c) = base[row][col - 1]
+    {
+        neighbors.push(c);
+    }
     if col + 1 < width
-        && let Some(c) = base[row][col + 1] {
-            neighbors.push(c);
-        }
+        && let Some(c) = base[row][col + 1]
+    {
+        neighbors.push(c);
+    }
     neighbors
 }
 
@@ -318,7 +350,8 @@ impl ItemSpawnCaps {
         ItemSpawnCaps {
             clear_above_remaining: max.saturating_sub(board.count_item(ItemEffect::ClearAbove)),
             unify_colors_remaining: max.saturating_sub(board.count_item(ItemEffect::UnifyColors)),
-            starify_screen_remaining: max.saturating_sub(board.count_item(ItemEffect::StarifyScreen)),
+            starify_screen_remaining: max
+                .saturating_sub(board.count_item(ItemEffect::StarifyScreen)),
         }
     }
 
@@ -385,12 +418,14 @@ fn overlay_rock_oxygen_diamond_with_rates(
         0.0
     };
     let item_unify_colors = if item_caps.unify_colors_remaining > 0 {
-        crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB * item_unify_colors_rate_percent as f32 / 100.0
+        crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB * item_unify_colors_rate_percent as f32
+            / 100.0
     } else {
         0.0
     };
     let item_starify_screen = if item_caps.starify_screen_remaining > 0 {
-        crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB * item_starify_screen_rate_percent as f32 / 100.0
+        crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB * item_starify_screen_rate_percent as f32
+            / 100.0
     } else {
         0.0
     };
@@ -436,7 +471,11 @@ fn overlay_rock_oxygen_diamond_with_rates(
 /// 差し替える(TERM独自拡張。ユーザー指摘: 「Xブロック配置のとき横一列全部埋まる
 /// 配置にはならないように」)。岩ブロックだけで完全にふさがった横一列は掘削しないと
 /// 絶対に通過できない壁になってしまうため、必ず逃げ道を1マス残す。
-fn ensure_row_is_not_fully_blocked_by_rock(row_cells: &mut [Cell], rng: &mut ChaCha8Rng, color_count: usize) {
+fn ensure_row_is_not_fully_blocked_by_rock(
+    row_cells: &mut [Cell],
+    rng: &mut ChaCha8Rng,
+    color_count: usize,
+) {
     if row_cells.iter().all(|c| matches!(c, Cell::Rock { .. })) {
         let escape_col = rng.random_range(0..row_cells.len());
         let escape_color = ColorKind::ALL[rng.random_range(0..color_count)];
@@ -475,7 +514,9 @@ impl Board {
                 for (col, cell) in cells.iter_mut().enumerate() {
                     *cell = match base[row][col] {
                         None => Cell::Empty, // 安全地帯(深度0〜1m)
-                        Some(color) => overlay_rock_oxygen_diamond(&mut rng, color, row, &mut item_caps),
+                        Some(color) => {
+                            overlay_rock_oxygen_diamond(&mut rng, color, row, &mut item_caps)
+                        }
                     };
                 }
                 ensure_row_is_not_fully_blocked_by_rock(&mut cells, &mut rng, ColorKind::ALL.len());
@@ -508,7 +549,11 @@ impl Board {
     /// ユーザー指摘: 「各種アイテムのキャラより上の位置には最大それぞれ10個までとする」)。
     /// 出現数の上限を判定するために使う。
     fn count_item(&self, effect: ItemEffect) -> usize {
-        self.rows.iter().flatten().filter(|c| matches!(c, Cell::Item(e) if *e == effect)).count()
+        self.rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(e) if *e == effect))
+            .count()
     }
 
     /// `from_row`以降の未掘削マス(`Cell::Empty`以外の全セル)について、色・岩(X)・
@@ -583,8 +628,16 @@ impl Board {
                     continue;
                 }
 
-                let left = if col > 0 { Some(self.rows[row][col - 1]) } else { None };
-                let top = if row > 0 { Some(self.rows[row - 1][col]) } else { None };
+                let left = if col > 0 {
+                    Some(self.rows[row][col - 1])
+                } else {
+                    None
+                };
+                let top = if row > 0 {
+                    Some(self.rows[row - 1][col])
+                } else {
+                    None
+                };
 
                 let fresh_color = match left {
                     Some(Cell::Color(c)) if rng.random_range(0.0..1.0) < color_cluster_prob => c,
@@ -596,18 +649,42 @@ impl Board {
                 // される)が初期生成(generate_base_colors)の同色ラン上限を継承しておらず、
                 // 巨大な同色塊が生成されうることが判明したため移植した)。
                 let left3 = [
-                    if col >= 1 { color_of(self.rows[row][col - 1]) } else { None },
-                    if col >= 2 { color_of(self.rows[row][col - 2]) } else { None },
-                    if col >= 3 { color_of(self.rows[row][col - 3]) } else { None },
+                    if col >= 1 {
+                        color_of(self.rows[row][col - 1])
+                    } else {
+                        None
+                    },
+                    if col >= 2 {
+                        color_of(self.rows[row][col - 2])
+                    } else {
+                        None
+                    },
+                    if col >= 3 {
+                        color_of(self.rows[row][col - 3])
+                    } else {
+                        None
+                    },
                 ];
                 let top2 = [
-                    if row >= 1 { color_of(self.rows[row - 1][col]) } else { None },
-                    if row >= 2 { color_of(self.rows[row - 2][col]) } else { None },
+                    if row >= 1 {
+                        color_of(self.rows[row - 1][col])
+                    } else {
+                        None
+                    },
+                    if row >= 2 {
+                        color_of(self.rows[row - 2][col])
+                    } else {
+                        None
+                    },
                 ];
                 let fresh_color = resolve_run_limits(fresh_color, left3, top2, color_count);
-                let adjacent_is_rock =
-                    matches!(left, Some(Cell::Rock { .. })) || matches!(top, Some(Cell::Rock { .. }));
-                let rock_cluster_bonus = if adjacent_is_rock { rock_cluster_bonus_if_adjacent } else { 0.0 };
+                let adjacent_is_rock = matches!(left, Some(Cell::Rock { .. }))
+                    || matches!(top, Some(Cell::Rock { .. }));
+                let rock_cluster_bonus = if adjacent_is_rock {
+                    rock_cluster_bonus_if_adjacent
+                } else {
+                    0.0
+                };
 
                 // スターへの再抽選は、元がXブロックまたはダイヤブロックだったセルに限る
                 // (TERM独自拡張。ユーザー指摘: 「スターブロックに変わるのはXブロックと
@@ -643,7 +720,11 @@ impl Board {
 /// 盤面上の`start`を起点に、4方向で`same_kind`を満たすセルに連結している全セルを求める
 /// 汎用BFS(spec.md 4章)。色ブロックの同色連結・岩ブロックの連結(hitsに関わらず全て
 /// 同種とみなす)の両方がこの1つの実装を共有する。
-fn connected_group(board: &Board, start: (usize, usize), same_kind: impl Fn(Cell) -> bool) -> Vec<(usize, usize)> {
+fn connected_group(
+    board: &Board,
+    start: (usize, usize),
+    same_kind: impl Fn(Cell) -> bool,
+) -> Vec<(usize, usize)> {
     let depth_rows = board.depth_rows();
     let mut visited: HashSet<(usize, usize)> = HashSet::new();
     let mut stack = vec![start];
@@ -653,7 +734,12 @@ fn connected_group(board: &Board, start: (usize, usize), same_kind: impl Fn(Cell
     while let Some((r, c)) = stack.pop() {
         group.push((r, c));
 
-        let neighbors = [(r.wrapping_sub(1), c), (r + 1, c), (r, c.wrapping_sub(1)), (r, c + 1)];
+        let neighbors = [
+            (r.wrapping_sub(1), c),
+            (r + 1, c),
+            (r, c.wrapping_sub(1)),
+            (r, c + 1),
+        ];
         for (nr, nc) in neighbors {
             if nr >= depth_rows || nc >= board.width() {
                 continue;
@@ -675,7 +761,11 @@ fn connected_group(board: &Board, start: (usize, usize), same_kind: impl Fn(Cell
 ///
 /// サイズに関わらず(1個の孤立ブロックでも)全て列挙する。呼び出し側が
 /// 「即時消滅(4.6、サイズ問わず)」「自動消滅(4.5、サイズ4以上のみ)」を使い分ける。
-pub fn connected_same_color(board: &Board, start: (usize, usize), color: ColorKind) -> Vec<(usize, usize)> {
+pub fn connected_same_color(
+    board: &Board,
+    start: (usize, usize),
+    color: ColorKind,
+) -> Vec<(usize, usize)> {
     connected_group(board, start, |cell| cell == Cell::Color(color))
 }
 
@@ -905,7 +995,11 @@ fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
 /// 「コース最深行」であれば、塊全体が支持されているとみなす。直下がグループ内の
 /// 仲間セルである場合は、そのセル自身は支えにならない(仲間越しに、さらにその下の
 /// 本当の支えを探す必要がある)。
-pub(crate) fn is_group_supported(board: &Board, group: &[(usize, usize)], player_pos: (usize, usize)) -> bool {
+pub(crate) fn is_group_supported(
+    board: &Board,
+    group: &[(usize, usize)],
+    player_pos: (usize, usize),
+) -> bool {
     let depth_rows = board.depth_rows();
     let group_set: HashSet<(usize, usize)> = group.iter().copied().collect();
 
@@ -973,7 +1067,12 @@ fn has_stable_support(
 ///   押し潰しにはせず取得(酸素回復)扱いにする(TERM独自拡張)
 /// - 移動した結果、直下が非Empty(=着地)になった色ブロック・岩ブロックの塊についてのみ、
 ///   4個以上なら自動消滅させる(4.5・4.9)
-pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity: &mut GravityState, shake_ticks: u8) -> FallTickOutcome {
+pub fn apply_gravity_tick(
+    board: &mut Board,
+    player_pos: (usize, usize),
+    gravity: &mut GravityState,
+    shake_ticks: u8,
+) -> FallTickOutcome {
     let snapshot = board.clone();
     let groups = collect_fall_groups(&snapshot);
 
@@ -986,7 +1085,10 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
     }
 
     // まず素朴な支持判定(直下が非Emptyかどうか)で初期化する。
-    let mut supported: Vec<bool> = groups.iter().map(|g| is_group_supported(&snapshot, g, player_pos)).collect();
+    let mut supported: Vec<bool> = groups
+        .iter()
+        .map(|g| is_group_supported(&snapshot, g, player_pos))
+        .collect();
 
     // 連鎖的な再判定(ユーザー指摘対応: 「右1列でひっかかっても2:1でちぎれて分離
     // されることがある」)。支えの根拠となっているセルが属する塊自体が、このティックで
@@ -999,7 +1101,13 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
             if !supported[i] {
                 continue;
             }
-            if !has_stable_support(&snapshot, &groups[i], &cell_to_group, &supported, player_pos) {
+            if !has_stable_support(
+                &snapshot,
+                &groups[i],
+                &cell_to_group,
+                &supported,
+                player_pos,
+            ) {
                 supported[i] = false;
                 changed = true;
             }
@@ -1021,7 +1129,12 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
         // 塊の代表座標(先頭要素。`collect_fall_groups`の探索順序上、同じ塊なら常に
         // 「最小の(row, col)」で安定する)で揺れティック数を管理する。
         let representative = group[0];
-        let ticks_unsupported = gravity.unsupported_ticks.get(&representative).copied().unwrap_or(0) + 1;
+        let ticks_unsupported = gravity
+            .unsupported_ticks
+            .get(&representative)
+            .copied()
+            .unwrap_or(0)
+            + 1;
         if ticks_unsupported as u32 > shake_ticks as u32 {
             // 揺れが明けた(またはshake_ticks=0で即座に) -> このティックで1マス落下する。
             // 移動後もなお未支持なら、次のティック以降は揺れ直さずそのまま落下し続ける
@@ -1129,7 +1242,9 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
     // ちゃんと消えないといけない」)。
     for group in &falling_groups {
         let moved_group: Vec<(usize, usize)> = group.iter().map(|&(r, c)| (r + 1, c)).collect();
-        let Some(&to) = moved_group.first() else { continue };
+        let Some(&to) = moved_group.first() else {
+            continue;
+        };
         if board.cell(to.0, to.1) == Cell::Empty {
             continue; // 押し潰しでこの塊自体が消滅済み
         }
@@ -1201,9 +1316,20 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
                 let updated = visible_ms.saturating_add(delta_ms);
                 if updated >= vanish_at_ms {
                     board.set(r, c, Cell::Empty);
-                    melted.push(((r, c), Cell::Star { visible_ms: updated }));
+                    melted.push((
+                        (r, c),
+                        Cell::Star {
+                            visible_ms: updated,
+                        },
+                    ));
                 } else {
-                    board.set(r, c, Cell::Star { visible_ms: updated });
+                    board.set(
+                        r,
+                        c,
+                        Cell::Star {
+                            visible_ms: updated,
+                        },
+                    );
                 }
             }
         }
@@ -1248,7 +1374,11 @@ mod tests {
         board.reroll_overlays_from_row(1, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
-            assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
+            assert_eq!(
+                board.cell(0, col),
+                Cell::Color(ColorKind::Red),
+                "from_rowより手前は変わらない"
+            );
         }
     }
 
@@ -1276,7 +1406,11 @@ mod tests {
                 board.cell(0, col)
             );
         }
-        assert_eq!(board.cell(0, 4), Cell::Empty, "既に掘削済みのセルは対象外のまま");
+        assert_eq!(
+            board.cell(0, 4),
+            Cell::Empty,
+            "既に掘削済みのセルは対象外のまま"
+        );
     }
 
     #[test]
@@ -1289,11 +1423,35 @@ mod tests {
         board.rows[0][1] = Cell::Item(ItemEffect::UnifyColors);
         board.rows[0][2] = Cell::Item(ItemEffect::StarifyScreen);
 
-        board.reroll_overlays_from_row(0, 300, 300, 300, 300, 300, 300, 300, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            0,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            300,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
-        assert_eq!(board.cell(0, 0), Cell::Item(ItemEffect::ClearAbove), "Rアイテムは再抽選で上書きされないはず");
-        assert_eq!(board.cell(0, 1), Cell::Item(ItemEffect::UnifyColors), "Cアイテムは再抽選で上書きされないはず");
-        assert_eq!(board.cell(0, 2), Cell::Item(ItemEffect::StarifyScreen), "Kアイテムは再抽選で上書きされないはず");
+        assert_eq!(
+            board.cell(0, 0),
+            Cell::Item(ItemEffect::ClearAbove),
+            "Rアイテムは再抽選で上書きされないはず"
+        );
+        assert_eq!(
+            board.cell(0, 1),
+            Cell::Item(ItemEffect::UnifyColors),
+            "Cアイテムは再抽選で上書きされないはず"
+        );
+        assert_eq!(
+            board.cell(0, 2),
+            Cell::Item(ItemEffect::StarifyScreen),
+            "Kアイテムは再抽選で上書きされないはず"
+        );
     }
 
     #[test]
@@ -1308,7 +1466,12 @@ mod tests {
             b
         }
         fn count_rocks(board: &Board) -> usize {
-            board.rows.iter().flatten().filter(|c| matches!(c, Cell::Rock { .. })).count()
+            board
+                .rows
+                .iter()
+                .flatten()
+                .filter(|c| matches!(c, Cell::Rock { .. }))
+                .count()
         }
 
         let mut low = all_color_board(500);
@@ -1336,8 +1499,16 @@ mod tests {
 
         board.reroll_overlays_from_row(0, 100, 100, 0, 100, 0, 0, 0, 4, 100, &GravityState::new());
 
-        let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
-        assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
+        let star_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Star { .. }))
+            .count();
+        assert_eq!(
+            star_count, 0,
+            "スター配分率0%ならスターブロックは一切出現しないはず"
+        );
     }
 
     #[test]
@@ -1352,7 +1523,19 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 100, 100, 100, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            0,
+            100,
+            100,
+            100,
+            100,
+            100,
+            100,
+            100,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let clear_above_count = board
             .rows
@@ -1372,9 +1555,18 @@ mod tests {
             .flatten()
             .filter(|c| matches!(c, Cell::Item(ItemEffect::StarifyScreen)))
             .count();
-        assert!(clear_above_count > 0, "ClearAboveアイテムが1つも出現しないのは不自然");
-        assert!(unify_colors_count > 0, "UnifyColorsアイテムが1つも出現しないのは不自然");
-        assert!(starify_screen_count > 0, "StarifyScreenアイテムが1つも出現しないのは不自然");
+        assert!(
+            clear_above_count > 0,
+            "ClearAboveアイテムが1つも出現しないのは不自然"
+        );
+        assert!(
+            unify_colors_count > 0,
+            "UnifyColorsアイテムが1つも出現しないのは不自然"
+        );
+        assert!(
+            starify_screen_count > 0,
+            "StarifyScreenアイテムが1つも出現しないのは不自然"
+        );
     }
 
     #[test]
@@ -1388,7 +1580,19 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 0, 100, 100, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            0,
+            100,
+            100,
+            100,
+            100,
+            0,
+            100,
+            100,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let clear_above_count = board
             .rows
@@ -1409,8 +1613,14 @@ mod tests {
             .filter(|c| matches!(c, Cell::Item(ItemEffect::StarifyScreen)))
             .count();
         assert_eq!(clear_above_count, 0, "ClearAbove配分率0%なら出現しないはず");
-        assert!(unify_colors_count > 0, "UnifyColorsは100%のままなので出現し続けるはず");
-        assert!(starify_screen_count > 0, "StarifyScreenは100%のままなので出現し続けるはず");
+        assert!(
+            unify_colors_count > 0,
+            "UnifyColorsは100%のままなので出現し続けるはず"
+        );
+        assert!(
+            starify_screen_count > 0,
+            "StarifyScreenは100%のままなので出現し続けるはず"
+        );
     }
 
     #[test]
@@ -1426,7 +1636,11 @@ mod tests {
 
         board.reroll_overlays_from_row(0, 0, 0, 0, 0, 300, 300, 300, 4, 100, &GravityState::new());
 
-        for effect in [ItemEffect::ClearAbove, ItemEffect::UnifyColors, ItemEffect::StarifyScreen] {
+        for effect in [
+            ItemEffect::ClearAbove,
+            ItemEffect::UnifyColors,
+            ItemEffect::StarifyScreen,
+        ] {
             let count = board.count_item(effect);
             assert!(
                 count <= crate::constants::ITEM_MAX_COUNT_ON_BOARD,
@@ -1441,7 +1655,11 @@ mod tests {
         // 新規生成(`Board::generate`)でも同じ上限が効くことを確認する。
         let board = Board::generate(1, 5000, FIELD_WIDTH);
 
-        for effect in [ItemEffect::ClearAbove, ItemEffect::UnifyColors, ItemEffect::StarifyScreen] {
+        for effect in [
+            ItemEffect::ClearAbove,
+            ItemEffect::UnifyColors,
+            ItemEffect::StarifyScreen,
+        ] {
             let count = board.count_item(effect);
             assert!(
                 count <= crate::constants::ITEM_MAX_COUNT_ON_BOARD,
@@ -1508,14 +1726,26 @@ mod tests {
         let mut board = empty_board(500);
         for row in 0..500 {
             for col in 0..FIELD_WIDTH {
-                board.rows[row][col] = if col % 2 == 0 { Cell::Rock { hits: 0 } } else { Cell::Diamond };
+                board.rows[row][col] = if col % 2 == 0 {
+                    Cell::Rock { hits: 0 }
+                } else {
+                    Cell::Diamond
+                };
             }
         }
 
         board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
-        let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
-        assert!(star_count > 0, "Xブロック・ダイヤブロックはスターへ変わり得るはず(0件は不自然)");
+        let star_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Star { .. }))
+            .count();
+        assert!(
+            star_count > 0,
+            "Xブロック・ダイヤブロックはスターへ変わり得るはず(0件は不自然)"
+        );
     }
 
     #[test]
@@ -1533,7 +1763,12 @@ mod tests {
 
         board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &gravity);
 
-        let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
+        let star_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Star { .. }))
+            .count();
         assert_eq!(star_count, 0, "揺れ中のセルはスターへ変わらないはず");
     }
 
@@ -1550,8 +1785,16 @@ mod tests {
 
         board.reroll_overlays_from_row(0, 100, 100, 100, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
-        let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
-        assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
+        let diamond_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|&&c| c == Cell::Diamond)
+            .count();
+        assert_eq!(
+            diamond_count, 0,
+            "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず"
+        );
     }
 
     // --- スターブロックの実時間溶解(TERM独自拡張) ---
@@ -1567,7 +1810,10 @@ mod tests {
         let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS - 1);
 
         assert_eq!(melted.len(), 0, "猶予時間未満では消滅しないはず");
-        assert!(matches!(board.cell(0, 0), Cell::Star { .. }), "猶予時間未満ではまだスターのままのはず");
+        assert!(
+            matches!(board.cell(0, 0), Cell::Star { .. }),
+            "猶予時間未満ではまだスターのままのはず"
+        );
     }
 
     #[test]
@@ -1575,14 +1821,24 @@ mod tests {
         let mut board = empty_board(1);
         board.rows[0][0] = Cell::Star { visible_ms: 0 };
 
-        let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS);
+        let melted =
+            tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS);
 
         assert_eq!(
             melted,
-            vec![((0, 0), Cell::Star { visible_ms: STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS })],
+            vec![(
+                (0, 0),
+                Cell::Star {
+                    visible_ms: STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS
+                }
+            )],
             "猶予時間+溶解時間が経過すれば1個消えるはず"
         );
-        assert_eq!(board.cell(0, 0), Cell::Empty, "溶け切ったスターは消えているはず");
+        assert_eq!(
+            board.cell(0, 0),
+            Cell::Empty,
+            "溶け切ったスターは消えているはず"
+        );
     }
 
     #[test]
@@ -1594,10 +1850,18 @@ mod tests {
         let mut board = empty_board(far_row + 1);
         board.rows[far_row][0] = Cell::Star { visible_ms: 0 };
 
-        let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS + 1000);
+        let melted = tick_star_melting(
+            &mut board,
+            0,
+            STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS + 1000,
+        );
 
         assert_eq!(melted.len(), 0, "画面外のスターは溶解が進まないはず");
-        assert_eq!(board.cell(far_row, 0), Cell::Star { visible_ms: 0 }, "経過時間が進んでいないはず");
+        assert_eq!(
+            board.cell(far_row, 0),
+            Cell::Star { visible_ms: 0 },
+            "経過時間が進んでいないはず"
+        );
     }
 
     #[test]
@@ -1686,7 +1950,11 @@ mod tests {
                     total_runs += 1;
                 }
             }
-            if total_runs == 0 { 0.0 } else { total_len as f64 / total_runs as f64 }
+            if total_runs == 0 {
+                0.0
+            } else {
+                total_len as f64 / total_runs as f64
+            }
         }
 
         let mut board = empty_board(1000);
@@ -1740,7 +2008,11 @@ mod tests {
                     total_runs += 1;
                 }
             }
-            if total_runs == 0 { 0.0 } else { total_len as f64 / total_runs as f64 }
+            if total_runs == 0 {
+                0.0
+            } else {
+                total_len as f64 / total_runs as f64
+            }
         }
 
         fn make_board() -> Board {
@@ -1798,7 +2070,10 @@ mod tests {
                     run_color = c;
                     run_len = if c.is_some() { 1 } else { 0 };
                 }
-                assert!(run_len <= 4, "row={row} col={col}で横方向の同色ランが4を超えている: {run_len}");
+                assert!(
+                    run_len <= 4,
+                    "row={row} col={col}で横方向の同色ランが4を超えている: {run_len}"
+                );
             }
         }
 
@@ -1816,7 +2091,10 @@ mod tests {
                     run_color = c;
                     run_len = if c.is_some() { 1 } else { 0 };
                 }
-                assert!(run_len <= 3, "col={col} row={row}で縦方向の同色ランが3を超えている: {run_len}");
+                assert!(
+                    run_len <= 3,
+                    "col={col} row={row}で縦方向の同色ランが3を超えている: {run_len}"
+                );
             }
         }
     }
@@ -1833,7 +2111,19 @@ mod tests {
                 board.rows[row][col] = Cell::Color(ColorKind::Red);
             }
         }
-        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            0,
+            100,
+            100,
+            100,
+            100,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let mut visited: HashSet<(usize, usize)> = HashSet::new();
         let mut max_size = 0usize;
@@ -1883,7 +2173,11 @@ mod tests {
                     }
                 }
             }
-            if groups == 0 { 0.0 } else { total as f64 / groups as f64 }
+            if groups == 0 {
+                0.0
+            } else {
+                total as f64 / groups as f64
+            }
         }
 
         let mut board = empty_board(1000);
@@ -1922,7 +2216,19 @@ mod tests {
                     board.rows[row][col] = Cell::Color(ColorKind::Red);
                 }
             }
-            board.reroll_overlays_from_row(0, 100, 100, 0, 100, 0, 0, 0, 4, 100, &GravityState::new());
+            board.reroll_overlays_from_row(
+                0,
+                100,
+                100,
+                0,
+                100,
+                0,
+                0,
+                0,
+                4,
+                100,
+                &GravityState::new(),
+            );
 
             let mut rock_cells = 0usize;
             let mut total_cells = 0usize;
@@ -1938,7 +2244,10 @@ mod tests {
         }
 
         const TRIALS: usize = 20;
-        let avg_fraction: f64 = (0..TRIALS).map(|_| rock_fraction_in_deepest_band()).sum::<f64>() / TRIALS as f64;
+        let avg_fraction: f64 = (0..TRIALS)
+            .map(|_| rock_fraction_in_deepest_band())
+            .sum::<f64>()
+            / TRIALS as f64;
         assert!(
             avg_fraction < 0.45,
             "最深帯の岩マス比率(平均)が高すぎて画面全体が岩で埋まっている疑いがある: {avg_fraction:.3}"
@@ -1955,9 +2264,19 @@ mod tests {
 
         ensure_row_is_not_fully_blocked_by_rock(&mut row, &mut rng, 4);
 
-        let rock_count = row.iter().filter(|c| matches!(c, Cell::Rock { .. })).count();
-        assert_eq!(rock_count, FIELD_WIDTH - 1, "少なくとも1マスは岩ブロック以外に差し替わるはず");
-        assert!(row.iter().any(|c| matches!(c, Cell::Color(_))), "差し替え先は色ブロックのはず");
+        let rock_count = row
+            .iter()
+            .filter(|c| matches!(c, Cell::Rock { .. }))
+            .count();
+        assert_eq!(
+            rock_count,
+            FIELD_WIDTH - 1,
+            "少なくとも1マスは岩ブロック以外に差し替わるはず"
+        );
+        assert!(
+            row.iter().any(|c| matches!(c, Cell::Color(_))),
+            "差し替え先は色ブロックのはず"
+        );
     }
 
     #[test]
@@ -1968,8 +2287,15 @@ mod tests {
 
         ensure_row_is_not_fully_blocked_by_rock(&mut row, &mut rng, 4);
 
-        let rock_count = row.iter().filter(|c| matches!(c, Cell::Rock { .. })).count();
-        assert_eq!(rock_count, FIELD_WIDTH - 1, "既に穴がある行はそのまま変更されないはず");
+        let rock_count = row
+            .iter()
+            .filter(|c| matches!(c, Cell::Rock { .. }))
+            .count();
+        assert_eq!(
+            rock_count,
+            FIELD_WIDTH - 1,
+            "既に穴がある行はそのまま変更されないはず"
+        );
     }
 
     #[test]
@@ -1985,8 +2311,12 @@ mod tests {
         board.reroll_overlays_from_row(0, 300, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         for row in 800..1000 {
-            let all_rock = (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }));
-            assert!(!all_rock, "row={row}が岩ブロックだけで完全に埋まっているはず無い");
+            let all_rock =
+                (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }));
+            assert!(
+                !all_rock,
+                "row={row}が岩ブロックだけで完全に埋まっているはず無い"
+            );
         }
     }
 
@@ -2000,10 +2330,16 @@ mod tests {
         board.rows[0][2] = Cell::Diamond;
 
         let groups = collect_fall_groups(&board);
-        let diamond_groups: Vec<&Vec<(usize, usize)>> =
-            groups.iter().filter(|g| g.iter().any(|&(r, c)| board.cell(r, c) == Cell::Diamond)).collect();
+        let diamond_groups: Vec<&Vec<(usize, usize)>> = groups
+            .iter()
+            .filter(|g| g.iter().any(|&(r, c)| board.cell(r, c) == Cell::Diamond))
+            .collect();
 
-        assert_eq!(diamond_groups.len(), 3, "隣接していてもダイヤブロックはそれぞれ単独の塊のはず");
+        assert_eq!(
+            diamond_groups.len(),
+            3,
+            "隣接していてもダイヤブロックはそれぞれ単独の塊のはず"
+        );
         for group in diamond_groups {
             assert_eq!(group.len(), 1);
         }
@@ -2033,7 +2369,10 @@ mod tests {
                     run_color = c;
                     run_len = if c.is_some() { 1 } else { 0 };
                 }
-                assert!(run_len <= 4, "seed={seed}: 横方向の同色連続が4を超えた row={row} col={col}");
+                assert!(
+                    run_len <= 4,
+                    "seed={seed}: 横方向の同色連続が4を超えた row={row} col={col}"
+                );
             }
         }
         for col in 0..FIELD_WIDTH {
@@ -2047,7 +2386,10 @@ mod tests {
                     run_color = c;
                     run_len = if c.is_some() { 1 } else { 0 };
                 }
-                assert!(run_len <= 3, "seed={seed}: 縦方向の同色連続が3を超えた row={row} col={col}");
+                assert!(
+                    run_len <= 3,
+                    "seed={seed}: 縦方向の同色連続が3を超えた row={row} col={col}"
+                );
             }
         }
     }
@@ -2193,22 +2535,33 @@ mod tests {
 
     #[test]
     fn resolve_run_limits_avoids_fifth_horizontal_same_color() {
-        let left3 = [Some(ColorKind::Red), Some(ColorKind::Red), Some(ColorKind::Red)];
-        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None], ColorKind::ALL.len());
+        let left3 = [
+            Some(ColorKind::Red),
+            Some(ColorKind::Red),
+            Some(ColorKind::Red),
+        ];
+        let resolved =
+            resolve_run_limits(ColorKind::Red, left3, [None, None], ColorKind::ALL.len());
         assert_ne!(resolved, ColorKind::Red);
     }
 
     #[test]
     fn resolve_run_limits_avoids_fourth_vertical_same_color() {
         let top2 = [Some(ColorKind::Blue), Some(ColorKind::Blue)];
-        let resolved = resolve_run_limits(ColorKind::Blue, [None, None, None], top2, ColorKind::ALL.len());
+        let resolved = resolve_run_limits(
+            ColorKind::Blue,
+            [None, None, None],
+            top2,
+            ColorKind::ALL.len(),
+        );
         assert_ne!(resolved, ColorKind::Blue);
     }
 
     #[test]
     fn resolve_run_limits_keeps_candidate_when_no_limit_hit() {
         let left3 = [Some(ColorKind::Red), None, None];
-        let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None], ColorKind::ALL.len());
+        let resolved =
+            resolve_run_limits(ColorKind::Red, left3, [None, None], ColorKind::ALL.len());
         assert_eq!(resolved, ColorKind::Red);
     }
 
@@ -2217,9 +2570,17 @@ mod tests {
         // 色数設定(color_count)が1の場合、常に同色になるのは仕様通りであり、
         // ランを制限できる代替色が存在しないため候補をそのまま返すことを確認する
         // (TERM独自拡張。#118: reroll_overlays_from_rowへのラン上限移植)。
-        let left3 = [Some(ColorKind::Red), Some(ColorKind::Red), Some(ColorKind::Red)];
+        let left3 = [
+            Some(ColorKind::Red),
+            Some(ColorKind::Red),
+            Some(ColorKind::Red),
+        ];
         let resolved = resolve_run_limits(ColorKind::Red, left3, [None, None], 1);
-        assert_eq!(resolved, ColorKind::Red, "色数1では代替色が無いため候補のまま返るはず");
+        assert_eq!(
+            resolved,
+            ColorKind::Red,
+            "色数1では代替色が無いため候補のまま返るはず"
+        );
     }
 
     // --- 直接掘削による即時消滅(4.6、サイズ問わず) ---
@@ -2296,7 +2657,9 @@ mod tests {
         // 消せないものとする」。連結している他の岩ブロックは、hitsに関わらず影響を
         // 受けずそのまま残る(色ブロックとは違うルール)。
         let mut board = empty_board(2);
-        board.rows[0][0] = Cell::Rock { hits: ROCK_HITS_TO_BREAK - 1 }; // あと1発で破壊
+        board.rows[0][0] = Cell::Rock {
+            hits: ROCK_HITS_TO_BREAK - 1,
+        }; // あと1発で破壊
         board.rows[0][1] = Cell::Rock { hits: 0 }; // 連結していても巻き込まれない
         board.rows[1][0] = Cell::Rock { hits: 2 }; // 同上
         board.rows[0][2] = Cell::Color(ColorKind::Red); // 別種、巻き込まれない
@@ -2305,8 +2668,16 @@ mod tests {
 
         assert_eq!(result, RockHitResult::Destroyed { blocks: 1 });
         assert_eq!(board.cell(0, 0), Cell::Empty);
-        assert_eq!(board.cell(0, 1), Cell::Rock { hits: 0 }, "連結していた岩は影響を受けない");
-        assert_eq!(board.cell(1, 0), Cell::Rock { hits: 2 }, "連結していた岩は影響を受けない");
+        assert_eq!(
+            board.cell(0, 1),
+            Cell::Rock { hits: 0 },
+            "連結していた岩は影響を受けない"
+        );
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Rock { hits: 2 },
+            "連結していた岩は影響を受けない"
+        );
         assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Red)); // 色ブロックは無関係
     }
 
@@ -2346,7 +2717,10 @@ mod tests {
         assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
-        assert!(!gravity.is_shaking((1, 0)), "着地して支持されればもう揺れていない");
+        assert!(
+            !gravity.is_shaking((1, 0)),
+            "着地して支持されればもう揺れていない"
+        );
     }
 
     #[test]
@@ -2372,9 +2746,16 @@ mod tests {
         // 揺れ状態(is_shaking)には一切戻らない。
         for expected_row in 2..6 {
             let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-            assert_eq!(outcome.moved_cells.len(), 1, "row={expected_row}到達時点で連続落下しているはず");
+            assert_eq!(
+                outcome.moved_cells.len(),
+                1,
+                "row={expected_row}到達時点で連続落下しているはず"
+            );
             assert_eq!(board.cell(expected_row, 0), Cell::Color(ColorKind::Red));
-            assert!(!gravity.is_shaking((expected_row, 0)), "落下中は揺れ状態に戻らないはず");
+            assert!(
+                !gravity.is_shaking((expected_row, 0)),
+                "落下中は揺れ状態に戻らないはず"
+            );
         }
     }
 
@@ -2391,13 +2772,21 @@ mod tests {
         for _ in 0..=SHAKE_TICKS {
             apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
         }
-        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red), "既に1マス落下しているはず");
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Color(ColorKind::Red),
+            "既に1マス落下しているはず"
+        );
 
         // ショートカットC相当の書き換え直後に呼ばれる想定の関数。
         gravity.reset_shake_progress(SHAKE_TICKS);
 
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
-        assert_eq!(outcome.moved_cells.len(), 1, "reset_shake_progress後も揺れ直さず連続で落下し続けるはず");
+        assert_eq!(
+            outcome.moved_cells.len(),
+            1,
+            "reset_shake_progress後も揺れ直さず連続で落下し続けるはず"
+        );
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
     }
 
@@ -2415,7 +2804,10 @@ mod tests {
 
         gravity.reset_shake_progress(SHAKE_TICKS);
 
-        assert!(!gravity.is_shaking((0, 0)), "揺れ猶予中の状態はクリアされるはず");
+        assert!(
+            !gravity.is_shaking((0, 0)),
+            "揺れ猶予中の状態はクリアされるはず"
+        );
     }
 
     #[test]
@@ -2432,7 +2824,11 @@ mod tests {
 
     /// テスト用ヘルパー: `SHAKE_TICKS`ぶん揺れティックを消化してから、実際に落下する
     /// ティックを1回実行する(4.3のテストで繰り返し使う定型パターン)。
-    fn shake_out_then_tick(board: &mut Board, player_pos: (usize, usize), gravity: &mut GravityState) -> FallTickOutcome {
+    fn shake_out_then_tick(
+        board: &mut Board,
+        player_pos: (usize, usize),
+        gravity: &mut GravityState,
+    ) -> FallTickOutcome {
         for _ in 0..SHAKE_TICKS {
             apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS);
         }
@@ -2454,8 +2850,14 @@ mod tests {
             apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
         }
 
-        assert!(matches!(board.cell(4, 0), Cell::Item(ItemEffect::ClearAbove)), "アイテムは最深行まで落ちて残るはず");
-        assert!(matches!(board.cell(3, 0), Cell::Diamond), "ダイヤはアイテムのすぐ上に着地するはず");
+        assert!(
+            matches!(board.cell(4, 0), Cell::Item(ItemEffect::ClearAbove)),
+            "アイテムは最深行まで落ちて残るはず"
+        );
+        assert!(
+            matches!(board.cell(3, 0), Cell::Diamond),
+            "ダイヤはアイテムのすぐ上に着地するはず"
+        );
     }
 
     // --- 支えの連鎖判定(ユーザー指摘対応) ---
@@ -2474,7 +2876,11 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.moved_cells.len(), 2, "上段・下段とも同じティックで一緒に落下するはず");
+        assert_eq!(
+            outcome.moved_cells.len(),
+            2,
+            "上段・下段とも同じティックで一緒に落下するはず"
+        );
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Blue));
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
@@ -2526,7 +2932,11 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.moved_cells.len(), 1, "孤立していても支えが無ければ落ちるはず");
+        assert_eq!(
+            outcome.moved_cells.len(),
+            1,
+            "孤立していても支えが無ければ落ちるはず"
+        );
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
     }
@@ -2573,11 +2983,16 @@ mod tests {
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
-        assert_eq!(board.cell(3, 0), Cell::Color(ColorKind::Red), "3つ目もちぎれずに一緒に1マス落下しているはず");
+        assert_eq!(
+            board.cell(3, 0),
+            Cell::Color(ColorKind::Red),
+            "3つ目もちぎれずに一緒に1マス落下しているはず"
+        );
     }
 
     #[test]
-    fn horizontal_group_of_three_supported_only_under_rightmost_cell_falls_together_without_tearing() {
+    fn horizontal_group_of_three_supported_only_under_rightmost_cell_falls_together_without_tearing()
+     {
         // 横3列(col0,1,2)の同色グループ。col2の直下(row1)だけがEmptyで、その
         // さらに1つ下(row2,col2)に支え(岩)がある。col0・col1の直下(row1)は
         // Emptyのまま。グループ全体で見ればcol2経由でまだ支持されていないので、
@@ -2593,7 +3008,11 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.moved_cells.len(), 3, "3つとも一緒に1マス落下するはず(ちぎれない)");
+        assert_eq!(
+            outcome.moved_cells.len(),
+            3,
+            "3つとも一緒に1マス落下するはず(ちぎれない)"
+        );
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(0, 1), Cell::Empty);
         assert_eq!(board.cell(0, 2), Cell::Empty);
@@ -2637,8 +3056,16 @@ mod tests {
         let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity); // 落下→押し潰し
 
         assert!(outcome.crushed);
-        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red), "潰したブロックはその場に残って見えるはず");
-        assert_eq!(outcome.moved_cells, vec![((1, 0), (0, 0))], "落下アニメーション用に着地移動も記録されるはず");
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Color(ColorKind::Red),
+            "潰したブロックはその場に残って見えるはず"
+        );
+        assert_eq!(
+            outcome.moved_cells,
+            vec![((1, 0), (0, 0))],
+            "落下アニメーション用に着地移動も記録されるはず"
+        );
     }
 
     #[test]
@@ -2668,13 +3095,17 @@ mod tests {
 
         let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity);
 
-        assert!(!outcome.crushed, "アイテムブロックは押し潰し判定にならないはず");
+        assert!(
+            !outcome.crushed,
+            "アイテムブロックは押し潰し判定にならないはず"
+        );
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(outcome.items_collected, vec![ItemEffect::ClearAbove]);
     }
 
     #[test]
-    fn crush_from_one_falling_group_does_not_erase_another_unrelated_falling_group_in_the_same_tick() {
+    fn crush_from_one_falling_group_does_not_erase_another_unrelated_falling_group_in_the_same_tick()
+     {
         // 発見: 同一tickに複数の無関係な塊が同時に落下していて、そのうち1つが
         // プレイヤーを押し潰す場合、旧実装では押し潰し確定時に即座にbreakしていたため、
         // 「他の(無関係な)塊」は旧位置こそ既にEmptyにされているのに新位置への
@@ -2702,7 +3133,8 @@ mod tests {
     }
 
     #[test]
-    fn a_crush_in_one_group_does_not_suppress_auto_vanish_for_another_group_landing_the_same_tick() {
+    fn a_crush_in_one_group_does_not_suppress_auto_vanish_for_another_group_landing_the_same_tick()
+    {
         // 発見: 同一tickに複数の無関係な塊が同時に落下していて、そのうち1つが
         // プレイヤーを押し潰す場合、旧実装ではoutcome.crushed=true時点で自動消滅判定
         // ループごと早期returnしていたため、押し潰しとは無関係な塊が同じtickで着地して
@@ -2784,12 +3216,22 @@ mod tests {
         let mut gravity = GravityState::new();
 
         // 接触前: 支持グループは2個だけで、落下グループとはまだ繋がっていない。
-        assert_eq!(connected_same_color(&board, (2, 0), ColorKind::Red).len(), 2);
+        assert_eq!(
+            connected_same_color(&board, (2, 0), ColorKind::Red).len(),
+            2
+        );
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity); // 落下→接触→連結→自動消滅
 
-        assert_eq!(outcome.moved_cells.len(), 2, "落下グループの2個が同時に1マス落ちる");
-        assert_eq!(outcome.auto_vanished_blocks, 4, "接触した結果、合計4個で自動消滅する");
+        assert_eq!(
+            outcome.moved_cells.len(),
+            2,
+            "落下グループの2個が同時に1マス落ちる"
+        );
+        assert_eq!(
+            outcome.auto_vanished_blocks, 4,
+            "接触した結果、合計4個で自動消滅する"
+        );
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(board.cell(1, 1), Cell::Empty);
         assert_eq!(board.cell(2, 0), Cell::Empty);
@@ -2816,14 +3258,27 @@ mod tests {
         let mut gravity = GravityState::new();
 
         // 接触前は別グループ。
-        assert_eq!(connected_same_color(&board, (3, 0), ColorKind::Red).len(), 3);
-        assert_eq!(connected_same_color(&board, (0, 3), ColorKind::Red).len(), 3);
+        assert_eq!(
+            connected_same_color(&board, (3, 0), ColorKind::Red).len(),
+            3
+        );
+        assert_eq!(
+            connected_same_color(&board, (0, 3), ColorKind::Red).len(),
+            3
+        );
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.auto_vanished_blocks, 6, "接触後は合計6個で自動消滅するはず");
+        assert_eq!(
+            outcome.auto_vanished_blocks, 6,
+            "接触後は合計6個で自動消滅するはず"
+        );
         for &(r, c) in &[(2, 3), (3, 3), (3, 2), (3, 1), (3, 0)] {
-            assert_eq!(board.cell(r, c), Cell::Empty, "row={r},col={c}が消えていない");
+            assert_eq!(
+                board.cell(r, c),
+                Cell::Empty,
+                "row={r},col={c}が消えていない"
+            );
         }
     }
 
@@ -2855,7 +3310,11 @@ mod tests {
                 "row={r} col=0: 4連結以上になったので自動消滅しているはず"
             );
         }
-        assert_eq!(board.cell(3, 1), Cell::Empty, "落下してきた側も自動消滅しているはず");
+        assert_eq!(
+            board.cell(3, 1),
+            Cell::Empty,
+            "落下してきた側も自動消滅しているはず"
+        );
     }
 
     #[test]
@@ -2875,14 +3334,27 @@ mod tests {
         let mut gravity = GravityState::new();
 
         // 接触前はT字(4個)と落下セル(1個)は別グループ。
-        assert_eq!(connected_same_color(&board, (3, 0), ColorKind::Red).len(), 4);
-        assert_eq!(connected_same_color(&board, (0, 1), ColorKind::Red).len(), 1);
+        assert_eq!(
+            connected_same_color(&board, (3, 0), ColorKind::Red).len(),
+            4
+        );
+        assert_eq!(
+            connected_same_color(&board, (0, 1), ColorKind::Red).len(),
+            1
+        );
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
-        assert_eq!(outcome.auto_vanished_blocks, 5, "T字4個+落下1個=5個で自動消滅するはず");
+        assert_eq!(
+            outcome.auto_vanished_blocks, 5,
+            "T字4個+落下1個=5個で自動消滅するはず"
+        );
         for &(r, c) in &[(1, 1), (3, 0), (3, 1), (3, 2), (2, 1)] {
-            assert_eq!(board.cell(r, c), Cell::Empty, "row={r},col={c}が消えていない");
+            assert_eq!(
+                board.cell(r, c),
+                Cell::Empty,
+                "row={r},col={c}が消えていない"
+            );
         }
     }
 
@@ -2901,7 +3373,10 @@ mod tests {
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
         assert_eq!(outcome.auto_vanished_rock_blocks, 4);
-        assert_eq!(outcome.auto_vanished_blocks, 0, "岩ブロックの自動消滅はスコア対象外");
+        assert_eq!(
+            outcome.auto_vanished_blocks, 0,
+            "岩ブロックの自動消滅はスコア対象外"
+        );
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(board.cell(1, 1), Cell::Empty);
         assert_eq!(board.cell(1, 2), Cell::Empty);
@@ -2919,7 +3394,10 @@ mod tests {
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
         assert_eq!(outcome.auto_vanished_rock_blocks, 0);
-        assert!(matches!(board.cell(1, 0), Cell::Rock { hits: 3 }), "落下してもhitsは保持される");
+        assert!(
+            matches!(board.cell(1, 0), Cell::Rock { hits: 3 }),
+            "落下してもhitsは保持される"
+        );
     }
 
     #[test]
@@ -2937,13 +3415,22 @@ mod tests {
             assert_eq!(outcome.moved_cells.len(), 0);
             assert!(gravity.is_shaking((0, 0)));
         }
-        assert!(matches!(board.cell(0, 0), Cell::Rock { hits: 2 }), "揺れている間はまだ落下しない");
+        assert!(
+            matches!(board.cell(0, 0), Cell::Rock { hits: 2 }),
+            "揺れている間はまだ落下しない"
+        );
 
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
         assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
-        assert!(matches!(board.cell(1, 0), Cell::Rock { hits: 2 }), "落下してもhitsは保持される");
-        assert!(!gravity.is_shaking((1, 0)), "着地して支持されればもう揺れていない");
+        assert!(
+            matches!(board.cell(1, 0), Cell::Rock { hits: 2 }),
+            "落下してもhitsは保持される"
+        );
+        assert!(
+            !gravity.is_shaking((1, 0)),
+            "着地して支持されればもう揺れていない"
+        );
     }
 
     #[test]
@@ -2959,12 +3446,19 @@ mod tests {
         board.rows[0][1] = Cell::Rock { hits: 0 };
         let mut gravity = GravityState::new();
 
-        assert_eq!(connected_rock_group(&board, (2, 0)).len(), 2, "接触前は支持グループのみ2個");
+        assert_eq!(
+            connected_rock_group(&board, (2, 0)).len(),
+            2,
+            "接触前は支持グループのみ2個"
+        );
 
         let outcome = shake_out_then_tick(&mut board, (99, 99), &mut gravity);
 
         assert_eq!(outcome.auto_vanished_rock_blocks, 4);
-        assert_eq!(outcome.auto_vanished_blocks, 0, "岩ブロックの自動消滅はスコア対象外");
+        assert_eq!(
+            outcome.auto_vanished_blocks, 0,
+            "岩ブロックの自動消滅はスコア対象外"
+        );
         assert_eq!(board.cell(1, 0), Cell::Empty);
         assert_eq!(board.cell(1, 1), Cell::Empty);
         assert_eq!(board.cell(2, 0), Cell::Empty);
@@ -3018,9 +3512,17 @@ mod tests {
         apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 揺れ
         let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 支持判定
 
-        assert_eq!(outcome.moved_cells.len(), 0, "酸素カプセルは非Emptyなので上のRedは支持され落下しない");
+        assert_eq!(
+            outcome.moved_cells.len(),
+            0,
+            "酸素カプセルは非Emptyなので上のRedは支持され落下しない"
+        );
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
-        assert_eq!(board.cell(1, 0), Cell::Oxygen, "酸素カプセルは上書き・消滅していない");
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Oxygen,
+            "酸素カプセルは上書き・消滅していない"
+        );
     }
 
     #[test]
@@ -3143,7 +3645,19 @@ mod tests {
         for seed in 0..2u64 {
             let mut board = Board::generate(seed, 70, FIELD_WIDTH);
             let gravity_for_reroll = GravityState::new();
-            board.reroll_overlays_from_row(2, 100, 100, 100, 100, 0, 0, 0, 4, 100, &gravity_for_reroll);
+            board.reroll_overlays_from_row(
+                2,
+                100,
+                100,
+                100,
+                100,
+                0,
+                0,
+                0,
+                4,
+                100,
+                &gravity_for_reroll,
+            );
 
             let mut gravity = GravityState::new();
             let player_pos = (usize::MAX, usize::MAX);

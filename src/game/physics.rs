@@ -5,8 +5,9 @@
 
 use crate::constants::OXYGEN_DECAY_PER_SEC;
 use crate::game::board::{
-    apply_gravity_tick, connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
-    is_supported, Board, BlockMove, Cell, GravityState, ItemEffect, Pos, RockHitResult,
+    BlockMove, Board, Cell, GravityState, ItemEffect, Pos, RockHitResult, apply_gravity_tick,
+    connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
+    is_supported,
 };
 use crate::game::player::{Direction, Player};
 
@@ -55,7 +56,8 @@ fn drill_cell(board: &mut Board, player: &mut Player, target: (usize, usize)) ->
             player.award_drill_score(blocks);
             DrillOutcome::ColorDestroyed { blocks }
         }
-        Cell::Rock { .. } => match hit_rock(board, target).expect("直前のmatchでRockと確認済み") {
+        Cell::Rock { .. } => match hit_rock(board, target).expect("直前のmatchでRockと確認済み")
+        {
             RockHitResult::StillIntact => DrillOutcome::RockHitIntact,
             RockHitResult::Destroyed { blocks } => {
                 // 連結して巻き込まれた分も含め、酸素ペナルティは実際に掘削した1回分のみ
@@ -139,7 +141,10 @@ pub enum LateralOutcome {
 /// そのまま残る)。フィールド端(列0の左、列11の右)へ向けた入力は何も起きない
 /// (facingの変更も含め、spec.md 1章末尾の「何も起きない」という明記に基づく解釈)。
 pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> LateralOutcome {
-    debug_assert!(matches!(dir, Direction::Left | Direction::Right), "move_lateralはLeft/Right専用");
+    debug_assert!(
+        matches!(dir, Direction::Left | Direction::Right),
+        "move_lateralはLeft/Right専用"
+    );
 
     let (_, dc) = dir.delta();
     let nc = player.col as isize + dc;
@@ -174,7 +179,10 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
         _ => {}
     }
 
-    if was_bumped_same_dir && player.row > 0 && board.cell(player.row - 1, player.col) == Cell::Empty {
+    if was_bumped_same_dir
+        && player.row > 0
+        && board.cell(player.row - 1, player.col) == Cell::Empty
+    {
         match board.cell(player.row - 1, nc) {
             Cell::Empty => {
                 player.row -= 1;
@@ -217,16 +225,23 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
 /// **しない**(ユーザー指摘: 「結合して引っかかったブロックに対しては上向き掘ったら、
 /// ちゃんと掘れる(つぶされない)」「ぐらぐら中は、上に掘ったら掘れる」)。揺れの
 /// 猶予期間はプレイヤーへの警告演出であり、その間に掘り出せば安全に処理できる。
-fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, usize), player_pos: (usize, usize)) -> bool {
+fn is_overhead_unstable(
+    board: &Board,
+    gravity: &GravityState,
+    target: (usize, usize),
+    player_pos: (usize, usize),
+) -> bool {
     match board.cell(target.0, target.1) {
         Cell::Empty => false,
         Cell::Color(color) => {
             let group = connected_same_color(board, target, color);
-            !is_group_supported(board, &group, player_pos) && !group.iter().any(|&p| gravity.is_shaking(p))
+            !is_group_supported(board, &group, player_pos)
+                && !group.iter().any(|&p| gravity.is_shaking(p))
         }
         Cell::Rock { .. } => {
             let group = connected_rock_group(board, target);
-            !is_group_supported(board, &group, player_pos) && !group.iter().any(|&p| gravity.is_shaking(p))
+            !is_group_supported(board, &group, player_pos)
+                && !group.iter().any(|&p| gravity.is_shaking(p))
         }
         // AIR(酸素カプセル)は押し潰しの脅威にはならない(ユーザー指摘: 「AIRだったら、
         // 掘れはしないけどちゃんと取れてほしい。AIRに対しては掘っても無効化しておけば
@@ -264,7 +279,11 @@ fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, u
 /// 進むのをキャンセルしてしまう」)、掘削では触らないようにした。段差登りの判定
 /// (`move_lateral`)自体は呼び出し時点の盤面を都度見て判定するため、掘削を挟んでも
 /// 誤って段差を登ってしまうことはない。
-pub fn drill_facing(board: &mut Board, player: &mut Player, gravity: &GravityState) -> DrillOutcome {
+pub fn drill_facing(
+    board: &mut Board,
+    player: &mut Player,
+    gravity: &GravityState,
+) -> DrillOutcome {
     let (dr, dc) = player.facing.delta();
     let nr = player.row as isize + dr;
     let nc = player.col as isize + dc;
@@ -274,7 +293,9 @@ pub fn drill_facing(board: &mut Board, player: &mut Player, gravity: &GravitySta
 
     let target = (nr as usize, nc as usize);
 
-    if player.facing == Direction::Up && is_overhead_unstable(board, gravity, target, player.position()) {
+    if player.facing == Direction::Up
+        && is_overhead_unstable(board, gravity, target, player.position())
+    {
         return DrillOutcome::CrushedByUnstableOverhead;
     }
 
@@ -585,7 +606,9 @@ mod tests {
         assert_eq!(player.row, 1);
         assert_eq!(player.facing, Direction::Right); // facingは反映される
         // どちらのブロックも破壊されずそのまま残る
-        assert!(matches!(board.cell(1, target_col), Cell::Rock { hits } if hits == ROCK_HITS_TO_BREAK - 1));
+        assert!(
+            matches!(board.cell(1, target_col), Cell::Rock { hits } if hits == ROCK_HITS_TO_BREAK - 1)
+        );
         assert_eq!(board.cell(0, target_col), Cell::Color(ColorKind::Blue));
         assert_eq!(player.oxygen, OXYGEN_MAX); // 岩に触れても酸素は減らない(掘削していないため)
     }
@@ -604,7 +627,10 @@ mod tests {
 
         assert_eq!(outcome, LateralOutcome::MovedLevelAndCollectedOxygen);
         assert_eq!(player.col, target_col); // 実際にそのマスへ移動している
-        assert_eq!(player.oxygen, 40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE);
+        assert_eq!(
+            player.oxygen,
+            40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
+        );
         assert_eq!(player.score, 100); // 1個目の取得スコア(spec.md 7章)
         assert_eq!(board.cell(0, target_col), Cell::Empty); // カプセルは消費された
     }
@@ -646,7 +672,10 @@ mod tests {
 
         assert_eq!(outcome, LateralOutcome::MovedLevelAndCollectedOxygen);
         assert_eq!(player.col, target_col);
-        assert_eq!(player.oxygen, 40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE);
+        assert_eq!(
+            player.oxygen,
+            40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
+        );
         assert_eq!(player.score, 100);
         assert_eq!(board.cell(0, target_col), Cell::Empty);
     }
@@ -883,10 +912,15 @@ mod tests {
 
         // 支えを失った直後、SHAKE_TICKSぶんはまだ落下しない。
         for _ in 0..SHAKE_TICKS {
-            let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
+            let tick =
+                process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
             assert_eq!(tick.moved_cells.len(), 0);
         }
-        assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red), "揺れている間はまだ落下しない");
+        assert_eq!(
+            board.cell(0, 0),
+            Cell::Color(ColorKind::Red),
+            "揺れている間はまだ落下しない"
+        );
 
         // 揺れが明けた次のティックで初めて1マス落下する。
         let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
@@ -949,7 +983,14 @@ mod tests {
 
         assert_eq!(outcome, FreeFallOutcome::FellAndCollectedOxygen);
         assert_eq!(player.row, 3);
-        assert_eq!(board.cell(3, player.col), Cell::Empty, "取得済みの酸素カプセルは消滅する");
-        assert_eq!(player.oxygen, 10.0 + crate::constants::OXYGEN_CAPSULE_RESTORE);
+        assert_eq!(
+            board.cell(3, player.col),
+            Cell::Empty,
+            "取得済みの酸素カプセルは消滅する"
+        );
+        assert_eq!(
+            player.oxygen,
+            10.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
+        );
     }
 }

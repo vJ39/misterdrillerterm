@@ -44,7 +44,11 @@ pub fn build_canvas() -> PixelCanvas {
         .resize_exact(target_w.max(1), target_h.max(1), FilterType::Triangle)
         .to_rgba8();
 
-    let mut canvas = PixelCanvas::new(resized.width() as usize, resized.height() as usize, background);
+    let mut canvas = PixelCanvas::new(
+        resized.width() as usize,
+        resized.height() as usize,
+        background,
+    );
     for (x, y, Rgba([r, g, b, a])) in resized.enumerate_pixels() {
         if *a < ALPHA_THRESHOLD {
             continue; // 透過(背景)はキャンバスの下地色のまま残す。
