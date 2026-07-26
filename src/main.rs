@@ -615,10 +615,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::DodgeRecoveryMs
                         | ui::render::SettingsChoice::BombRate => {}
                     },
-                    // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
-                    // 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで切り替えできる
-                    // ように」)。トグルなので方向は問わず、押されたら反転する。
-                    InputAction::MoveLeft | InputAction::MoveRight
+                    // MUSIC/SEのトグルはSpace(TogglePause)・←→キーでも行える(TERM独自拡張。
+                    // ユーザー指摘: 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで
+                    // 切り替えできるように」。ヘルプ表示「MUSIC・SEはSpaceか←→でトグル」
+                    // (draw_settings)と一致させるため、Spaceも同じ扱いにする。#152。
+                    // このScreen::Settingsは一時停止中のオーバーレイ(PauseOverlay::Settings)
+                    // とは別物で、そちらのSpaceは別途「オーバーレイを閉じて再開する」処理を
+                    // 持つため触れない。トグルなので方向は問わず、押されたら反転する。
+                    InputAction::TogglePause | InputAction::MoveLeft | InputAction::MoveRight
                         if matches!(
                             settings_selection,
                             ui::render::SettingsChoice::Music | ui::render::SettingsChoice::Se
