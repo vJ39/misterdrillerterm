@@ -262,6 +262,15 @@ pub const BOMB_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 /// 消滅フラッシュ(`BLOCK_VANISH_FLASH_MS`)と同じ考え方で爆発の瞬間を視覚的に強調する。
 pub const BOMB_EXPLOSION_FLASH_MS: u64 = 350;
 
+/// 転がり終えた直後、支えを失っていれば落下しつつ左右に跳ねて落ち着き先を探す
+/// (`BombPhase::Settling`)時間の合計(ms、TERM独自拡張。#140。ユーザー指摘:
+/// 「落ちたら、またはねまくること左右に壁をぶつかり行き来しながらいいところで
+/// 泊まる」)。この時間が経過したら、その時点の位置で`BombPhase::Ticking`(起爆
+/// カウントダウン)へ進む。
+pub const BOMB_SETTLE_MS: u32 = 600;
+/// 上記の間、1歩(1マス)ぶん移動する間隔(ms)。
+pub const BOMB_SETTLE_TICK_MS: u32 = 80;
+
 /// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま。
 /// TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
 /// ようにしたい。プレイ中でもその数値をいじれるようにしたい」)。設定画面から

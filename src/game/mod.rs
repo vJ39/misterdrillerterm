@@ -15,8 +15,8 @@ use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
     BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS,
-    BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
-    BOMB_SPAWN_DEPTH_MAX_BONUS,
+    BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS,
+    BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
     CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN,
     DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS,
@@ -28,7 +28,10 @@ use crate::constants::{
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
     STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
-use board::{BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells, tick_star_melting};
+use board::{
+    BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
+    connected_same_color, tick_star_melting,
+};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
@@ -43,8 +46,13 @@ pub enum BombPhase {
     Entering,
     /// 投げられたボムが`origin`から`pos`(最終設置マス)まで転がっている間。
     Rolling,
-    /// 転がり終えてその場に静止し、点滅しながら起爆までカウントダウンしている間
-    /// (`remaining_ms`はこの段階でのみ減る)。
+    /// 転がり終えた直後、支えを失っていれば落下しつつ、左右に跳ねながら
+    /// 落ち着き先を探している間(TERM独自拡張。#140。ユーザー指摘: 「落ちたら、
+    /// またはねまくること左右に壁をぶつかり行き来しながらいいところで泊まる」)。
+    Settling,
+    /// 静止し、点滅しながら起爆までカウントダウンしている間
+    /// (`remaining_ms`はこの段階でのみ減る。支えを失った場合はここでも落下を
+    /// 続け、落下中は`remaining_ms`の減少を止める。#140)。
     Ticking,
 }
 
@@ -54,7 +62,7 @@ pub enum BombPhase {
 /// 別レイヤーのオブジェクトなので`Cell`列挙体には追加しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bomb {
-    /// 転がり終えて静止する最終設置マス。
+    /// 現在位置(落下・跳ねで`origin`/初期の`pos`から動くことがある。#140)。
     pub pos: board::Pos,
     /// 白ボンが登場する画面端の位置(同じ行、列0か列`width-1`)。
     pub origin: board::Pos,
@@ -63,6 +71,8 @@ pub struct Bomb {
     pub phase_elapsed_ms: u32,
     /// 起爆までの残り時間(ms)。`BombPhase::Ticking`に入って初めて減り始める。
     pub remaining_ms: u32,
+    /// `BombPhase::Settling`中に左右へ跳ねる方向(+1=右、-1=左。TERM独自拡張。#140)。
+    pub settle_bounce_dir: i8,
 }
 
 /// キー入力から得られるゲーム側のアクション(spec.md 1章)。
@@ -991,14 +1001,44 @@ impl Game {
                     BombPhase::Rolling => {
                         bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
                         if bomb.phase_elapsed_ms >= BOMB_ROLL_MS {
+                            bomb.phase = BombPhase::Settling;
+                            bomb.phase_elapsed_ms = 0;
+                            bomb.settle_bounce_dir = if self.rng.random_bool(0.5) { 1 } else { -1 };
+                        }
+                    }
+                    BombPhase::Settling => {
+                        // 支えを失っていれば落下しつつ、支持されていれば左右に跳ねて
+                        // 落ち着き先を探す(TERM独自拡張。#140。ユーザー指摘: 「爆弾は
+                        // 宙に浮かないように落ちること、落ちたら、またはねまくること
+                        // 左右に壁をぶつかり行き来しながらいいところで泊まる」)。
+                        // `BOMB_SETTLE_TICK_MS`ごとに1歩ぶん進める。
+                        let prev_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
+                        bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
+                        let new_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
+                        // 1フレームのdeltaが大きく複数tickぶんまたぐ場合(低フレームレート等)
+                        // でも歩数が実時間ぶんきちんと進むよう、またいだ回数ぶん繰り返す。
+                        for _ in 0..(new_ticks - prev_ticks) {
+                            bomb_settle_step(&self.board, &mut bomb.pos, &mut bomb.settle_bounce_dir);
+                        }
+                        if bomb.phase_elapsed_ms >= BOMB_SETTLE_MS {
                             bomb.phase = BombPhase::Ticking;
                             bomb.phase_elapsed_ms = 0;
                         }
                     }
                     BombPhase::Ticking => {
-                        bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta_ms);
-                        if bomb.remaining_ms == 0 {
-                            exploded.push(i);
+                        // 起爆カウントダウン中も支えを失っていれば落下を続ける
+                        // (TERM独自拡張。#140)。落下している間は`remaining_ms`を
+                        // 減らさない(空中で起爆させないため)。
+                        let below = (bomb.pos.0 + 1, bomb.pos.1);
+                        if below.0 < self.board.depth_rows()
+                            && self.board.cell(below.0, below.1) == Cell::Empty
+                        {
+                            bomb.pos = below;
+                        } else {
+                            bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta_ms);
+                            if bomb.remaining_ms == 0 {
+                                exploded.push(i);
+                            }
                         }
                     }
                 }
@@ -1011,12 +1051,15 @@ impl Game {
                 // 爆風が届いた色ブロックは一色に統一する(TERM独自拡張。#137。ユーザー
                 // 指摘: 「色ブロックは爆弾の炎によって一色に統一される」)。爆発ごとに
                 // 1色をランダムに選び、その爆発の範囲内にある色ブロック全てを同じ色に
-                // 揃える(ショートカットC/UnifyColorsアイテムの「4連結以上でも即座には
-                // 自動消滅させない」という既存方針(#49)を踏襲し、ここでも塗り替えのみ
-                // 行い、消滅判定は通常の重力ティックに委ねる)。
+                // 揃える。ショートカットC/UnifyColorsアイテムは「4連結以上でも即座には
+                // 自動消滅させない」方針(#49)だが、ボム爆発については「爆弾で変化した
+                // 壁は落ちたときと同じ反応を発動させる。4マス以上結合している場合は
+                // 消える」というユーザーの明示的な指摘(#140)により、着地時の自動消滅と
+                // 同じ判定をこの場で発火させる。
                 use rand::RngExt;
                 let all_colors = ColorKind::ALL;
                 let unify_color = all_colors[self.rng.random_range(0..all_colors.len())];
+                let mut unified_positions = Vec::new();
                 for &(row, col) in &blast_cells {
                     if (row, col) == self.player.position() {
                         hit_player = true;
@@ -1034,8 +1077,33 @@ impl Game {
                     } else if matches!(self.board.cell(row, col), Cell::Color(_)) {
                         self.board.set(row, col, Cell::Color(unify_color));
                         self.recently_exploded.push(((row, col), flash, tier));
+                        unified_positions.push((row, col));
                     }
                 }
+
+                // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅
+                // させる(TERM独自拡張。#140)。同じグループに属する複数の位置を
+                // 二重に処理しないよう、既に判定した位置は`checked`で除外する。
+                let mut checked: Vec<board::Pos> = Vec::new();
+                for &pos in &unified_positions {
+                    if checked.contains(&pos) {
+                        continue;
+                    }
+                    let group = connected_same_color(&self.board, pos, unify_color);
+                    checked.extend(group.iter().copied());
+                    if group.len() >= 4 {
+                        let vanished: Vec<(board::Pos, Cell)> = group
+                            .iter()
+                            .map(|&g| (g, self.board.cell(g.0, g.1)))
+                            .collect();
+                        for &(r, c) in &group {
+                            self.board.set(r, c, Cell::Empty);
+                        }
+                        events.push(GameEvent::BlockDestroyed { blocks: group.len() });
+                        self.note_vanished_cells(vanished);
+                    }
+                }
+
                 events.push(GameEvent::BombExploded);
                 // 同一フレームで複数のボムが爆発し、どちらもプレイヤーを巻き込んだ
                 // 場合に二重でミス処理しないよう、既にミス処理済み(is_dying/GameOver
@@ -1627,6 +1695,7 @@ impl Game {
             phase: BombPhase::Entering,
             phase_elapsed_ms: 0,
             remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
         });
     }
 
@@ -1638,6 +1707,28 @@ impl Game {
             return;
         }
         self.spawn_bomb_at_random_empty_cell();
+    }
+}
+
+/// `BombPhase::Settling`中の1歩ぶんの移動(TERM独自拡張。#140)。支えを失って
+/// いれば1マス落下し、支持されていれば現在の`bounce_dir`(+1=右、-1=左)方向へ
+/// 1マス移動を試みる。移動先が壁または既存ブロックで塞がっていれば方向を反転する
+/// (次のステップで反対方向を試す)。
+fn bomb_settle_step(board: &Board, pos: &mut board::Pos, bounce_dir: &mut i8) {
+    let below = (pos.0 + 1, pos.1);
+    if below.0 < board.depth_rows() && board.cell(below.0, below.1) == Cell::Empty {
+        *pos = below;
+        return;
+    }
+
+    let next_col = pos.1 as isize + *bounce_dir as isize;
+    if next_col >= 0
+        && (next_col as usize) < board.width()
+        && board.cell(pos.0, next_col as usize) == Cell::Empty
+    {
+        pos.1 = next_col as usize;
+    } else {
+        *bounce_dir = -*bounce_dir;
     }
 }
 
@@ -3729,12 +3820,18 @@ mod tests {
         clear_board(&mut game);
         game.player.row = 500;
         game.player.col = 5;
+        // ボムを盤面の最深行に置く(#140で落下判定が入ったため支えが必要)。Rockで
+        // 床を作ると、その床自体が支えを失って落下してしまう(このテストの経過
+        // 時間ではRockの揺れ猶予が明けるほど長い)ため、それ自体が常に支持される
+        // 最深行を使う。
+        let bomb_row = FIELD_DEPTH_M - 1;
         game.bombs.push(Bomb {
-            pos: (520, 5),
-            origin: (520, 0),
+            pos: (bomb_row, 5),
+            origin: (bomb_row, 0),
             phase: BombPhase::Entering,
             phase_elapsed_ms: 0,
             remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
         });
 
         // Entering段階の途中では、まだRollingへ進まないはず。
@@ -3747,8 +3844,13 @@ mod tests {
         assert_eq!(game.bombs[0].phase, BombPhase::Rolling);
         assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Rolling中も起爆カウントダウンが始まらないはず");
 
-        // Rollingを終えるとTickingへ進み、そこで初めて起爆カウントダウンが始まる。
+        // Rollingを終えるとSettling(左右に跳ねて落ち着き先を探す段階、#140)へ進む。
         game.update(Duration::from_millis(BOMB_ROLL_MS as u64));
+        assert_eq!(game.bombs[0].phase, BombPhase::Settling);
+        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Settling中も起爆カウントダウンが始まらないはず");
+
+        // Settlingを終えるとTickingへ進み、そこで初めて起爆カウントダウンが始まる。
+        game.update(Duration::from_millis(BOMB_SETTLE_MS as u64));
         assert_eq!(game.bombs[0].phase, BombPhase::Ticking);
         game.update(Duration::from_millis(100));
         assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS - 100);
@@ -3795,6 +3897,7 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: 50,
+            settle_bounce_dir: 1,
         });
         game.board.rows[520][6] = Cell::Rock { hits: 0 };
         game.board.rows[521][5] = Cell::Diamond;
@@ -3834,6 +3937,7 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: 50,
+            settle_bounce_dir: 1,
         });
         game.board.rows[520][6] = Cell::Color(ColorKind::Red);
         game.board.rows[520][7] = Cell::Color(ColorKind::Blue);
@@ -3855,6 +3959,103 @@ mod tests {
     }
 
     #[test]
+    fn bomb_explosion_unify_that_forms_a_group_of_four_or_more_vanishes_immediately_like_a_landing()
+     {
+        // ユーザー指摘: 「爆弾で変化した壁は落ちたときと同じ反応を発動させる。
+        // つまり４マス以上結合している場合は、消える」(#140)。爆風内の隣接する
+        // 4マスの色ブロック(元は別々の色)が一色に統一された結果、4連結以上に
+        // なった場合はその場で消滅する(通常の着地時の自動消滅と同じ扱い)ことを
+        // 確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        // 距離1〜4(範囲内)に隣接する4色ブロックを並べる。統一後は同色4連結になる。
+        game.board.rows[520][6] = Cell::Color(ColorKind::Red);
+        game.board.rows[520][7] = Cell::Color(ColorKind::Blue);
+        game.board.rows[520][8] = Cell::Color(ColorKind::Green);
+        game.board.rows[520][9] = Cell::Color(ColorKind::Yellow);
+
+        let events = game.update(Duration::from_millis(60));
+
+        for col in 6..=9 {
+            assert_eq!(
+                game.board.cell(520, col),
+                Cell::Empty,
+                "4連結以上になった色ブロックはその場で消滅するはず(col={col})"
+            );
+        }
+        assert!(
+            events.contains(&GameEvent::BlockDestroyed { blocks: 4 }),
+            "4連結の自動消滅イベントが発生するはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn bomb_falls_while_ticking_if_the_cell_below_becomes_empty() {
+        // ユーザー指摘: 「爆弾は宙に浮かないように落ちること」(#140)。起爆カウント
+        // ダウン中でも、直下が空いていれば1マス落下し、その間はカウントダウンを
+        // 進めない(空中で起爆させないため)ことを確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 1000,
+            settle_bounce_dir: 1,
+        });
+
+        game.update(Duration::from_millis(50));
+
+        assert_eq!(game.bombs[0].pos, (521, 5), "直下が空いていれば1マス落下するはず");
+        assert_eq!(
+            game.bombs[0].remaining_ms, 1000,
+            "落下中は起爆カウントダウンを進めないはず"
+        );
+    }
+
+    #[test]
+    fn bomb_in_settling_phase_falls_one_cell_per_settle_tick_when_unsupported() {
+        // ユーザー指摘: 「爆弾は宙に浮かないように落ちること」(#140)。Settling中も
+        // 直下が空いていれば`BOMB_SETTLE_TICK_MS`ごとに1マスずつ落下することを
+        // 確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Settling,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.update(Duration::from_millis(BOMB_SETTLE_TICK_MS as u64));
+
+        assert_eq!(
+            game.bombs[0].pos,
+            (521, 5),
+            "Settling中も直下が空いていれば1マス落下するはず"
+        );
+        assert_eq!(game.bombs[0].phase, BombPhase::Settling, "落下してもSettling段階のままのはず");
+    }
+
+    #[test]
     fn bomb_explosion_shows_a_flame_flash_on_blast_cells_with_distance_based_tier_that_fades_out_after_the_flash_duration()
      {
         let mut game = Game::new(1);
@@ -3867,7 +4068,9 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: 50,
+            settle_bounce_dir: 1,
         });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
         game.board.rows[520][5] = Cell::Rock { hits: 0 }; // 爆心地(距離0)
         game.board.rows[519][5] = Cell::Rock { hits: 0 }; // 距離1(上方向)
         game.board.rows[520][7] = Cell::Rock { hits: 0 }; // 距離2(右方向、520,6はEmptyのまま)
@@ -3914,7 +4117,9 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: 50,
+            settle_bounce_dir: 1,
         }); // プレイヤーの1マス右、爆風範囲内
+        game.board.rows[501][6] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
 
         let events = game.update(Duration::from_millis(60));
 
@@ -3941,7 +4146,9 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: 50,
+            settle_bounce_dir: 1,
         });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
 
         let events = game.update(Duration::from_millis(60));
         assert!(
@@ -3962,7 +4169,9 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: 50,
+            settle_bounce_dir: 1,
         });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
 
         let events = game.update(Duration::from_millis(60));
         assert!(
@@ -3983,7 +4192,9 @@ mod tests {
             phase: BombPhase::Ticking,
             phase_elapsed_ms: 0,
             remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
         });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
 
         let events = game.update(Duration::from_millis(100));
 

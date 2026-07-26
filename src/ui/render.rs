@@ -881,6 +881,15 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 };
                 draw_bomb_sprite(buf, x, y, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
             }
+            BombPhase::Settling => {
+                // 落下・左右バウンド中(TERM独自拡張。#140)は現在位置(`bomb.pos`、
+                // 重力・跳ねに応じて毎tick更新される)へそのまま描く。起爆カウント
+                // ダウンはまだ始まっていないため、火花は暗い方の色で固定する。
+                let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb.pos.0, bomb.pos.1) else {
+                    continue;
+                };
+                draw_bomb_sprite(buf, x, y, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
+            }
             BombPhase::Ticking => {
                 let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1) else {
                     continue;
