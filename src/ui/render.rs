@@ -429,7 +429,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
 
     let mut lines = vec![
         heading("== 操作 =="),
-        line("←/→: 移動(掘削を伴う)      ↑/↓: 向きを変える(掘削なし)"),
+        line("←/→: 移動(掘削なし)        ↑/↓: 向きを変える(移動なし)"),
         line("X/Z: 掘削(向いている方向)   Space/P: 一時停止"),
         line("Q: タイトルへ戻る/終了"),
         line("S: 設定画面   H: このヘルプ (プレイ中に押すと自動で一時停止する)"),
