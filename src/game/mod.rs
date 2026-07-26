@@ -14,7 +14,8 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_DANGER_MS,
+    BLOCK_VANISH_FLASH_MS, BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER, BOARD_SNAPSHOT_ROWS_BELOW_PLAYER,
+    BOARD_SNAPSHOT_TICK_INTERVAL, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_DANGER_MS,
     BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS,
     BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
     BOMB_SPAWN_DEPTH_MAX_BONUS, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
@@ -1109,6 +1110,7 @@ impl Game {
                 });
             }
             self.note_vanished_cells(result.vanished_cells);
+            self.log_board_snapshot_if_due();
 
             if result.life_lost_to_crush {
                 self.apply_miss(&mut events);
@@ -1531,6 +1533,36 @@ impl Game {
             .iter()
             .find(|&&(p, _, _)| p == pos)
             .map(|&(_, remaining, _)| remaining.as_millis() as u64)
+    }
+
+    /// `BOARD_SNAPSHOT_TICK_INTERVAL`ティックごとに、プレイヤー周辺の非Emptyセルを
+    /// まとめてログへ記録する(TERM独自拡張。#85調査用。ユーザー指摘: 「これは#85の
+    /// 事象と同じやつだ」)。`block_events`は実際に動いた/消えたセルしか記録しない
+    /// ため、「一度も動いていないセルが本当にEmptyか、生成時からの地形か」を後から
+    /// 見分けられない。デバッグログ無効時、または記録タイミングでなければ何もしない。
+    fn log_board_snapshot_if_due(&self) {
+        let Some(log) = &self.debug_log else {
+            return;
+        };
+        if !self.frame_counter.is_multiple_of(BOARD_SNAPSHOT_TICK_INTERVAL) {
+            return;
+        }
+        let row_start = self
+            .player
+            .row
+            .saturating_sub(BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER);
+        let row_end = (self.player.row + BOARD_SNAPSHOT_ROWS_BELOW_PLAYER)
+            .min(self.board.depth_rows().saturating_sub(1));
+        let mut cells = Vec::new();
+        for row in row_start..=row_end {
+            for col in 0..self.board.width() {
+                let cell = self.board.cell(row, col);
+                if cell != Cell::Empty {
+                    cells.push(((row, col), format!("{cell:?}")));
+                }
+            }
+        }
+        log.log_board_snapshot(self.frame_counter, &cells);
     }
 
     /// 落下ブロック補間描画(`draw_falling_blocks`)が、着地先セルが盤面上で既に

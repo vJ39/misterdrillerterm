@@ -373,3 +373,19 @@ pub const OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER: f32 = 2.5;
 pub fn depth_fraction(depth_m: usize) -> f32 {
     (depth_m as f32 / FIELD_DEPTH_M as f32).clamp(0.0, 1.0)
 }
+
+/// #85調査用の盤面スナップショットログ(TERM独自拡張)を、何ティックごとに
+/// 記録するか。`block_events`は実際に動いた/消えたセルしか記録しないため、
+/// 「一度も動いていないセルが本当にEmptyか、生成時からの地形か」を見分けられない。
+/// 定期的にプレイヤー周辺の非Emptyセルを丸ごと記録しておくことで後から確認できる
+/// ようにする(ユーザー指摘: 「これは#85の事象と同じやつだ」)。
+pub const BOARD_SNAPSHOT_TICK_INTERVAL: u64 = 10;
+
+/// 盤面スナップショットで記録する、プレイヤーより浅い(画面上で上にある)側の
+/// 行数。#85のような「支えを失ったブロックが浮いたまま」報告はプレイヤーの
+/// 数十行上で起きることがあるため、画面外まで広めに取る。
+pub const BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER: usize = 40;
+
+/// 盤面スナップショットで記録する、プレイヤーより深い(画面上で下にある)側の
+/// 行数。
+pub const BOARD_SNAPSHOT_ROWS_BELOW_PLAYER: usize = 5;

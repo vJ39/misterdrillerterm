@@ -63,6 +63,12 @@ impl DebugLog {
                  facing TEXT NOT NULL,
                  status TEXT NOT NULL
              );
+             CREATE TABLE board_snapshot (
+                 frame INTEGER NOT NULL,
+                 row INTEGER NOT NULL,
+                 col INTEGER NOT NULL,
+                 cell_kind TEXT NOT NULL
+             );
              CREATE TABLE render_fallback_events (
                  frame INTEGER NOT NULL,
                  row INTEGER NOT NULL,
@@ -118,6 +124,30 @@ impl DebugLog {
             stmt.execute(rusqlite::params![frame as i64, cell_kind, pos.0 as i64, pos.1 as i64])
         });
         let _ = result;
+    }
+
+    /// プレイヤー付近の盤面の非Emptyセルをまとめて記録する(TERM独自拡張。#85調査用。
+    /// ユーザー指摘: 「これは#85の事象と同じやつだ」)。`block_events`は実際に移動/
+    /// 消滅した(=イベントが起きた)セルしか記録しないため、「一度も動いていない
+    /// セル」が本来Emptyのまま浮いている支えなのか、それとも生成時からある本物の
+    /// 地形なのかを見分けられない。一定tickごとにこの周辺一帯の実際のセル内容を
+    /// 丸ごと記録しておくことで、後から「あの時この座標には本当に何もなかった」を
+    /// 直接確認できるようにする。Emptyセルは記録しない(非Emptyセルの集合として
+    /// 記録し、記録が無い座標=その時点でEmptyだったと解釈できるため)。
+    pub fn log_board_snapshot(&self, frame: u64, cells: &[((usize, usize), String)]) {
+        let Ok(mut stmt) = self.conn.prepare_cached(
+            "INSERT INTO board_snapshot (frame, row, col, cell_kind) VALUES (?1, ?2, ?3, ?4)",
+        ) else {
+            return;
+        };
+        for ((row, col), cell_kind) in cells {
+            let _ = stmt.execute(rusqlite::params![
+                frame as i64,
+                *row as i64,
+                *col as i64,
+                cell_kind
+            ]);
+        }
     }
 
     /// 落下ブロック補間描画(`draw_falling_blocks`)が、着地先セルが盤面上で既に
@@ -221,6 +251,43 @@ mod tests {
             .unwrap();
         assert_eq!(frame, 10);
         assert_eq!(cell_kind, "Color(Red)");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn log_board_snapshot_records_one_row_per_non_empty_cell() {
+        let path = temp_log_path("board-snapshot");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let log = DebugLog::open_fresh_at(&path).unwrap();
+        log.log_board_snapshot(
+            99,
+            &[
+                ((10, 2), "Color(Red)".to_string()),
+                ((10, 3), "Rock { hits: 1 }".to_string()),
+            ],
+        );
+
+        let count: i64 = log
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM board_snapshot WHERE frame = 99",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let cell_kind: String = log
+            .conn
+            .query_row(
+                "SELECT cell_kind FROM board_snapshot WHERE frame = 99 AND row = 10 AND col = 3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cell_kind, "Rock { hits: 1 }");
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
