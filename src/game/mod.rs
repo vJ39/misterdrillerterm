@@ -1757,6 +1757,46 @@ mod tests {
     }
 
     #[test]
+    fn color_block_resting_on_a_star_falls_once_the_star_melts_away() {
+        // ユーザー報告: 「掘っていないのに設置済みブロックが消える/落下する」
+        // (スター処理が原因ではないかとの推測)。スターブロックの上に乗っていた
+        // 色ブロックが、スターが溶けて消えた後もそのまま「浮いた」状態で残らず、
+        // ちゃんと支えを失って落下することを確認する。
+        let mut game = Game::new(41);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 11; // 落下グループから十分離す
+        game.board.rows[999][3] = Cell::Rock { hits: 0 }; // 最深行=常に支持
+        game.board.rows[998][3] = Cell::Star { visible_ms: 0 }; // 岩の上に乗ったスター
+        game.board.rows[997][3] = Cell::Color(ColorKind::Red); // スターの上に乗った色ブロック
+
+        // スターが溶けきるまで進める(実時間ベース)。
+        game.update(Duration::from_millis(
+            crate::constants::STAR_VISIBLE_GRACE_MS as u64 + crate::constants::STAR_MELT_DURATION_MS as u64 + 10,
+        ));
+        assert_eq!(game.board.cell(998, 3), Cell::Empty, "スターは溶けて消えているはず");
+
+        // スターが消えた直後もまだ揺れ猶予中のはずなので、揺れ+落下ぶんのブロック
+        // 落下tickが経過するまで細かく進める(実際のフレームレートに近い刻みで)。
+        const FRAME_MS: u64 = 33;
+        let ticks_needed = (SHAKE_TICKS as u64 + 2) * FALL_TICK_MS / FRAME_MS + 2;
+        for _ in 0..ticks_needed {
+            game.update(Duration::from_millis(FRAME_MS));
+        }
+
+        assert_ne!(
+            game.board.cell(997, 3),
+            Cell::Color(ColorKind::Red),
+            "スターが消えた元の位置に色ブロックが浮いたまま残ってはいけない"
+        );
+        assert_eq!(
+            game.board.cell(998, 3),
+            Cell::Color(ColorKind::Red),
+            "色ブロックはスターが消えた分だけ1マス落下しているはず"
+        );
+    }
+
+    #[test]
     fn falling_block_merges_after_a_long_multi_row_fall_via_many_small_frame_updates() {
         // ユーザー指摘: 「この緑の横に2つのところに、たて5が結合した。しかし消えなかった」
         // 「こういうテストをちゃんとやってほしい」。1回の大きなdeltaでまとめて進める
