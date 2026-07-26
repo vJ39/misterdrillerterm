@@ -110,6 +110,9 @@ pub const BOMB_BG_DIM: Color = Color::Rgb(120, 30, 30);
 /// 「スター点滅」と同じく、爆発前に必ず視覚的な予兆を出す設計方針)。
 pub const BOMB_BG_BRIGHT: Color = Color::Rgb(255, 60, 40);
 
+/// 白ボン(TERM独自拡張。#123)の前景色。名前の通り白系にする。
+pub const SHIROBON_FG: Color = Color::Rgb(240, 240, 240);
+
 /// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
 /// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、
 /// その後`melt_duration_ms`かけて進行度が1.0(消滅)まで進む。

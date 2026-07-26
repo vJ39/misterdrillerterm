@@ -14,15 +14,15 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD,
-    BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS, CRUSH_ASCEND_MS,
-    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
-    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
-    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
-    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
-    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
-    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
+    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_ENTER_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD,
+    BOMB_ROLL_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
+    CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
+    DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN,
+    DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS,
+    DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS,
+    DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M,
+    FIELD_WIDTH_DEFAULT, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS,
+    INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
     MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
     STAR_VISIBLE_RANGE_ROWS, depth_fraction,
@@ -33,13 +33,34 @@ use player::{Direction, Player};
 
 use crate::debug_log::DebugLog;
 
+/// ボムの演出段階(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
+/// とことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...ってなって、
+/// 爆発する」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BombPhase {
+    /// 白ボンが画面端(`Bomb::origin`)に登場し、ボムを投げる直前までの間。
+    Entering,
+    /// 投げられたボムが`origin`から`pos`(最終設置マス)まで転がっている間。
+    Rolling,
+    /// 転がり終えてその場に静止し、点滅しながら起爆までカウントダウンしている間
+    /// (`remaining_ms`はこの段階でのみ減る)。
+    Ticking,
+}
+
 /// 白ボンがランダムに投げ込むボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、
 /// 爆弾をランダムに投げてくるイメージで、敵は出現しないものとする」)。移動する
 /// 敵キャラは持たず、盤面上に設置されたこのボム自体だけを管理する。ブロックとは
 /// 別レイヤーのオブジェクトなので`Cell`列挙体には追加しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bomb {
+    /// 転がり終えて静止する最終設置マス。
     pub pos: board::Pos,
+    /// 白ボンが登場する画面端の位置(同じ行、列0か列`width-1`)。
+    pub origin: board::Pos,
+    pub phase: BombPhase,
+    /// 現在の`phase`に入ってからの経過時間(ms)。
+    pub phase_elapsed_ms: u32,
+    /// 起爆までの残り時間(ms)。`BombPhase::Ticking`に入って初めて減り始める。
     pub remaining_ms: u32,
 }
 
@@ -944,11 +965,30 @@ impl Game {
         // くるイメージで、敵は出現しないものとする」)。「天に召される」演出中は
         // 位置の食い違いを避けるため、他のプレイヤー関連処理と同様に進行を止める。
         if !was_dying {
+            let delta_ms = delta.as_millis() as u32;
             let mut exploded = Vec::new();
             for (i, bomb) in self.bombs.iter_mut().enumerate() {
-                bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta.as_millis() as u32);
-                if bomb.remaining_ms == 0 {
-                    exploded.push(i);
+                match bomb.phase {
+                    BombPhase::Entering => {
+                        bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
+                        if bomb.phase_elapsed_ms >= BOMB_ENTER_MS {
+                            bomb.phase = BombPhase::Rolling;
+                            bomb.phase_elapsed_ms = 0;
+                        }
+                    }
+                    BombPhase::Rolling => {
+                        bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
+                        if bomb.phase_elapsed_ms >= BOMB_ROLL_MS {
+                            bomb.phase = BombPhase::Ticking;
+                            bomb.phase_elapsed_ms = 0;
+                        }
+                    }
+                    BombPhase::Ticking => {
+                        bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta_ms);
+                        if bomb.remaining_ms == 0 {
+                            exploded.push(i);
+                        }
+                    }
                 }
             }
             for &i in exploded.iter().rev() {
@@ -1526,8 +1566,16 @@ impl Game {
             return;
         }
         let idx = self.rng.random_range(0..candidates.len());
+        let pos = candidates[idx];
+        // 白ボンは画面の左端・右端のどちらかから登場する(TERM独自拡張。#123。
+        // ユーザー指摘: 「白ボンが画面の外からとことこやってきて」)。同じ行の
+        // 反対側の端から登場すれば、必ず盤面内を横切って転がってくる形になる。
+        let edge_col = if self.rng.random_range(0..2) == 0 { 0 } else { width.saturating_sub(1) };
         self.bombs.push(Bomb {
-            pos: candidates[idx],
+            pos,
+            origin: (pos.0, edge_col),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
             remaining_ms: BOMB_FUSE_MS,
         });
     }
@@ -3612,6 +3660,48 @@ mod tests {
         assert_eq!(game.bombs.len(), 1, "候補が1マスしかないのでボムが1個設置されるはず");
         assert_eq!(game.bombs[0].pos, (510, 7));
         assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS);
+        assert_eq!(
+            game.bombs[0].phase,
+            BombPhase::Entering,
+            "白ボンが登場する段階から始まるはず"
+        );
+        assert_eq!(game.bombs[0].origin.0, 510, "登場位置は最終設置マスと同じ行のはず");
+        assert!(
+            game.bombs[0].origin.1 == 0 || game.bombs[0].origin.1 == game.board.width() - 1,
+            "登場位置は画面の左端か右端のはず: {:?}",
+            game.bombs[0].origin
+        );
+    }
+
+    #[test]
+    fn bomb_advances_through_entering_and_rolling_before_ticking_down_the_fuse() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+        });
+
+        // Entering段階の途中では、まだRollingへ進まないはず。
+        game.update(Duration::from_millis(BOMB_ENTER_MS as u64 / 2));
+        assert_eq!(game.bombs[0].phase, BombPhase::Entering);
+        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Entering中は起爆カウントダウンが始まらないはず");
+
+        // Enteringを終えるとRollingへ進む。
+        game.update(Duration::from_millis(BOMB_ENTER_MS as u64));
+        assert_eq!(game.bombs[0].phase, BombPhase::Rolling);
+        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Rolling中も起爆カウントダウンが始まらないはず");
+
+        // Rollingを終えるとTickingへ進み、そこで初めて起爆カウントダウンが始まる。
+        game.update(Duration::from_millis(BOMB_ROLL_MS as u64));
+        assert_eq!(game.bombs[0].phase, BombPhase::Ticking);
+        game.update(Duration::from_millis(100));
+        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS - 100);
     }
 
     #[test]
@@ -3651,6 +3741,9 @@ mod tests {
         game.player.col = 5; // 爆風範囲外の位置
         game.bombs.push(Bomb {
             pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
             remaining_ms: 50,
         });
         game.board.rows[520][6] = Cell::Rock { hits: 0 };
@@ -3683,6 +3776,9 @@ mod tests {
         game.player.col = 5;
         game.bombs.push(Bomb {
             pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
             remaining_ms: 50,
         }); // プレイヤーの1マス右、爆風範囲内
 
@@ -3703,6 +3799,9 @@ mod tests {
         game.player.col = 5;
         game.bombs.push(Bomb {
             pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
             remaining_ms: BOMB_FUSE_MS,
         });
 

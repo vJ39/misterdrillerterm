@@ -15,11 +15,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::constants::{
-    OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
+    BOMB_ROLL_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
-use crate::game::{Game, GameOverChoice, GameStatus};
+use crate::game::{BombPhase, Game, GameOverChoice, GameStatus};
 use crate::ui::colors;
 
 use super::intro;
@@ -832,30 +832,70 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     draw_player(buf, inner, top_row, game);
 }
 
-/// ボム(TERM独自拡張。#96)を盤面の上に重ねて描画する。ブロックとは別レイヤーの
-/// オブジェクトなので、通常のセル描画ループとは独立してここで扱う。起爆が近づく
-/// ほど点滅を速める(既存の「揺れ」「スター点滅」と同じ、爆発前に必ず視覚的な
-/// 予兆を出す設計方針)。
+/// ボム(TERM独自拡張。#96/#123)を盤面の上に重ねて描画する。ブロックとは別レイヤーの
+/// オブジェクトなので、通常のセル描画ループとは独立してここで扱う。段階(`BombPhase`)に
+/// 応じて、白ボンの登場(Entering)→ボムが転がってくる(Rolling)→設置されて点滅
+/// カウントダウン(Ticking)の3段階を描き分ける(ユーザー指摘: 「白ボンが画面の外から
+/// とことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...ってなって、
+/// 爆発する」)。起爆が近づくほど点滅を速める(既存の「揺れ」「スター点滅」と同じ、
+/// 爆発前に必ず視覚的な予兆を出す設計方針)。
 fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize, game: &Game) {
     for bomb in game.bombs() {
-        if bomb.pos.0 < top_row {
+        // originとposは常に同じ行(TERM独自拡張。#123)。
+        let row = bomb.pos.0;
+        if row < top_row {
             continue;
         }
-        let screen_row = bomb.pos.0 - top_row;
+        let screen_row = row - top_row;
         if screen_row >= visible_rows {
             continue;
         }
         let y = inner.y + screen_row as u16 * CELL_H;
-        let x = inner.x + bomb.pos.1 as u16 * CELL_W;
-        if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
-            continue;
+
+        match bomb.phase {
+            BombPhase::Entering => {
+                let x = inner.x + bomb.origin.1 as u16 * CELL_W;
+                if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+                    continue;
+                }
+                draw_shirobon_sprite(buf, x, y);
+            }
+            BombPhase::Rolling => {
+                let t = (bomb.phase_elapsed_ms as f32 / BOMB_ROLL_MS as f32).clamp(0.0, 1.0);
+                let col = bomb.origin.1 as f32 + (bomb.pos.1 as f32 - bomb.origin.1 as f32) * t;
+                let px = inner.x as f32 + col * CELL_W as f32;
+                if px < inner.x as f32 {
+                    continue;
+                }
+                let x = px.round() as u16;
+                if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+                    continue;
+                }
+                draw_fixed_unit(buf, x, y, [['*', '*'], ['B', 'B']], colors::BOMB_FG, colors::BOMB_BG_DIM);
+            }
+            BombPhase::Ticking => {
+                let x = inner.x + bomb.pos.1 as u16 * CELL_W;
+                if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+                    continue;
+                }
+                let bg = if bomb_is_bright_frame(bomb.remaining_ms) {
+                    colors::BOMB_BG_BRIGHT
+                } else {
+                    colors::BOMB_BG_DIM
+                };
+                draw_fixed_unit(buf, x, y, [['*', '*'], ['B', 'B']], colors::BOMB_FG, bg);
+            }
         }
-        let bg = if bomb_is_bright_frame(bomb.remaining_ms) {
-            colors::BOMB_BG_BRIGHT
-        } else {
-            colors::BOMB_BG_DIM
-        };
-        draw_fixed_unit(buf, x, y, [['*', '*'], ['B', 'B']], colors::BOMB_FG, bg);
+    }
+}
+
+/// 白ボンのスプライト(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
+/// とことこやってきて」)。プレイヤースプライトと同じ4文字×2行の描画方式を使う。
+fn draw_shirobon_sprite(buf: &mut Buffer, x: u16, y: u16) {
+    for (dy, line) in [" oo ", " () "].iter().enumerate() {
+        for (dx, ch) in line.chars().enumerate() {
+            put(buf, x + dx as u16, y + dy as u16, ch, colors::SHIROBON_FG, colors::FIELD_EMPTY_BG);
+        }
     }
 }
 
