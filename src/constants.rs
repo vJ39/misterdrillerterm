@@ -233,8 +233,10 @@ pub const BOMB_ENTER_MS: u32 = 400;
 pub const BOMB_ROLL_MS: u32 = 400;
 
 /// ボムの爆風が上下左右へ伸びる距離(マス数)。Xブロック・ダイヤブロックに当たったら
-/// そのマスまでで止まる(bombermantermのexplosion_cellsと同じロジック)。
-pub const BOMB_BLAST_RANGE: usize = 2;
+/// そのマスまでで止まる(bombermantermのexplosion_cellsと同じロジック)。2→4へ
+/// 拡大(TERM独自拡張。#136。ユーザー指摘: 「爆弾が爆発するときは縦横4マスずつ
+/// 炎を展開してボンバーマンTERM参考にして」)。
+pub const BOMB_BLAST_RANGE: usize = 4;
 
 /// 盤面全体で同時に存在できるボムの最大数(#113のアイテム上限と同じ考え方)。
 pub const BOMB_MAX_COUNT_ON_BOARD: usize = 3;

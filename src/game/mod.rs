@@ -3878,6 +3878,52 @@ mod tests {
     }
 
     #[test]
+    fn bomb_blast_range_catches_the_player_at_four_cells_but_not_five() {
+        // ユーザー指摘: 「爆弾が爆発するときは縦横4マスずつ炎を展開してボンバーマン
+        // TERM参考にして」(#136)。遮るものが無い場合、爆心地から4マス以内は
+        // プレイヤーを巻き込むが、5マス目は範囲外で巻き込まないことを確認する
+        // (BOMB_BLAST_RANGE=4)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 520;
+        game.player.col = 9; // 爆心地(520,5)から距離4
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+        });
+
+        let events = game.update(Duration::from_millis(60));
+        assert!(
+            events.contains(&GameEvent::LifeLost),
+            "距離4マスは爆風の範囲内でプレイヤーを巻き込むはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn bomb_blast_range_does_not_catch_the_player_at_five_cells() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 520;
+        game.player.col = 10; // 爆心地(520,5)から距離5
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+        });
+
+        let events = game.update(Duration::from_millis(60));
+        assert!(
+            !events.contains(&GameEvent::LifeLost),
+            "距離5マスは爆風の範囲外でプレイヤーを巻き込まないはず: {events:?}"
+        );
+    }
+
+    #[test]
     fn bomb_stops_blinking_countdown_and_does_not_explode_before_the_fuse_runs_out() {
         let mut game = Game::new(1);
         clear_board(&mut game);
