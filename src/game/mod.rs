@@ -469,7 +469,7 @@ impl Game {
                 events.push(GameEvent::DrillImpact);
                 events.push(GameEvent::BlockDestroyed { blocks: 1 });
             }
-            DrillOutcome::CrushedByUnstableOverhead => self.apply_miss(events, true),
+            DrillOutcome::CrushedByUnstableOverhead => self.apply_miss(events),
         }
     }
 
@@ -479,56 +479,40 @@ impl Game {
             return;
         }
         if self.player.is_out_of_oxygen() {
-            self.apply_miss(events, false);
+            self.apply_miss(events);
         }
     }
 
-    /// ミス(酸素切れ/押し潰し)を処理する(spec.md 8章)。ライフが残っていれば
-    /// 無敵時間を設定して続行、無くなっていればゲームオーバーにする。
+    /// ミス(酸素切れ/押し潰し)を処理する(spec.md 8章)。原因を問わず全く同じ処理を行う
+    /// (TERM独自拡張。ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと
+    /// 同じ処理」。以前は押し潰しのみ「潰れた」フラッシュ・「天に召される」演出付きで、
+    /// 酸素切れは即座に処理する別扱いだったが、統一した)。
     ///
-    /// `is_crush`が`true`(=落下ブロックに押し潰された)場合、ライフが残っていれば
-    /// 「天に召される」演出(`ascending_remaining`、TERM独自拡張)から開始し、死亡地点の
-    /// 3列クリア・ライフ減算・酸素回復は演出が終わるまで`update()`側で遅延させる
-    /// (ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、一度天に召される
-    /// 演出をして、ブロックが消える処理されてから、元の位置に復活」)。ライフが0になる
-    /// 場合はこの演出を行わず、従来通り即座にGameOverダイアログへ進む(ユーザー指摘:
-    /// 「livesが0になったときはただちにゲームオーバーのダイアログ出てOK」)。
-    /// 酸素切れ由来のミスは演出こそ行わず即座に処理するが、3列クリア自体は押し潰し死亡
-    /// と同様に行う(TERM独自拡張。ユーザー指摘: 「死んだら[r]を発動させたようなものを
-    /// キャラの列と左右の列(3列)をクリアしてほしい」)。
-    fn apply_miss(&mut self, events: &mut Vec<GameEvent>, is_crush: bool) {
-        if is_crush {
-            self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
+    /// ライフが残っていれば「天に召される」演出(`ascending_remaining`、TERM独自拡張)から
+    /// 開始し、死亡地点の3列クリア・ライフ減算・酸素回復は演出が終わるまで`update()`側で
+    /// 遅延させる(ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、一度天に
+    /// 召される演出をして、ブロックが消える処理されてから、元の位置に復活」)。ライフが
+    /// 0になる場合はこの演出を行わず、従来通り即座にGameOverダイアログへ進む
+    /// (ユーザー指摘: 「livesが0になったときはただちにゲームオーバーのダイアログ出てOK」)。
+    fn apply_miss(&mut self, events: &mut Vec<GameEvent>) {
+        self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
 
-            if self.player.lives <= 1 {
-                self.clear_three_columns_above_player();
-                let game_over = self.player.lose_life();
-                debug_assert!(game_over, "lives<=1のはずなのでlose_lifeは必ずtrueを返す");
-                self.status = GameStatus::GameOver;
-                self.game_over_selection = GameOverChoice::BackToTitle;
-                events.push(GameEvent::GameOverMiss);
-                return;
-            }
-
-            // ライフ減算・酸素回復自体は演出完了まで遅延する(tick_ascending)が、
-            // 死亡SEは押し潰された瞬間に即座に鳴らす(TERM独自拡張。ユーザー指摘:
-            // 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSE鳴らして
-            // ほしい」。演出完了まで3秒近く無音だったバグの修正)。
-            events.push(GameEvent::LifeLost);
-            self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
-            return;
-        }
-
-        self.clear_three_columns_above_player();
-        let game_over = self.player.lose_life();
-        if game_over {
+        if self.player.lives <= 1 {
+            self.clear_three_columns_above_player();
+            let game_over = self.player.lose_life();
+            debug_assert!(game_over, "lives<=1のはずなのでlose_lifeは必ずtrueを返す");
             self.status = GameStatus::GameOver;
             self.game_over_selection = GameOverChoice::BackToTitle;
             events.push(GameEvent::GameOverMiss);
-        } else {
-            self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
-            events.push(GameEvent::LifeLost);
+            return;
         }
+
+        // ライフ減算・酸素回復自体は演出完了まで遅延する(tick_ascending)が、
+        // 死亡SEはミスが発生した瞬間に即座に鳴らす(TERM独自拡張。ユーザー指摘:
+        // 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSE鳴らして
+        // ほしい」。演出完了まで3秒近く無音だったバグの修正)。
+        events.push(GameEvent::LifeLost);
+        self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
     }
 
     /// 「天に召される」演出(TERM独自拡張)の進行を1フレームぶん進める。演出中は
@@ -641,6 +625,13 @@ impl Game {
         // 酸素減少のみを凍結する。周囲の他の落下ブロックの重力処理は止めない
         // (ユーザー指摘: 「潰れた瞬間もまわりの落下アニメーションを止めない」)。
         // 演出が終わった時点でのブロッククリア・ライフ減算・酸素回復はtick_ascending内で行う。
+        //
+        // 演出が完了したかどうかは、この呼び出し**前**の状態で判定して以降の処理に使う
+        // (`was_dying`)。tick_ascending呼び出し後にis_dying()を都度見てしまうと、演出が
+        // ちょうどこのフレームで完了した場合、余った経過時間ぶんが「復活直後のプレイヤー」
+        // へその場でさらに酸素減少・クールダウン加算として二重に適用されてしまう
+        // (演出完了時に酸素を全回復させた直後、同じフレーム内で減衰させてしまうバグ)。
+        let was_dying = self.is_dying();
         self.tick_ascending(delta);
 
         // 「わ〜!」スライダー演出中(TERM独自拡張)は入力のみを凍結する(is_input_frozen
@@ -658,9 +649,10 @@ impl Game {
         }
 
         // 「天に召される」演出中は、プレイヤー自身に関する経過処理(酸素減少・
-        // クールダウン)だけを凍結する。演出が終わった瞬間(このフレーム内)は
-        // is_dying()が既にfalseになっているため、通常通り再開される。
-        if !self.is_dying() {
+        // クールダウン)だけを凍結する。演出がこのフレームで完了した場合も、
+        // 復活直後の二重減衰を避けるため`was_dying`(呼び出し前の状態)で判定し、
+        // このフレームでは通常処理を再開しない(次のフレームから再開する)。
+        if !was_dying {
             self.player.elapsed_seconds += delta.as_secs_f32();
 
             let accum_cap = Duration::from_millis(INPUT_COOLDOWN_ACCUM_CAP_MS);
@@ -688,7 +680,7 @@ impl Game {
         }
 
         if !self.is_dying() && self.player.is_out_of_oxygen() {
-            self.apply_miss(&mut events, false);
+            self.apply_miss(&mut events);
             if self.status != GameStatus::Playing {
                 return events;
             }
@@ -765,7 +757,7 @@ impl Game {
             self.note_vanished_cells(result.vanished_cells);
 
             if result.life_lost_to_crush {
-                self.apply_miss(&mut events, true);
+                self.apply_miss(&mut events);
             }
 
             if self.status != GameStatus::Playing {
@@ -1201,6 +1193,9 @@ mod tests {
 
     #[test]
     fn oxygen_running_out_during_update_costs_a_life_and_continues() {
+        // 酸素切れも押し潰しと同じ処理を経る(TERM独自拡張。ユーザー指摘:
+        // 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」)ため、
+        // ライフ減算・酸素回復は「天に召される」演出完了まで遅延される。
         let mut game = Game::new(2);
         game.player.oxygen = 1.0;
         let lives_before = game.player.lives;
@@ -1208,9 +1203,14 @@ mod tests {
         let events = game.update(Duration::from_secs(1));
 
         assert_eq!(game.status, GameStatus::Playing);
+        assert!(game.is_dying(), "酸素切れでも天に召される演出中のはず");
+        assert_eq!(game.player.lives, lives_before, "演出完了までライフ減算は遅延されるはず");
+        assert!(events.iter().any(|e| matches!(e, GameEvent::LifeLost)));
+
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+
         assert_eq!(game.player.lives, lives_before - 1);
         assert_eq!(game.player.oxygen, crate::constants::OXYGEN_MAX);
-        assert!(events.iter().any(|e| matches!(e, GameEvent::LifeLost)));
     }
 
     #[test]
@@ -1885,15 +1885,16 @@ mod tests {
     // --- 押し潰されて死ぬ演出(TERM独自拡張、9章) ---
 
     #[test]
-    fn crush_miss_activates_the_flash_effect_but_oxygen_miss_does_not() {
-        // 落下ブロックに押し潰された場合のみ「潰れた」演出を開始する。酸素切れ由来の
-        // ミスではこの演出は行わない(区別できていることの確認)。
+    fn oxygen_miss_also_activates_the_flash_effect() {
+        // ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」。
+        // 以前は押し潰しのみ「潰れた」フラッシュ演出を行っていたが、酸素切れ死亡でも
+        // 同じフラッシュ演出が起きるよう統一した。
         let mut game = Game::new(30);
         game.player.oxygen = 1.0;
 
         game.update(Duration::from_secs(1)); // 酸素切れでミス(押し潰しではない)
 
-        assert!(!game.crush_flash_active());
+        assert!(game.crush_flash_active());
     }
 
     #[test]
@@ -1934,10 +1935,10 @@ mod tests {
     }
 
     #[test]
-    fn oxygen_death_also_clears_three_columns_above_the_player() {
-        // ユーザー指摘: 「死んだら[r]を発動させたようなものをキャラの列と左右の列
-        // (3列)をクリアしてほしい」。押し潰し死亡だけでなく、酸素切れ死亡でも
-        // 同様に3列クリアが行われることを確認する。
+    fn oxygen_death_goes_through_the_same_ascend_and_three_column_clear_as_crush_death() {
+        // ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」。
+        // 酸素切れ死亡でも押し潰し死亡と全く同じ処理(「天に召される」演出→演出完了後に
+        // 3列クリア・ライフ減算)が行われることを確認する。
         let mut game = Game::new_with_lives(34, 2); // ライフ2、酸素切れでも即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -1952,6 +1953,11 @@ mod tests {
         game.player.oxygen = 1.0;
 
         game.update(Duration::from_secs(1)); // 酸素切れでミス(押し潰しではない)
+
+        assert!(game.is_dying(), "酸素切れでも押し潰しと同様、天に召される演出中のはず");
+        assert_eq!(game.player.lives, 2, "演出完了までライフ減算は遅延されるはず");
+
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
 
         assert_eq!(game.player.lives, 1, "酸素切れでライフを1つ失っているはず");
         for row in 0..999 {
