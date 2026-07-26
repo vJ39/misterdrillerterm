@@ -1008,20 +1008,32 @@ impl Game {
                 let blast_cells = bomb_blast_cells(&self.board, bomb.pos, BOMB_BLAST_RANGE);
                 let mut hit_player = false;
                 let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS);
+                // 爆風が届いた色ブロックは一色に統一する(TERM独自拡張。#137。ユーザー
+                // 指摘: 「色ブロックは爆弾の炎によって一色に統一される」)。爆発ごとに
+                // 1色をランダムに選び、その爆発の範囲内にある色ブロック全てを同じ色に
+                // 揃える(ショートカットC/UnifyColorsアイテムの「4連結以上でも即座には
+                // 自動消滅させない」という既存方針(#49)を踏襲し、ここでも塗り替えのみ
+                // 行い、消滅判定は通常の重力ティックに委ねる)。
+                use rand::RngExt;
+                let all_colors = ColorKind::ALL;
+                let unify_color = all_colors[self.rng.random_range(0..all_colors.len())];
                 for &(row, col) in &blast_cells {
                     if (row, col) == self.player.position() {
                         hit_player = true;
                     }
+                    // 爆心地(ボム設置マス)からの距離が遠いほど炎の色調を外側寄りに
+                    // する(TERM独自拡張。#126。bombermantermの爆風スプライトが
+                    // 中心ほど白熱・外側ほど赤黒くなるのに倣う)。爆風は上下左右の
+                    // 直線上にしか届かないため、マンハッタン距離がそのまま
+                    // 「軸方向に何マス離れているか」と一致する。
+                    let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
+                    let tier = tier.min(u8::MAX as usize) as u8;
                     if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
                         self.board.set(row, col, Cell::Star { visible_ms: 0 });
-                        // 爆心地(ボム設置マス)からの距離が遠いほど炎の色調を外側寄りに
-                        // する(TERM独自拡張。#126。bombermantermの爆風スプライトが
-                        // 中心ほど白熱・外側ほど赤黒くなるのに倣う)。爆風は上下左右の
-                        // 直線上にしか届かないため、マンハッタン距離がそのまま
-                        // 「軸方向に何マス離れているか」と一致する。
-                        let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
-                        self.recently_exploded
-                            .push(((row, col), flash, tier.min(u8::MAX as usize) as u8));
+                        self.recently_exploded.push(((row, col), flash, tier));
+                    } else if matches!(self.board.cell(row, col), Cell::Color(_)) {
+                        self.board.set(row, col, Cell::Color(unify_color));
+                        self.recently_exploded.push(((row, col), flash, tier));
                     }
                 }
                 events.push(GameEvent::BombExploded);
@@ -3804,6 +3816,42 @@ mod tests {
             "アイテムブロックは爆風の影響を受けないはず"
         );
         assert!(events.contains(&GameEvent::BombExploded));
+    }
+
+    #[test]
+    fn bomb_explosion_unifies_color_blocks_within_blast_range_to_a_single_shared_color() {
+        // ユーザー指摘: 「色ブロックは爆弾の炎によって一色に統一される」(#137)。
+        // 爆風内の異なる色のブロックが、爆発後は全て同じ1色になっていることを
+        // 確認する(具体的な色はランダムに選ばれるため、色そのものではなく
+        // 「全部同じ色になっているか」を検証する)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+        });
+        game.board.rows[520][6] = Cell::Color(ColorKind::Red);
+        game.board.rows[520][7] = Cell::Color(ColorKind::Blue);
+        game.board.rows[521][5] = Cell::Color(ColorKind::Green);
+        game.board.rows[520][0] = Cell::Color(ColorKind::Yellow); // 爆風範囲外(距離5、左方向)
+
+        game.update(Duration::from_millis(60));
+
+        let Cell::Color(unified) = game.board.cell(520, 6) else {
+            panic!("爆風内の色ブロックは色ブロックのままのはず");
+        };
+        assert_eq!(game.board.cell(520, 7), Cell::Color(unified), "爆風内は全て同じ色になるはず");
+        assert_eq!(game.board.cell(521, 5), Cell::Color(unified), "爆風内は全て同じ色になるはず");
+        assert_eq!(
+            game.board.cell(520, 0),
+            Cell::Color(ColorKind::Yellow),
+            "爆風範囲外の色ブロックは変化しないはず"
+        );
     }
 
     #[test]

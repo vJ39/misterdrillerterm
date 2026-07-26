@@ -827,7 +827,7 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             // 一瞬覆う(TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、
             // ボンバーマンTERMのように炎アニメーションほしい」)。
             if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
-                fill_block(buf, draw_x, y, colors::explosion_flame_bg(tier, t));
+                fill_block(buf, draw_x, y, colors::explosion_flame_bg(tier, t, natural_cell_bg(cell)));
             } else if cell == BoardCell::Empty
                 && let Some(t) = game.vanish_flash_progress((board_row, col))
             {

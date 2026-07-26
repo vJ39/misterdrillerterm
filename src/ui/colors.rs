@@ -129,9 +129,11 @@ pub const EXPLOSION_FLAME_OUTER: Color = Color::Rgb(230, 60, 10);
 
 /// 爆風が届いたセルの炎の色を、爆心地からの距離(`tier`: 0=爆心地、数値が大きいほど
 /// 遠い)と演出の進捗(0.0=爆発直後、1.0=演出完了直前)から求める。進捗が進むにつれ
-/// 爆発後に実際に変化する先の見た目(スターブロックの地色`STAR_BG`)へ補間し、炎から
-/// スターの輝きへ自然に移り変わるようにする。
-pub fn explosion_flame_bg(tier: u8, progress: f32) -> Color {
+/// 爆発後に実際に変化する先の見た目(`fade_to`、TERM独自拡張。#137。以前は
+/// スターブロックの地色`STAR_BG`固定だったが、色ブロックの一色統一(#137)のように
+/// スター化以外の結果もあり得るため、呼び出し側がそのセルの実際の変化先の色を
+/// 渡すようにした)へ補間し、炎から本来の輝きへ自然に移り変わるようにする。
+pub fn explosion_flame_bg(tier: u8, progress: f32, fade_to: Color) -> Color {
     let base = match tier {
         0 => EXPLOSION_FLAME_CORE,
         1 => EXPLOSION_FLAME_MID,
@@ -141,8 +143,8 @@ pub fn explosion_flame_bg(tier: u8, progress: f32) -> Color {
     let Color::Rgb(ar, ag, ab) = base else {
         unreachable!("炎の色は常にColor::Rgb")
     };
-    let Color::Rgb(br, bg, bb) = STAR_BG else {
-        unreachable!("STAR_BGは常にColor::Rgb")
+    let Color::Rgb(br, bg, bb) = fade_to else {
+        unreachable!("fade_toは常にColor::Rgb")
     };
     Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
 }
