@@ -491,17 +491,23 @@ impl Game {
     }
 
     /// 「天に召される」演出(TERM独自拡張)の進行を1フレームぶん進める。演出中は
-    /// `true`を返し、呼び出し側(`update`)はその場合ゲームプレイ全体(重力・自由落下・
-    /// 酸素減少・入力)を凍結してこのフレームの処理を終える。演出が終わった瞬間、
-    /// 死亡地点の3列クリア・ライフ減算・酸素回復をまとめて行い、その場に復活する。
-    fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) -> bool {
+    /// `is_input_frozen`経由でプレイヤー自身の入力・自由落下・酸素減少だけが凍結され、
+    /// 周囲の他の落下ブロックの重力処理は止めない(ユーザー指摘: 「潰れた瞬間も
+    /// まわりの落下アニメーションを止めない」)。演出が終わった瞬間、死亡地点の3列
+    /// クリア・押し潰したブロック自体のクリア・ライフ減算・酸素回復をまとめて行い、
+    /// その場に復活する。
+    fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) {
         let Some(remaining) = self.ascending_remaining else {
-            return false;
+            return;
         };
         let remaining = remaining.saturating_sub(delta);
         if remaining == Duration::ZERO {
             self.ascending_remaining = None;
             self.clear_three_columns_above_player();
+            // 押し潰したブロック自体は演出中ずっと見えるようにその場に残していた
+            // (ユーザー指摘: 「潰れる直前で消えてしまう」「潰した様子が認識できる
+            // ように」)。復活するのでここで消す。
+            self.board.set(self.player.row, self.player.col, Cell::Empty);
             let game_over = self.player.lose_life();
             debug_assert!(!game_over, "ライフ0のケースはapply_missで即座に処理済みのはず");
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
@@ -509,7 +515,6 @@ impl Game {
         } else {
             self.ascending_remaining = Some(remaining);
         }
-        true
     }
 
     /// 「わ〜!」スライダー演出(TERM独自拡張)の進行を1フレームぶん進める。演出中
@@ -586,16 +591,15 @@ impl Game {
             return events;
         }
 
-        // 「天に召される」演出中(TERM独自拡張)は、ここでゲームプレイ全体(重力・
-        // 自由落下・酸素減少・入力)を凍結する。演出が終わった時点でのブロッククリア・
-        // ライフ減算・酸素回復はtick_ascending内で行う。
-        if self.tick_ascending(delta, &mut events) {
-            return events;
-        }
+        // 「天に召される」演出中(TERM独自拡張)は、プレイヤー自身の入力・自由落下・
+        // 酸素減少のみを凍結する。周囲の他の落下ブロックの重力処理は止めない
+        // (ユーザー指摘: 「潰れた瞬間もまわりの落下アニメーションを止めない」)。
+        // 演出が終わった時点でのブロッククリア・ライフ減算・酸素回復はtick_ascending内で行う。
+        self.tick_ascending(delta, &mut events);
 
         // 「わ〜!」スライダー演出中(TERM独自拡張)は入力のみを凍結する(is_input_frozen
         // が各入力ハンドラで担う)。ユーザー指摘: 「ゲーム全体が止まってるように見える」
-        // を受け、天に召される演出とは異なり周囲の重力・自由落下・酸素減少は止めない。
+        // を受け、周囲の重力・自由落下・酸素減少は止めない。
         self.tick_dodge(delta);
 
         // ヒヤリ回避スライダーの監視対象セル(TERM独自拡張)の有効期限を進める。
@@ -607,35 +611,40 @@ impl Game {
             }
         }
 
-        self.player.elapsed_seconds += delta.as_secs_f32();
+        // 「天に召される」演出中は、プレイヤー自身に関する経過処理(酸素減少・
+        // クールダウン)だけを凍結する。演出が終わった瞬間(このフレーム内)は
+        // is_dying()が既にfalseになっているため、通常通り再開される。
+        if !self.is_dying() {
+            self.player.elapsed_seconds += delta.as_secs_f32();
 
-        if self.move_cooldown_remaining > Duration::ZERO {
-            self.move_cooldown_remaining = self.move_cooldown_remaining.saturating_sub(delta);
-        }
-        if self.drill_cooldown_remaining > Duration::ZERO {
-            self.drill_cooldown_remaining = self.drill_cooldown_remaining.saturating_sub(delta);
-        }
-        self.drill_flash_remaining = self.drill_flash_remaining.saturating_sub(delta);
-
-        // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
-        // 「進むにつれてAIRの減る速度が早い」)。経過時間そのものを実効倍率ぶん
-        // 引き伸ばすことで、`OXYGEN_DECAY_PER_SEC`(秒あたりの基準減少量)は変えずに
-        // 実質的な減少速度だけを深度に応じて上げる。
-        let oxygen_decay_multiplier =
-            1.0 + depth_fraction(self.player.depth_m()) * (OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER - 1.0);
-        physics::apply_oxygen_decay(&mut self.player, delta.as_secs_f32() * oxygen_decay_multiplier);
-
-        if self.player.oxygen > 0.0 && self.player.oxygen <= OXYGEN_WARNING_THRESHOLD {
-            self.oxygen_warning_accum += delta;
-            if self.oxygen_warning_accum >= Duration::from_secs(1) {
-                self.oxygen_warning_accum -= Duration::from_secs(1);
-                events.push(GameEvent::OxygenWarningTick);
+            if self.move_cooldown_remaining > Duration::ZERO {
+                self.move_cooldown_remaining = self.move_cooldown_remaining.saturating_sub(delta);
             }
-        } else {
-            self.oxygen_warning_accum = Duration::ZERO;
+            if self.drill_cooldown_remaining > Duration::ZERO {
+                self.drill_cooldown_remaining = self.drill_cooldown_remaining.saturating_sub(delta);
+            }
+            self.drill_flash_remaining = self.drill_flash_remaining.saturating_sub(delta);
+
+            // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
+            // 「進むにつれてAIRの減る速度が早い」)。経過時間そのものを実効倍率ぶん
+            // 引き伸ばすことで、`OXYGEN_DECAY_PER_SEC`(秒あたりの基準減少量)は変えずに
+            // 実質的な減少速度だけを深度に応じて上げる。
+            let oxygen_decay_multiplier =
+                1.0 + depth_fraction(self.player.depth_m()) * (OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER - 1.0);
+            physics::apply_oxygen_decay(&mut self.player, delta.as_secs_f32() * oxygen_decay_multiplier);
+
+            if self.player.oxygen > 0.0 && self.player.oxygen <= OXYGEN_WARNING_THRESHOLD {
+                self.oxygen_warning_accum += delta;
+                if self.oxygen_warning_accum >= Duration::from_secs(1) {
+                    self.oxygen_warning_accum -= Duration::from_secs(1);
+                    events.push(GameEvent::OxygenWarningTick);
+                }
+            } else {
+                self.oxygen_warning_accum = Duration::ZERO;
+            }
         }
 
-        if self.player.is_out_of_oxygen() {
+        if !self.is_dying() && self.player.is_out_of_oxygen() {
             self.apply_miss(&mut events, false);
             if self.status != GameStatus::Playing {
                 return events;
@@ -652,7 +661,11 @@ impl Game {
         while self.fall_tick_accum >= tick {
             self.fall_tick_accum -= tick;
 
-            let invulnerable = self.invulnerability_ticks_remaining > 0;
+            // 「天に召される」演出中(TERM独自拡張)も重力処理自体は止めないため、
+            // プレイヤーの論理位置は演出完了まで押し潰された地点に固定されたままになる。
+            // その間に別の塊が同じ地点へ落ちてきても二重にライフを失わないよう、
+            // 演出中は無敵として扱う(既存の`invulnerability_ticks_remaining`と同じ仕組み)。
+            let invulnerable = self.invulnerability_ticks_remaining > 0 || self.is_dying();
             let shake_ticks = (self.shake_duration_ms / effective_tick_ms.max(1)).min(u8::MAX as u64) as u8;
             let result = physics::process_gravity_tick(
                 &mut self.board,
@@ -661,7 +674,10 @@ impl Game {
                 invulnerable,
                 shake_ticks,
             );
-            if invulnerable {
+            // `invulnerable`は「天に召される」演出中(is_dying)にも真になるが、その場合
+            // `invulnerability_ticks_remaining`自体は0のままなので、実際にカウンタが
+            // 動いている場合のみ減算する(0からの減算でオーバーフローするのを防ぐ)。
+            if self.invulnerability_ticks_remaining > 0 {
                 self.invulnerability_ticks_remaining -= 1;
             }
 
@@ -726,21 +742,25 @@ impl Game {
         // 両者を別々に速度調整できるようにするため、あえて別ループに分離している)。
         // 入力の有無や掘削とは無関係に、支えを失っていれば(直下がEmptyなら)落下する。
         // 直下が酸素カプセルの場合は掘削不要で「歩くだけで取得」する(spec.md公式マニュアル)。
-        self.player_fall_tick_accum += delta;
-        let player_tick = Duration::from_millis(self.player_fall_tick_ms);
-        while self.player_fall_tick_accum >= player_tick {
-            self.player_fall_tick_accum -= player_tick;
+        // 「天に召される」演出中はプレイヤー自身の論理位置を動かさないため、この間は
+        // 蓄積も含めて凍結する(復活直後に積み残し分がまとめて落ちてしまうのを防ぐ)。
+        if !self.is_dying() {
+            self.player_fall_tick_accum += delta;
+            let player_tick = Duration::from_millis(self.player_fall_tick_ms);
+            while self.player_fall_tick_accum >= player_tick {
+                self.player_fall_tick_accum -= player_tick;
 
-            let before_fall = self.player.position();
-            let fall_outcome = physics::apply_player_free_fall(&mut self.board, &mut self.player);
-            self.note_possible_move_with_duration(before_fall, self.player_fall_tick_ms as f32 / 1000.0);
-            if fall_outcome == FreeFallOutcome::FellAndCollectedOxygen {
-                events.push(GameEvent::OxygenCollected);
-            }
-            if self.player.row != before_fall.0 {
-                self.check_level_and_clear(&mut events);
-                if self.status != GameStatus::Playing {
-                    break;
+                let before_fall = self.player.position();
+                let fall_outcome = physics::apply_player_free_fall(&mut self.board, &mut self.player);
+                self.note_possible_move_with_duration(before_fall, self.player_fall_tick_ms as f32 / 1000.0);
+                if fall_outcome == FreeFallOutcome::FellAndCollectedOxygen {
+                    events.push(GameEvent::OxygenCollected);
+                }
+                if self.player.row != before_fall.0 {
+                    self.check_level_and_clear(&mut events);
+                    if self.status != GameStatus::Playing {
+                        break;
+                    }
                 }
             }
         }
@@ -1719,26 +1739,57 @@ mod tests {
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし(押し潰す)
         game.board.rows[990][5] = Cell::Oxygen; // クリア範囲内のAIR(支えなし、押し潰しと並行して自然落下もする)
 
-        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
-        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        let mut events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        // 天に召される演出中も周囲の重力処理は止まらない(#68)ため、この1回の
+        // updateだけでAIRが最後まで落下しきる可能性もある。
+        events.extend(game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10)));
         assert_eq!(game.player.lives, 1, "演出完了でライフが減っているはず");
 
-        // クリア直後、AIRは消滅していない(盤面のどこかにCell::Oxygenとして残っている)。
+        // AIRは3列クリアで消滅させられたわけではなく、通常の重力に従って落下を
+        // 続け、最終的にプレイヤーへ到達して取得(酸素回復)される。単に消滅した
+        // のではなく、正規のイベントとして処理されることを確認する。
         let oxygen_count = |game: &Game| game.board.rows.iter().flatten().filter(|c| **c == Cell::Oxygen).count();
-        assert_eq!(oxygen_count(&game), 1, "3列クリアされてもAIRは消滅せず盤面に残っているはず");
-
-        // その後の重力tickでAIRが自然に落下し、最終的に押し潰したブロックの真上
-        // (プレイヤーの真上、998行目)に着地する。
-        let mut settled = false;
-        for _ in 0..2000 {
-            game.update(Duration::from_millis(FALL_TICK_MS));
-            if game.board.cell(998, 5) == Cell::Oxygen {
-                settled = true;
+        for _ in 0..50 {
+            if oxygen_count(&game) == 0 {
                 break;
             }
+            events.extend(game.update(Duration::from_millis(FALL_TICK_MS)));
         }
-        assert!(settled, "AIRは消えずに落下し、押し潰したブロックの上に着地するはず");
-        assert_eq!(oxygen_count(&game), 1, "落下完了後もAIRは1個のまま消滅していないはず");
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::OxygenCollected)),
+            "AIRは消滅させられたのではなく、落下し続けて最終的に取得イベントが発生するはず"
+        );
+    }
+
+    #[test]
+    fn ascending_sequence_does_not_freeze_unrelated_falling_blocks_elsewhere_on_the_board() {
+        // ユーザー指摘: 「潰れた瞬間もまわりの落下アニメーションを止めない」。
+        // 「天に召される」演出中も、押し潰しとは無関係な別の場所の落下ブロックは
+        // 通常通り重力で落下し続けることを確認する。
+        let mut game = Game::new_with_lives(72, 2); // ライフ2、押し潰されても即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし(押し潰す)
+        game.board.rows[500][0] = Cell::Color(ColorKind::Blue); // 押し潰しとは無関係な、遠く離れた落下ブロック
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        assert!(game.is_dying(), "押し潰し直後は天に召される演出中のはず");
+        let row_during_ascend_start = (0..game.board.depth_rows())
+            .find(|&r| game.board.cell(r, 0) == Cell::Color(ColorKind::Blue))
+            .expect("無関係なブロックはまだ盤面のどこかに存在するはず");
+
+        // 演出が完了するよりずっと前の、演出継続中の時点で確認する。
+        game.update(Duration::from_millis(FALL_TICK_MS * (SHAKE_TICKS as u64 + 3)));
+        assert!(game.is_dying(), "演出はまだ続いているはず(CRUSH_ASCEND_MSに対して十分短い経過時間)");
+
+        let row_during_ascend_later = (0..game.board.depth_rows())
+            .find(|&r| game.board.cell(r, 0) == Cell::Color(ColorKind::Blue))
+            .expect("演出中に消滅してしまってはいけない");
+        assert!(
+            row_during_ascend_later > row_during_ascend_start,
+            "演出中も無関係なブロックは重力で落下し続けるはず: start={row_during_ascend_start}, later={row_during_ascend_later}"
+        );
     }
 
     #[test]

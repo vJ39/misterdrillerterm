@@ -853,14 +853,19 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
             let cell = snapshot.cell(r, c);
             let to = (r + 1, c);
             if to == player_pos {
-                // 落下してきたセルはその場で消滅する(spec.md 5章)。
                 if cell == Cell::Oxygen {
                     // 酸素カプセル(AIR)だけは例外で、掘削・自由落下時の「歩くだけで取得」と
                     // 同様に押し潰し判定にせず取得(酸素回復)扱いにする(TERM独自拡張。
-                    // ユーザー指摘「上から降ってきたAIRで回復してないバグ」の修正)。
+                    // ユーザー指摘「上から降ってきたAIRで回復してないバグ」の修正)。その場で消滅する。
                     outcome.oxygen_collected += 1;
                 } else {
-                    // 押し潰した側のセルが消滅する(得点は発生しない)。
+                    // 押し潰した側のセルは即座には消滅させず、プレイヤーの位置にそのまま
+                    // 残す(TERM独自拡張。ユーザー指摘: 「潰れる直前で消えてしまう」
+                    // 「潰した様子が認識できるように」)。得点は発生しない(spec.md 5章)。
+                    // 「天に召される」演出が完了して復活する際にGame側で消去される
+                    // (Game::tick_ascending)。
+                    board.set(to.0, to.1, cell);
+                    outcome.moved_cells.push((to, (r, c)));
                     crushed_in_group = true;
                 }
             } else {
@@ -1941,7 +1946,11 @@ mod tests {
     // --- 重力: 押し潰し判定(5章) ---
 
     #[test]
-    fn falling_block_onto_player_crushes_and_vanishes() {
+    fn falling_block_onto_player_crushes_and_remains_visible_at_the_impact_point() {
+        // ユーザー指摘: 「潰れる直前で消えてしまう(ブロックが)」「潰した様子が
+        // 認識できるように」。押し潰した側のセルは即座には消さず、プレイヤーの位置
+        // (=着地先)にそのまま残す(得点は発生しない)。実際に消すのはGame側が
+        // 「天に召される」演出完了・復活のタイミングで行う。
         let mut board = empty_board(2);
         board.rows[0][0] = Cell::Color(ColorKind::Red);
         let mut gravity = GravityState::new();
@@ -1950,7 +1959,8 @@ mod tests {
         let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity); // 落下→押し潰し
 
         assert!(outcome.crushed);
-        assert_eq!(board.cell(1, 0), Cell::Empty); // 押し潰した側も消滅・得点なし
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red), "潰したブロックはその場に残って見えるはず");
+        assert_eq!(outcome.moved_cells, vec![((1, 0), (0, 0))], "落下アニメーション用に着地移動も記録されるはず");
     }
 
     #[test]
@@ -1985,7 +1995,11 @@ mod tests {
         let outcome = shake_out_then_tick(&mut board, player_pos, &mut gravity);
 
         assert!(outcome.crushed, "プレイヤーは押し潰されるはず");
-        assert_eq!(board.cell(1, 0), Cell::Empty, "押し潰した塊の旧位置は空になる");
+        assert_eq!(
+            board.cell(1, 0),
+            Cell::Color(ColorKind::Red),
+            "押し潰したブロックはその場(着地先)に残って見えるはず"
+        );
         assert_eq!(
             board.cell(1, 5),
             Cell::Color(ColorKind::Blue),

@@ -784,7 +784,9 @@ mod tests {
         let result = shake_out_then_process_tick(&mut board, &mut player, &mut gravity, true); // 落下→押し潰しだが無敵中
 
         assert!(!result.life_lost_to_crush);
-        assert_eq!(board.cell(1, 0), Cell::Empty); // ブロック自体は消える
+        // ブロック自体はその場に残って見える(TERM独自拡張。ユーザー指摘:
+        // 「潰れる直前で消えてしまう」)。無敵中でもこの挙動は変わらない。
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
     }
 
     #[test]
