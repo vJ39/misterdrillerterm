@@ -192,6 +192,15 @@ pub struct Game {
     /// 「わ〜!」スライダー直後の硬直インターバル(ms、TERM独自拡張)。設定画面/
     /// デバッグショートカットで調整できる(ユーザー指摘: 「この設定値も作る」)。
     dodge_recovery_ms: u64,
+    /// ヒヤリ回避スライダーの監視対象セル(TERM独自拡張)。直前の移動で、移動前の
+    /// 頭上(row-1)が実際に「揺れていた」場合のみ、その移動前の座標を監視対象として
+    /// 設定する(ユーザー指摘: 「そもそも避けてないのに発動してるように見える」を
+    /// 受け、単に「最近動いた」だけでなく実際に頭上の脅威から逃げたことを条件にする)。
+    /// この座標へブロックが着地した瞬間にスライダー演出を発火し、監視は解除される。
+    dodge_watch_cell: Option<(usize, usize)>,
+    /// 監視対象セルの有効期限(TERM独自拡張)。揺れていたブロックが実際に落下して
+    /// 監視対象セルへ到達するまでの猶予。この時間が経過すると監視は自動的に解除される。
+    dodge_watch_remaining: Duration,
     /// 描画専用: プレイヤーの直前の論理位置(移動の見た目補間アニメーション用、
     /// TERM独自拡張、9章)。ロジック上の当たり判定・掘削・落下判定には一切使わない。
     render_prev_position: (usize, usize),
@@ -242,6 +251,8 @@ impl Game {
             dodge_stage: DodgeStage::None,
             dodge_stage_remaining: Duration::ZERO,
             dodge_recovery_ms: DODGE_RECOVERY_MS_DEFAULT,
+            dodge_watch_cell: None,
+            dodge_watch_remaining: Duration::ZERO,
             render_prev_position: start_position,
             // 開始時点では補間の必要が無いため、既に完了した扱いにしておく
             // (さもないと初期表示が(0,0)相当からアニメーションしてしまう)。
@@ -502,11 +513,12 @@ impl Game {
     }
 
     /// 「わ〜!」スライダー演出(TERM独自拡張)の進行を1フレームぶん進める。演出中
-    /// (スライダー/硬直のいずれか)は`true`を返し、呼び出し側は通常の入力・重力を
-    /// このフレームだけ凍結する。
-    fn tick_dodge(&mut self, delta: Duration) -> bool {
+    /// (スライダー/硬直のいずれか)は`is_input_frozen`経由で入力のみが凍結され、
+    /// 重力・自由落下・酸素減少は通常通り進み続ける(ユーザー指摘: 「ゲーム全体が
+    /// 止まってるように見える」)。
+    fn tick_dodge(&mut self, delta: Duration) {
         match self.dodge_stage {
-            DodgeStage::None => false,
+            DodgeStage::None => {}
             DodgeStage::Sliding => {
                 let remaining = self.dodge_stage_remaining.saturating_sub(delta);
                 if remaining == Duration::ZERO {
@@ -515,7 +527,6 @@ impl Game {
                 } else {
                     self.dodge_stage_remaining = remaining;
                 }
-                true
             }
             DodgeStage::Recovering => {
                 let remaining = self.dodge_stage_remaining.saturating_sub(delta);
@@ -524,7 +535,6 @@ impl Game {
                 } else {
                     self.dodge_stage_remaining = remaining;
                 }
-                true
             }
         }
     }
@@ -577,9 +587,18 @@ impl Game {
             return events;
         }
 
-        // 「わ〜!」スライダー演出中(TERM独自拡張)も、ゲームプレイ全体を凍結する。
-        if self.tick_dodge(delta) {
-            return events;
+        // 「わ〜!」スライダー演出中(TERM独自拡張)は入力のみを凍結する(is_input_frozen
+        // が各入力ハンドラで担う)。ユーザー指摘: 「ゲーム全体が止まってるように見える」
+        // を受け、天に召される演出とは異なり周囲の重力・自由落下・酸素減少は止めない。
+        self.tick_dodge(delta);
+
+        // ヒヤリ回避スライダーの監視対象セル(TERM独自拡張)の有効期限を進める。
+        // 揺れていたブロックが監視対象セルへ実際に落下する前に期限が切れたら監視解除する。
+        if self.dodge_watch_cell.is_some() {
+            self.dodge_watch_remaining = self.dodge_watch_remaining.saturating_sub(delta);
+            if self.dodge_watch_remaining == Duration::ZERO {
+                self.dodge_watch_cell = None;
+            }
         }
 
         self.player.elapsed_seconds += delta.as_secs_f32();
@@ -643,20 +662,20 @@ impl Game {
             // ブロックが落ち始める直前に移動して間一髪回避した場合、「わ〜!」スライダー
             // 演出を発火する(TERM独自拡張。ユーザー指摘: 「ブロックが落ち始める直前に
             // 移動してにげたとき、「わ〜!」ってスライダー(アニメーションしてねキャラ)
-            // して切り間に合う感じ」)。直前にプレイヤーがいたマスへちょうど今ブロックが
-            // 着地し、かつその移動がまだ新しい(`DODGE_DETECT_WINDOW_MS`以内)場合のみ
-            // 発火する(押し潰された場合や、既に演出中の場合は対象外)。
+            // して切り間に合う感じ」)。`dodge_watch_cell`は移動前の頭上が実際に揺れて
+            // いた場合のみ設定されている(単に「最近動いた」だけでは発火しない。
+            // ユーザー指摘: 「そもそも避けてないのに発動してるように見える」)ため、
+            // その監視対象セルへちょうど今ブロックが着地した場合のみ発火する
+            // (押し潰された場合や、既に演出中の場合は対象外)。
             if !result.life_lost_to_crush
                 && !self.is_dying()
                 && self.dodge_stage == DodgeStage::None
-                && self.render_anim_elapsed < DODGE_DETECT_WINDOW_MS as f32 / 1000.0
-                && result
-                    .moved_cells
-                    .iter()
-                    .any(|&(to, _)| to == self.render_prev_position && to != self.player.position())
+                && let Some(watch_cell) = self.dodge_watch_cell
+                && result.moved_cells.iter().any(|&(to, _)| to == watch_cell && to != self.player.position())
             {
                 self.dodge_stage = DodgeStage::Sliding;
                 self.dodge_stage_remaining = Duration::from_millis(DODGE_SLIDE_MS);
+                self.dodge_watch_cell = None;
             }
 
             self.last_block_moves = result.moved_cells;
@@ -753,6 +772,22 @@ impl Game {
             self.render_prev_position = before;
             self.render_anim_elapsed = 0.0;
             self.render_anim_duration_secs = duration_secs.max(0.001);
+            self.arm_dodge_watch_if_fled_a_shaking_block(before);
+        }
+    }
+
+    /// 直前の移動が「頭上で揺れているブロックからの回避」だったかを判定し、該当すれば
+    /// ヒヤリ回避スライダーの監視対象セルを設定する(TERM独自拡張。ユーザー指摘:
+    /// 「そもそも避けてないのに発動してるように見える」を受け、単に「最近動いた」
+    /// だけでなく、移動前の頭上が実際に揺れていた場合のみ監視対象にする)。該当しない
+    /// 移動なら、古い監視が誤って生き残らないよう監視を解除する。
+    fn arm_dodge_watch_if_fled_a_shaking_block(&mut self, before: (usize, usize)) {
+        let is_threatened = before.0 > 0 && self.gravity_state.is_shaking((before.0 - 1, before.1));
+        if is_threatened {
+            self.dodge_watch_cell = Some(before);
+            self.dodge_watch_remaining = Duration::from_millis(DODGE_DETECT_WINDOW_MS);
+        } else {
+            self.dodge_watch_cell = None;
         }
     }
 
@@ -1793,30 +1828,54 @@ mod tests {
     // --- ヒヤリ回避スライダー演出(TERM独自拡張、9章) ---
 
     #[test]
-    fn dodge_slide_triggers_when_a_block_lands_on_the_position_the_player_just_left() {
-        // ユーザー指摘: 「ブロックが落ち始める直前に移動してにげたとき、「わ〜!」って
-        // スライダー(アニメーションしてねキャラ)して切り抜ける感じ」。プレイヤーが
-        // 直前まで居たマスへ、移動直後にブロックが着地した場合にスライダー演出が
-        // 発火することを確認する。
+    fn dodge_slide_triggers_only_when_fleeing_a_block_that_was_actually_shaking_overhead() {
+        // ユーザー指摘: 「そもそも避けてないのに発動してるように見える」。単に
+        // 「最近動いた」だけでなく、移動前の頭上が実際に揺れていた(=本物の脅威から
+        // 逃げた)場合にのみスライダー演出が発火することを確認する。
         let mut game = Game::new(62);
         clear_board(&mut game);
-        game.set_shake_duration_ms(0); // 揺れ無しで即座に落下させ、シナリオを単純化する
         game.player.row = 5;
         game.player.col = 5;
         game.board.rows[6][4] = Cell::Rock { hits: 0 }; // 移動先(5,4)の真下=足場(player_is_grounded用)
         game.board.rows[6][5] = Cell::Rock { hits: 0 }; // 現在地(5,5)の真下=足場
+        game.board.rows[4][5] = Cell::Color(ColorKind::Red); // 現在地の真上、支えなし(プレイヤーがまだ居る間から揺れ始める)
 
-        game.try_move_left(); // (5,5) -> (5,4)へ移動。旧位置(5,5)がrender_prev_positionになる
+        game.update(Duration::from_millis(FALL_TICK_MS)); // 1ティック目: 揺れ始める(まだ落下しない)
+
+        game.try_move_left(); // (5,5) -> (5,4)へ移動。移動前の頭上(4,5)が揺れているため監視対象になる
         assert_eq!(game.player.position(), (5, 4), "左へ1マス移動しているはず");
 
-        game.board.rows[4][5] = Cell::Color(ColorKind::Red); // 旧位置の真上、支えなしで即落下
+        // 残りの揺れティックの間はまだ発火しない。
+        for _ in 1..SHAKE_TICKS {
+            game.update(Duration::from_millis(FALL_TICK_MS));
+            assert!(!game.is_dodge_sliding(), "揺れている間はまだ発火しないはず");
+        }
 
         assert!(!game.is_dodge_sliding(), "落下前はまだスライダー演出は発火していないはず");
-        game.update(Duration::from_millis(FALL_TICK_MS));
+        game.update(Duration::from_millis(FALL_TICK_MS + 10)); // 揺れが明けて実際に落下するティック
 
-        assert!(game.is_dodge_sliding(), "旧位置へブロックが着地したのでスライダー演出が発火するはず");
+        assert!(game.is_dodge_sliding(), "旧位置へ実際に脅威だったブロックが着地したので発火するはず");
         assert_eq!(game.board.cell(5, 5), Cell::Color(ColorKind::Red), "ブロックは旧位置(5,5)へ着地しているはず");
         assert_eq!(game.status, GameStatus::Playing, "プレイヤー自身は無事なはず");
+    }
+
+    #[test]
+    fn dodge_slide_does_not_trigger_for_an_unrelated_move_with_no_threat_overhead() {
+        // 頭上に何も脅威が無い、ただの通常移動ではスライダー演出は発火しないことを
+        // 確認する(誤発動対策)。
+        let mut game = Game::new(64);
+        clear_board(&mut game);
+        game.player.row = 5;
+        game.player.col = 5;
+        game.board.rows[6][4] = Cell::Rock { hits: 0 };
+        game.board.rows[6][5] = Cell::Rock { hits: 0 };
+        // 頭上(4,5)には何も置かない = 脅威なし
+
+        game.try_move_left();
+        assert_eq!(game.player.position(), (5, 4));
+
+        game.update(Duration::from_millis(FALL_TICK_MS * 10));
+        assert!(!game.is_dodge_sliding(), "脅威が無かった移動ではスライダー演出は発火しないはず");
     }
 
     #[test]
@@ -1826,15 +1885,19 @@ mod tests {
         // 起き上がるまでに1秒インターバル=この設定値も作る」)。
         let mut game = Game::new(63);
         clear_board(&mut game);
-        game.set_shake_duration_ms(0);
         game.set_dodge_recovery_ms(300);
         game.player.row = 5;
         game.player.col = 5;
         game.board.rows[6][4] = Cell::Rock { hits: 0 }; // 移動先(5,4)の真下=足場(player_is_grounded用)
         game.board.rows[6][5] = Cell::Rock { hits: 0 }; // 現在地(5,5)の真下=足場
-        game.try_move_left();
         game.board.rows[4][5] = Cell::Color(ColorKind::Red);
-        game.update(Duration::from_millis(FALL_TICK_MS));
+
+        game.update(Duration::from_millis(FALL_TICK_MS)); // 揺れ始める
+        game.try_move_left();
+        for _ in 1..SHAKE_TICKS {
+            game.update(Duration::from_millis(FALL_TICK_MS));
+        }
+        game.update(Duration::from_millis(FALL_TICK_MS + 10)); // 揺れが明けて落下・発火
         assert!(game.is_dodge_sliding(), "スライダー演出が発火しているはず");
 
         game.player.facing = Direction::Down; // 目印としてfacingを固定しておく
