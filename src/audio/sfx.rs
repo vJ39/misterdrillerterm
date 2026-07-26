@@ -153,27 +153,6 @@ impl SquareWave {
             osc: Oscillator::new(duration_ms, amplitude),
         }
     }
-
-    /// アタック・ディケイのエンベロープ付きで生成する(BGMのメロディ用)。
-    fn with_envelope(
-        freq: f32,
-        duration_ms: u64,
-        amplitude: f32,
-        attack_ms: u64,
-        decay_ms: u64,
-        sustain_level: f32,
-    ) -> Self {
-        SquareWave {
-            freq,
-            osc: Oscillator::new_with_envelope(
-                duration_ms,
-                amplitude,
-                attack_ms,
-                decay_ms,
-                sustain_level,
-            ),
-        }
-    }
 }
 
 impl Iterator for SquareWave {
@@ -282,58 +261,6 @@ impl Iterator for SineChirp {
 
 impl_source_via_oscillator!(SineChirp);
 
-/// 単一周波数の三角波(有限長・AD/末尾フェード付き)。BGMのベースライン用。
-/// 矩形波より倍音が少なく丸い音色になるため、低音のベースパートに向く。
-pub struct TriangleWave {
-    freq: f32,
-    osc: Oscillator,
-}
-
-impl TriangleWave {
-    fn with_envelope(
-        freq: f32,
-        duration_ms: u64,
-        amplitude: f32,
-        attack_ms: u64,
-        decay_ms: u64,
-        sustain_level: f32,
-    ) -> Self {
-        TriangleWave {
-            freq,
-            osc: Oscillator::new_with_envelope(
-                duration_ms,
-                amplitude,
-                attack_ms,
-                decay_ms,
-                sustain_level,
-            ),
-        }
-    }
-}
-
-impl Iterator for TriangleWave {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        if self.osc.finished() {
-            return None;
-        }
-        let t = self.osc.sample_index as f32 / self.osc.sample_rate as f32;
-        let phase = (t * self.freq).fract();
-        // 標準的な三角波: 0→1で-1→1へ線形上昇、1→0.5→1(次周期)で1→-1へ線形下降。
-        let raw = if phase < 0.5 {
-            -1.0 + 4.0 * phase
-        } else {
-            3.0 - 4.0 * phase
-        };
-        let value = raw * self.osc.amplitude * self.osc.envelope();
-        self.osc.advance();
-        Some(value)
-    }
-}
-
-impl_source_via_oscillator!(TriangleWave);
-
 /// 複数周波数のサイン波を加算合成した和音(有限長・AD/末尾フェード付き)。
 /// BGMのハーモニー/パッド用(中音域に長めの和音を敷いて音の厚みを出す)。
 pub struct SineChord {
@@ -389,44 +316,6 @@ impl_source_via_oscillator!(SineChord);
 /// 単一周波数の矩形波を作る(BGM用にも共用)。
 pub fn square_tone(freq: f32, duration_ms: u64, amplitude: f32) -> SquareWave {
     SquareWave::new(freq, duration_ms, amplitude)
-}
-
-/// アタック・ディケイ付きの矩形波を作る(BGMのメロディ用)。
-pub fn square_tone_enveloped(
-    freq: f32,
-    duration_ms: u64,
-    amplitude: f32,
-    attack_ms: u64,
-    decay_ms: u64,
-    sustain_level: f32,
-) -> SquareWave {
-    SquareWave::with_envelope(
-        freq,
-        duration_ms,
-        amplitude,
-        attack_ms,
-        decay_ms,
-        sustain_level,
-    )
-}
-
-/// アタック・ディケイ付きの三角波を作る(BGMのベースライン用)。
-pub fn triangle_tone_enveloped(
-    freq: f32,
-    duration_ms: u64,
-    amplitude: f32,
-    attack_ms: u64,
-    decay_ms: u64,
-    sustain_level: f32,
-) -> TriangleWave {
-    TriangleWave::with_envelope(
-        freq,
-        duration_ms,
-        amplitude,
-        attack_ms,
-        decay_ms,
-        sustain_level,
-    )
 }
 
 /// アタック・ディケイ付きのサイン波和音を作る(BGMのハーモニー/パッド用)。
