@@ -494,6 +494,11 @@ impl Game {
                 return;
             }
 
+            // ライフ減算・酸素回復自体は演出完了まで遅延する(tick_ascending)が、
+            // 死亡SEは押し潰された瞬間に即座に鳴らす(TERM独自拡張。ユーザー指摘:
+            // 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSE鳴らして
+            // ほしい」。演出完了まで3秒近く無音だったバグの修正)。
+            events.push(GameEvent::LifeLost);
             self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
             return;
         }
@@ -515,7 +520,7 @@ impl Game {
     /// まわりの落下アニメーションを止めない」)。演出が終わった瞬間、死亡地点の3列
     /// クリア・押し潰したブロック自体のクリア・ライフ減算・酸素回復をまとめて行い、
     /// その場に復活する。
-    fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) {
+    fn tick_ascending(&mut self, delta: Duration) {
         let Some(remaining) = self.ascending_remaining else {
             return;
         };
@@ -530,7 +535,8 @@ impl Game {
             let game_over = self.player.lose_life();
             debug_assert!(!game_over, "ライフ0のケースはapply_missで即座に処理済みのはず");
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
-            events.push(GameEvent::LifeLost);
+            // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に
+            // 発火済みのため、ここでは重複して発火しない。
         } else {
             self.ascending_remaining = Some(remaining);
         }
@@ -614,7 +620,7 @@ impl Game {
         // 酸素減少のみを凍結する。周囲の他の落下ブロックの重力処理は止めない
         // (ユーザー指摘: 「潰れた瞬間もまわりの落下アニメーションを止めない」)。
         // 演出が終わった時点でのブロッククリア・ライフ減算・酸素回復はtick_ascending内で行う。
-        self.tick_ascending(delta, &mut events);
+        self.tick_ascending(delta);
 
         // 「わ〜!」スライダー演出中(TERM独自拡張)は入力のみを凍結する(is_input_frozen
         // が各入力ハンドラで担う)。ユーザー指摘: 「ゲーム全体が止まってるように見える」
@@ -1939,6 +1945,33 @@ mod tests {
         game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
         assert_eq!(game.player.lives, 1, "演出完了時にライフが減るはず");
         assert_eq!(game.status, GameStatus::Playing);
+    }
+
+    #[test]
+    fn crush_death_se_event_fires_immediately_not_after_the_ascend_delay() {
+        // ユーザー指摘: 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSEを
+        // 鳴らしてほしい」。押し潰された瞬間に(天に召される演出の完了=3秒近く後を
+        // 待たず)即座にGameEvent::LifeLostが発火し、演出完了時には重複して発火しない
+        // ことを確認する。
+        let mut game = Game::new_with_lives(80, 2); // ライフ2、押し潰されても即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        let events = game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
+            "押し潰された直後(演出開始時点)にLifeLostが発火するはず"
+        );
+        assert_eq!(game.player.lives, 2, "この時点ではまだライフは減っていないはず(演出完了時に減る)");
+
+        let events = game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        assert!(
+            !events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
+            "演出完了時に重複してLifeLostが発火してはいけない"
+        );
+        assert_eq!(game.player.lives, 1, "演出完了時にライフは減るはず");
     }
 
     #[test]
