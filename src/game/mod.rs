@@ -21,7 +21,7 @@ use crate::constants::{
     MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
 };
-use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState};
+use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
@@ -156,6 +156,10 @@ pub enum GameEvent {
     GameOverMiss,
     /// 深度1000m到達でゲームクリアした
     Cleared,
+    /// アイテムブロックを取得し、対応する効果が発動した(TERM独自拡張。ユーザー指摘:
+    /// 「ショートカットRと同じ効果のあるアイテムつくろ」「ショートカットC効果の
+    /// アイテムも作って」)
+    ItemCollected(ItemEffect),
 }
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
@@ -504,6 +508,16 @@ impl Game {
                 events.push(GameEvent::BlockDestroyed { blocks: 1 });
             }
             DrillOutcome::CrushedByUnstableOverhead => self.apply_miss(events),
+            DrillOutcome::ItemCollected(effect) => {
+                match effect {
+                    ItemEffect::ClearAbove => self.debug_clear_above_player(),
+                    ItemEffect::UnifyColors => {
+                        self.debug_unify_nearby_colors();
+                    }
+                }
+                events.push(GameEvent::DrillImpact);
+                events.push(GameEvent::ItemCollected(effect));
+            }
         }
     }
 
@@ -1278,6 +1292,53 @@ mod tests {
 
         assert_eq!(game.status, GameStatus::Cleared);
         assert!(events.iter().any(|e| matches!(e, GameEvent::Cleared)));
+    }
+
+    #[test]
+    fn drilling_a_clear_above_item_clears_blocks_above_the_player_and_emits_event() {
+        // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」。
+        let mut game = Game::new(74);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.facing = Direction::Down;
+        game.board.rows[501][5] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[200][4] = Cell::Color(ColorKind::Red);
+
+        let events = game.try_drill();
+
+        assert!(matches!(game.board.cell(501, 5), Cell::Empty));
+        assert!(
+            matches!(game.board.cell(200, 4), Cell::Empty),
+            "ショートカットRと同じく頭上のブロックが全クリアされるはず"
+        );
+        assert!(events.iter().any(|e| matches!(e, GameEvent::DrillImpact)));
+        assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::ClearAbove))));
+    }
+
+    #[test]
+    fn drilling_a_unify_colors_item_reduces_nearby_colors_to_two_and_emits_event() {
+        // ユーザー指摘: 「ショートカットC効果のアイテムも作って」。
+        let mut game = Game::new(74);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.facing = Direction::Down;
+        game.board.rows[501][5] = Cell::Item(ItemEffect::UnifyColors);
+        for (i, color) in [ColorKind::Red, ColorKind::Blue, ColorKind::Green, ColorKind::Yellow].into_iter().enumerate() {
+            game.board.rows[500][i] = Cell::Color(color);
+        }
+
+        let events = game.try_drill();
+
+        let mut distinct_colors: Vec<ColorKind> =
+            game.board.rows[500].iter().filter_map(|c| if let Cell::Color(k) = c { Some(*k) } else { None }).collect();
+        distinct_colors.dedup();
+        distinct_colors.sort_by_key(|k| ColorKind::ALL.iter().position(|c| c == k).unwrap());
+        distinct_colors.dedup();
+        assert!(distinct_colors.len() <= 2, "ショートカットCと同じく2色以内に統一されるはず: {distinct_colors:?}");
+        assert!(events.iter().any(|e| matches!(e, GameEvent::DrillImpact)));
+        assert!(events.iter().any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::UnifyColors))));
     }
 
     #[test]

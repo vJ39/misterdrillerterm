@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::constants::{OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS};
-use crate::game::board::{Board, Cell as BoardCell, ColorKind, Pos};
+use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
 use crate::game::{Game, GameOverChoice, GameStatus};
 use crate::ui::colors;
@@ -774,6 +774,12 @@ fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize
             colors::STAR_FG,
             colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         ),
+        BoardCell::Item(ItemEffect::ClearAbove) => {
+            draw_fixed_unit(buf, x, y, [['R', 'R'], ['R', 'R']], colors::ITEM_CLEAR_ABOVE_FG, colors::ITEM_CLEAR_ABOVE_BG)
+        }
+        BoardCell::Item(ItemEffect::UnifyColors) => {
+            draw_fixed_unit(buf, x, y, [['C', 'C'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG)
+        }
     }
 }
 
@@ -934,6 +940,8 @@ fn natural_cell_bg(cell: BoardCell) -> Color {
         BoardCell::Oxygen => colors::OXYGEN_BG,
         BoardCell::Diamond => colors::DIAMOND_BG,
         BoardCell::Star { visible_ms } => colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
+        BoardCell::Item(ItemEffect::ClearAbove) => colors::ITEM_CLEAR_ABOVE_BG,
+        BoardCell::Item(ItemEffect::UnifyColors) => colors::ITEM_UNIFY_COLORS_BG,
     }
 }
 

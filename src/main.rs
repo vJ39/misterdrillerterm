@@ -789,6 +789,7 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::LifeLost => audio::sfx::play_life_lost(mixer),
             GameEvent::GameOverMiss => audio::sfx::play_miss(mixer),
             GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
+            GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
         }
     }
 }

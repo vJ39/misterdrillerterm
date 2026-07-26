@@ -487,6 +487,21 @@ pub fn play_clear_fanfare(mixer: &Mixer) {
     );
 }
 
+/// アイテム取得音: ショートカットR/C相当の効果を持つアイテムブロックを取得した瞬間
+/// (TERM独自拡張)。既存SEの多くが矩形波中心なのに対し、サイン波の駆け上がる3音
+/// 880/1174/1568Hz、各70msで差別化する。
+pub fn play_item_collected(mixer: &Mixer) {
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(sine_chord(&[880.0], 70, 0.6, 5, 10, 0.8)),
+            Box::new(sine_chord(&[1174.0], 70, 0.6, 5, 10, 0.8)),
+            Box::new(sine_chord(&[1568.0], 70, 0.6, 5, 10, 0.8)),
+        ],
+        SE_VOLUME,
+    );
+}
+
 /// ミス音(ゲームオーバー): 最後のライフを失った瞬間。矩形波(下降チャープ)
 /// 440Hz→110Hz, 500ms(spec.md 10章)。
 pub fn play_miss(mixer: &Mixer) {

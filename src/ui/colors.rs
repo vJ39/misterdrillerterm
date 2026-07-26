@@ -86,6 +86,16 @@ pub const STAR_BG: Color = Color::Rgb(245, 245, 245);
 /// スターブロックの前景色(☆/★マークの色)。
 pub const STAR_FG: Color = Color::Rgb(255, 210, 60);
 
+/// アイテムブロック(ClearAbove、ショートカットRと同じ効果)の背景・前景色
+/// (TERM独自拡張)。対応するデバッグショートカットの文字をそのままグリフに使う。
+pub const ITEM_CLEAR_ABOVE_BG: Color = Color::Rgb(200, 60, 140);
+pub const ITEM_CLEAR_ABOVE_FG: Color = Color::Rgb(255, 230, 245);
+
+/// アイテムブロック(UnifyColors、ショートカットCと同じ効果)の背景・前景色
+/// (TERM独自拡張)。
+pub const ITEM_UNIFY_COLORS_BG: Color = Color::Rgb(50, 160, 170);
+pub const ITEM_UNIFY_COLORS_FG: Color = Color::Rgb(230, 255, 250);
+
 /// スターブロックの背景色を溶解の進行度から、フィールド背景色(`FIELD_EMPTY_BG`)へ
 /// 向けて補間する。`visible_ms`が`grace_ms`に達するまでは無傷(進行度0)のまま、
 /// その後`melt_duration_ms`かけて進行度が1.0(消滅)まで進む。

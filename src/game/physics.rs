@@ -6,7 +6,7 @@
 use crate::constants::OXYGEN_DECAY_PER_SEC;
 use crate::game::board::{
     apply_gravity_tick, connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
-    is_supported, Board, BlockMove, Cell, GravityState, Pos, RockHitResult,
+    is_supported, Board, BlockMove, Cell, GravityState, ItemEffect, Pos, RockHitResult,
 };
 use crate::game::player::{Direction, Player};
 
@@ -39,6 +39,9 @@ pub enum DrillOutcome {
     /// スターブロックを掘削で破壊した(スコア+10はこの呼び出し内で適用済み、TERM独自
     /// 拡張)。放置しても画面内に入れば自然に溶けて消えるが、掘削でも即座に壊せる。
     StarDestroyed,
+    /// アイテムブロックを掘削で取得した(TERM独自拡張)。効果の発動自体はGame(呼び
+    /// 出し側)が行う。ここではブロックをEmptyにするだけ
+    ItemCollected(ItemEffect),
 }
 
 /// 指定セルに対して掘削を1回実行し、盤面・プレイヤーのスコア/酸素へ反映する
@@ -70,6 +73,11 @@ fn drill_cell(board: &mut Board, player: &mut Player, target: (usize, usize)) ->
             board.set(target.0, target.1, Cell::Empty);
             player.award_drill_score(1);
             DrillOutcome::StarDestroyed
+        }
+        Cell::Item(effect) => {
+            board.set(target.0, target.1, Cell::Empty);
+            player.award_drill_score(1);
+            DrillOutcome::ItemCollected(effect)
         }
     }
 }
@@ -208,7 +216,7 @@ fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, u
         // そのまま流れ、押し潰しにはならない。取得は歩み寄り・自由落下・重力ティックでの
         // 自動取得を通じて行われる。
         Cell::Oxygen => false,
-        Cell::Diamond | Cell::Star { .. } => {
+        Cell::Diamond | Cell::Star { .. } | Cell::Item(_) => {
             !is_supported(board, target, player_pos) && !gravity.is_shaking(target)
         }
     }

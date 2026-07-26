@@ -33,6 +33,20 @@ pub enum Cell {
     /// によって変わる、TERM独自拡張)とは独立した実時間で管理するため、tick数ではなく
     /// 経過ミリ秒で持つ。掘削・連結落下の対象外(常に単独・固定、酸素カプセル等と同様)。
     Star { visible_ms: u32 },
+    /// アイテムブロック(TERM独自拡張。ユーザー指摘: 「ショートカットRと同じ効果の
+    /// あるアイテムつくろ」「ショートカットC効果のアイテムも作って」)。ドリルで
+    /// 取得すると即座に対応するデバッグショートカットと同じ効果が発動する。ダイヤ・
+    /// スター同様、連結せず常に単独の塊として落下する。
+    Item(ItemEffect),
+}
+
+/// アイテムブロック取得時に発動する効果の種別(TERM独自拡張)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ItemEffect {
+    /// ショートカットRと同じ: プレイヤーより上のブロックを全削除する(AIRは残す)
+    ClearAbove,
+    /// ショートカットCと同じ: プレイヤー付近の色ブロックをランダムな2色に統一する
+    UnifyColors,
 }
 
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
@@ -302,6 +316,17 @@ fn overlay_rock_oxygen_diamond_with_rates(
         Cell::Diamond
     } else if r < t.rock + t.oxygen + t.diamond + t.star {
         Cell::Star { visible_ms: 0 }
+    } else if r < t.rock + t.oxygen + t.diamond + t.star + crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB {
+        Cell::Item(ItemEffect::ClearAbove)
+    } else if r
+        < t.rock
+            + t.oxygen
+            + t.diamond
+            + t.star
+            + crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB
+            + crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB
+    {
+        Cell::Item(ItemEffect::UnifyColors)
     } else {
         Cell::Color(base_color)
     }
@@ -687,8 +712,8 @@ pub(crate) fn is_supported(board: &Board, pos: (usize, usize), player_pos: (usiz
 /// それぞれ「1つの塊」として1つのVecにまとめる。同色・岩ブロックが上下左右に
 /// 隣接している限り必ず同じ塊に含まれるため、支持判定・移動を後続の処理でセル単位に
 /// バラして行うことはなく、「ちぎれて落ちる」ことが起きない。酸素カプセル・ダイヤ・
-/// スター・白ブロックは連結対象外(spec.md 2章、白ブロックはTERM独自拡張)なので、
-/// 常にサイズ1の塊として扱う。
+/// スター・白ブロック・アイテムブロックは連結対象外(spec.md 2章、白ブロック・
+/// アイテムブロックはTERM独自拡張)なので、常にサイズ1の塊として扱う。
 fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
     let depth_rows = board.depth_rows();
     let mut visited: HashSet<(usize, usize)> = HashSet::new();
@@ -715,7 +740,7 @@ fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
                     visited.extend(group.iter().copied());
                     groups.push(group);
                 }
-                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } => {
+                Cell::Oxygen | Cell::Diamond | Cell::Star { .. } | Cell::Item(_) => {
                     visited.insert(pos);
                     groups.push(vec![pos]);
                 }
@@ -1145,6 +1170,36 @@ mod tests {
     }
 
     #[test]
+    fn reroll_overlays_from_row_spawns_both_kinds_of_item_blocks() {
+        // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」「ショートカット
+        // C効果のアイテムも作って」。出現率は岩/AIR/スター/ダイヤの配分率設定とは独立した
+        // ごく低確率の固定値のため、十分な行数で統計的に両方が出現することを確認する。
+        let mut board = empty_board(5000);
+        for row in 0..5000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 4, 100, &GravityState::new());
+
+        let clear_above_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(ItemEffect::ClearAbove)))
+            .count();
+        let unify_colors_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(ItemEffect::UnifyColors)))
+            .count();
+        assert!(clear_above_count > 0, "ClearAboveアイテムが1つも出現しないのは不自然");
+        assert!(unify_colors_count > 0, "UnifyColorsアイテムが1つも出現しないのは不自然");
+    }
+
+    #[test]
     fn reroll_overlays_from_row_never_converts_existing_color_or_oxygen_cells_into_stars() {
         // ユーザー指摘: 「スターブロックに変わるのはXブロックとダイヤブロックだけという
         // 前提にする」(#71の色ブロックのみルールから反転)。既存のColor/Oxygenセルは、
@@ -1307,7 +1362,13 @@ mod tests {
         board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1, 100, &GravityState::new());
 
         for cell in board.rows.iter().flatten() {
-            assert_eq!(*cell, Cell::Color(ColorKind::Red), "color_count=1なら常にColorKind::ALLの先頭色のみ");
+            // アイテムブロック(TERM独自拡張)は岩/AIR/スター/ダイヤの配分率とは独立した
+            // ごく低確率の抽選のため、rate=0設定でも例外的に出現し得る。この試験の
+            // 意図(色数設定が単色に絞られること)には影響しないため許容する。
+            assert!(
+                matches!(cell, Cell::Color(ColorKind::Red)) || matches!(cell, Cell::Item(_)),
+                "color_count=1なら常にColorKind::ALLの先頭色のみ(アイテムブロック化のみ例外): {cell:?}"
+            );
         }
     }
 

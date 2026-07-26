@@ -189,6 +189,13 @@ pub const STAR_SPARKLE_PERIOD_MS: u32 = 400;
 /// `ui::render::FIELD_VISIBLE_ROWS`(表示可能な論理行数)に合わせている。
 pub const STAR_VISIBLE_RANGE_ROWS: usize = 14;
 
+/// アイテムブロックの出現率(TERM独自拡張。ユーザー指摘: 「ショートカットRと同じ
+/// 効果のあるアイテムつくろ」「ショートカットC効果のアイテムも作って」)。画面全体に
+/// 効果が及ぶ強力な効果のため、スター(`STAR_SPAWN_PROB`=0.015)よりも大幅に低い
+/// 固定値とし、現時点では設定画面での調整対象にしない(要望があれば追加する)。
+pub const ITEM_CLEAR_ABOVE_SPAWN_PROB: f32 = 0.003;
+pub const ITEM_UNIFY_COLORS_SPAWN_PROB: f32 = 0.003;
+
 /// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま。
 /// TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
 /// ようにしたい。プレイ中でもその数値をいじれるようにしたい」)。設定画面から
