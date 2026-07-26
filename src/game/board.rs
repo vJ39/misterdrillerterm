@@ -8,7 +8,10 @@ use std::collections::HashSet;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::constants::{FIELD_WIDTH, ROCK_HITS_TO_BREAK, STAR_MELT_TICKS};
+use crate::constants::{
+    depth_fraction, COLOR_CLUSTER_DEPTH_START_PROB, FIELD_WIDTH, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
+    STAR_MELT_TICKS,
+};
 
 /// フィールド1マスの内容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,12 +247,18 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        0.0,
     )
 }
 
 /// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/ダイヤ出現率を設定値(%、100=通常の
 /// まま)で調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの
 /// 配分量をいじれるようにしたい」「スターブロック比率0〜」「ダイヤブロック0%設定」)。
+///
+/// `rock_cluster_bonus`(0.0〜)は岩の出現確率へ加算するボーナス(TERM独自拡張。
+/// ユーザー指摘: 「Xブロックが結合で大量にあったりするように」)。呼び出し側が
+/// 隣接セルが岩かどうか・深度に応じて算出する。`Board::generate`(初期生成、後で
+/// `reroll_overlays_from_row`により上書きされる)では常に0.0を渡し無効化する。
 #[allow(clippy::too_many_arguments)]
 fn overlay_rock_oxygen_diamond_with_rates(
     rng: &mut ChaCha8Rng,
@@ -259,9 +268,10 @@ fn overlay_rock_oxygen_diamond_with_rates(
     air_rate_percent: u32,
     star_rate_percent: u32,
     diamond_rate_percent: u32,
+    rock_cluster_bonus: f32,
 ) -> Cell {
     let mut t = band_table(row);
-    t.rock = (t.rock * rock_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    t.rock = (t.rock * rock_rate_percent as f32 / 100.0 + rock_cluster_bonus).clamp(0.0, 0.9);
     t.oxygen = (t.oxygen * air_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.star = (t.star * star_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
     t.diamond = (t.diamond * diamond_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
@@ -344,6 +354,12 @@ impl Board {
     /// `color_count`(1〜4)は新しい色ブロックの抽選を`ColorKind::ALL`の先頭からこの数
     /// だけに制限する(TERM独自拡張。ユーザー指摘: 「出現する色ブロックの色数を設定で
     /// 選べるようにしたい(1〜4)」)。範囲外の値は1〜4にクランプする。
+    ///
+    /// 深度が進むほど、色ブロックの初期配置はまとまりが弱くなり(左隣の色を継承する
+    /// 確率が下がる)、岩ブロックは逆にまとまりやすくなる(隣接岩ブロックがあると
+    /// 出現確率にボーナスが乗る)(TERM独自拡張の難易度カーブ。ユーザー指摘: 「初期
+    /// 配置されるブロックがあまり結合状態になく、個別でばらばらであり、Xブロックが
+    /// 結合で大量にあったりするように」)。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
@@ -360,11 +376,26 @@ impl Board {
         let color_count = (color_count as usize).clamp(1, ColorKind::ALL.len());
 
         for row in from_row..self.rows.len() {
+            let fraction = depth_fraction(row);
+            let color_cluster_prob = COLOR_CLUSTER_DEPTH_START_PROB * (1.0 - fraction);
+            let rock_cluster_bonus_if_adjacent = ROCK_CLUSTER_DEPTH_MAX_BONUS * fraction;
+
             for col in 0..FIELD_WIDTH {
                 if self.rows[row][col] == Cell::Empty {
                     continue;
                 }
-                let fresh_color = ColorKind::ALL[rng.random_range(0..color_count)];
+
+                let left = if col > 0 { Some(self.rows[row][col - 1]) } else { None };
+                let top = if row > 0 { Some(self.rows[row - 1][col]) } else { None };
+
+                let fresh_color = match left {
+                    Some(Cell::Color(c)) if rng.random_range(0.0..1.0) < color_cluster_prob => c,
+                    _ => ColorKind::ALL[rng.random_range(0..color_count)],
+                };
+                let adjacent_is_rock =
+                    matches!(left, Some(Cell::Rock { .. })) || matches!(top, Some(Cell::Rock { .. }));
+                let rock_cluster_bonus = if adjacent_is_rock { rock_cluster_bonus_if_adjacent } else { 0.0 };
+
                 self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
                     &mut rng,
                     fresh_color,
@@ -373,6 +404,7 @@ impl Board {
                     air_rate_percent,
                     star_rate_percent,
                     diamond_rate_percent,
+                    rock_cluster_bonus,
                 );
             }
         }
@@ -1091,6 +1123,107 @@ mod tests {
         for cell in board.rows.iter().flatten() {
             assert_eq!(*cell, Cell::Color(ColorKind::Red), "color_count=1なら常にColorKind::ALLの先頭色のみ");
         }
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_color_clustering_weakens_with_depth() {
+        // ユーザー指摘: 「階層が進むにつれて…初期配置されるブロックがあまり結合状態に
+        // なく、個別でばらばらであり…難易度をあげていってほしい」。深度が浅いほど
+        // 左隣の色を継承しやすくまとまりが強く、深いほど独立抽選に近づきバラバラに
+        // なることを確認する(TERM独自拡張の難易度カーブ)。
+        fn avg_run_length_in_range(board: &Board, rows: std::ops::Range<usize>) -> f64 {
+            let mut total_len = 0u64;
+            let mut total_runs = 0u64;
+            for row in rows {
+                let mut run_color: Option<ColorKind> = None;
+                let mut run_len = 0u64;
+                for col in 0..FIELD_WIDTH {
+                    let c = match board.cell(row, col) {
+                        Cell::Color(k) => Some(k),
+                        _ => None,
+                    };
+                    if c.is_some() && c == run_color {
+                        run_len += 1;
+                    } else {
+                        if run_color.is_some() {
+                            total_len += run_len;
+                            total_runs += 1;
+                        }
+                        run_color = c;
+                        run_len = if c.is_some() { 1 } else { 0 };
+                    }
+                }
+                if run_color.is_some() {
+                    total_len += run_len;
+                    total_runs += 1;
+                }
+            }
+            if total_runs == 0 { 0.0 } else { total_len as f64 / total_runs as f64 }
+        }
+
+        let mut board = empty_board(1000);
+        for row in 0..1000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+        // 岩/AIR/スター/ダイヤは無しにして、純粋に色の連結だけを観測する。
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4);
+
+        let shallow_avg = avg_run_length_in_range(&board, 2..200);
+        let deep_avg = avg_run_length_in_range(&board, 800..1000);
+
+        assert!(
+            shallow_avg > deep_avg + 0.1,
+            "浅い深度の方が横方向のまとまりが強いはず: shallow={shallow_avg}, deep={deep_avg}"
+        );
+    }
+
+    #[test]
+    fn reroll_overlays_from_row_rock_clustering_strengthens_with_depth() {
+        // ユーザー指摘: 「Xブロックが結合で大量にあったりするように」。深度が深いほど
+        // 岩ブロックの塊が大きくなりやすいことを確認する(TERM独自拡張の難易度カーブ)。
+        fn avg_rock_group_size_in_range(board: &Board, rows: std::ops::Range<usize>) -> f64 {
+            let mut visited: HashSet<(usize, usize)> = HashSet::new();
+            let mut total = 0u64;
+            let mut groups = 0u64;
+            for row in rows.clone() {
+                for col in 0..FIELD_WIDTH {
+                    let pos = (row, col);
+                    if visited.contains(&pos) {
+                        continue;
+                    }
+                    if matches!(board.cell(row, col), Cell::Rock { .. }) {
+                        let group = connected_rock_group(board, pos);
+                        for &p in &group {
+                            visited.insert(p);
+                        }
+                        total += group.len() as u64;
+                        groups += 1;
+                    } else {
+                        visited.insert(pos);
+                    }
+                }
+            }
+            if groups == 0 { 0.0 } else { total as f64 / groups as f64 }
+        }
+
+        let mut board = empty_board(1000);
+        for row in 0..1000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+        // 岩の出現率を上限(300%)にして、隣接ボーナスの効果を観測しやすくする。
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4);
+
+        let shallow_avg = avg_rock_group_size_in_range(&board, 2..200);
+        let deep_avg = avg_rock_group_size_in_range(&board, 800..1000);
+
+        assert!(
+            deep_avg > shallow_avg + 0.1,
+            "深い深度の方が岩ブロックの塊が大きいはず: shallow={shallow_avg}, deep={deep_avg}"
+        );
     }
 
     #[test]

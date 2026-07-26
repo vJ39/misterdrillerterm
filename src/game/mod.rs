@@ -11,11 +11,11 @@ pub mod player;
 use std::time::Duration;
 
 use crate::constants::{
-    CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
-    DEBUG_UNIFY_COLORS_RANGE_ROWS, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_MS,
-    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS, OXYGEN_WARNING_THRESHOLD,
-    SHAKE_DURATION_MS,
+    depth_fraction, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
+    DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
+    DEBUG_UNIFY_COLORS_RANGE_ROWS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH,
+    INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
+    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
 };
 use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState};
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
@@ -523,7 +523,13 @@ impl Game {
             self.drill_cooldown_remaining = self.drill_cooldown_remaining.saturating_sub(delta);
         }
 
-        physics::apply_oxygen_decay(&mut self.player, delta.as_secs_f32());
+        // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
+        // 「進むにつれてAIRの減る速度が早い」)。経過時間そのものを実効倍率ぶん
+        // 引き伸ばすことで、`OXYGEN_DECAY_PER_SEC`(秒あたりの基準減少量)は変えずに
+        // 実質的な減少速度だけを深度に応じて上げる。
+        let oxygen_decay_multiplier =
+            1.0 + depth_fraction(self.player.depth_m()) * (OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER - 1.0);
+        physics::apply_oxygen_decay(&mut self.player, delta.as_secs_f32() * oxygen_decay_multiplier);
 
         if self.player.oxygen > 0.0 && self.player.oxygen <= OXYGEN_WARNING_THRESHOLD {
             self.oxygen_warning_accum += delta;
@@ -542,13 +548,18 @@ impl Game {
             }
         }
 
+        // 深度が進むほどブロック落下速度が上がる(TERM独自拡張。ユーザー指摘:
+        // 「階層が進むにつれてだんだんとブロックの落ちる速度があがり」)。設定画面/
+        // デバッグショートカットで調整した`block_fall_tick_ms`を「深度0mでの速度」
+        // として扱い、そこから深度に応じてtick間隔を短縮する。
+        let effective_tick_ms = self.effective_block_fall_tick_ms();
         self.fall_tick_accum += delta;
-        let tick = Duration::from_millis(self.block_fall_tick_ms);
+        let tick = Duration::from_millis(effective_tick_ms);
         while self.fall_tick_accum >= tick {
             self.fall_tick_accum -= tick;
 
             let invulnerable = self.invulnerability_ticks_remaining > 0;
-            let shake_ticks = (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
+            let shake_ticks = (self.shake_duration_ms / effective_tick_ms.max(1)).min(u8::MAX as u64) as u8;
             let result = physics::process_gravity_tick(
                 &mut self.board,
                 &mut self.player,
@@ -673,8 +684,18 @@ impl Game {
     /// 1.0=次のティックが来る直前。TERM独自拡張)。`recently_moved_blocks`と組み合わせて、
     /// 移動前の位置から移動後の位置へ向けて滑らかに補間する。
     pub fn block_fall_progress(&self) -> f32 {
-        let tick_secs = self.block_fall_tick_ms.max(1) as f32 / 1000.0;
+        let tick_secs = self.effective_block_fall_tick_ms().max(1) as f32 / 1000.0;
         (self.fall_tick_accum.as_secs_f32() / tick_secs).clamp(0.0, 1.0)
+    }
+
+    /// 深度に応じて実効化したブロック落下tick間隔(ms、TERM独自拡張)。設定画面/
+    /// デバッグショートカットで調整した`block_fall_tick_ms`を「深度0mでの速度」
+    /// として扱い、`FALL_SPEED_DEPTH_MAX_SPEEDUP`まで深度に応じて短縮する
+    /// (`DEBUG_FALL_TICK_MS_MIN`を下回らない)。
+    fn effective_block_fall_tick_ms(&self) -> u64 {
+        let fraction = depth_fraction(self.player.depth_m());
+        let speedup = 1.0 - fraction * (1.0 - FALL_SPEED_DEPTH_MAX_SPEEDUP);
+        ((self.block_fall_tick_ms as f32 * speedup) as u64).max(DEBUG_FALL_TICK_MS_MIN)
     }
 
     /// 「天に召される」演出中かどうか(TERM独自拡張)。この間は移動・掘削入力を無視する。
@@ -1317,7 +1338,9 @@ mod tests {
         // 表す小さな値になっていることを確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
-        game.player.row = 999;
+        // 深度による落下速度スケーリング(TERM独自拡張)の影響を受けないよう、
+        // プレイヤーは深度0m相当(等倍速)の浅い位置に置く。
+        game.player.row = 1;
         game.player.col = 5;
         game.board.rows[0][3] = Cell::Color(ColorKind::Red);
 
