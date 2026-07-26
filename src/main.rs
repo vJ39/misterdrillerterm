@@ -22,9 +22,9 @@ use rodio::mixer::Mixer;
 use constants::{
     COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
-    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
-    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
+    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -201,6 +201,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
+                            | ui::render::SettingsChoice::ItemClearAboveRate
+                            | ui::render::SettingsChoice::ItemUnifyColorsRate
+                            | ui::render::SettingsChoice::ItemStarifyScreenRate
                             | ui::render::SettingsChoice::ColorCount
                             | ui::render::SettingsChoice::ColorClusterRate
                             | ui::render::SettingsChoice::FieldWidth
@@ -289,6 +292,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::AirRate
                                     | ui::render::SettingsChoice::StarRate
                                     | ui::render::SettingsChoice::DiamondRate
+                                    | ui::render::SettingsChoice::ItemClearAboveRate
+                                    | ui::render::SettingsChoice::ItemUnifyColorsRate
+                                    | ui::render::SettingsChoice::ItemStarifyScreenRate
                                     | ui::render::SettingsChoice::ColorCount
                                     | ui::render::SettingsChoice::ColorClusterRate
                             ) =>
@@ -314,6 +320,27 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     DIAMOND_SPAWN_RATE_PERCENT_MIN,
                                 );
                             }
+                            ui::render::SettingsChoice::ItemClearAboveRate => {
+                                settings.item_clear_above_rate_percent = adjust_rate_percent(
+                                    settings.item_clear_above_rate_percent,
+                                    increase,
+                                    ITEM_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
+                            ui::render::SettingsChoice::ItemUnifyColorsRate => {
+                                settings.item_unify_colors_rate_percent = adjust_rate_percent(
+                                    settings.item_unify_colors_rate_percent,
+                                    increase,
+                                    ITEM_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
+                            ui::render::SettingsChoice::ItemStarifyScreenRate => {
+                                settings.item_starify_screen_rate_percent = adjust_rate_percent(
+                                    settings.item_starify_screen_rate_percent,
+                                    increase,
+                                    ITEM_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
                             ui::render::SettingsChoice::ColorCount => {
                                 settings.color_count = adjust_color_count(settings.color_count, increase);
                             }
@@ -334,6 +361,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
+                            settings.item_clear_above_rate_percent,
+                            settings.item_unify_colors_rate_percent,
+                            settings.item_starify_screen_rate_percent,
                             settings.color_count,
                             settings.color_cluster_rate_percent,
                         );
@@ -431,6 +461,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
+                            settings.item_clear_above_rate_percent,
+                            settings.item_unify_colors_rate_percent,
+                            settings.item_starify_screen_rate_percent,
                             settings.color_count,
                             settings.color_cluster_rate_percent,
                             settings.field_width,
@@ -456,6 +489,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.air_spawn_rate_percent,
                     settings.star_spawn_rate_percent,
                     settings.diamond_spawn_rate_percent,
+                    settings.item_clear_above_rate_percent,
+                    settings.item_unify_colors_rate_percent,
+                    settings.item_starify_screen_rate_percent,
                     settings.color_count,
                     settings.color_cluster_rate_percent,
                     settings.field_width,
@@ -495,6 +531,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
+                            | ui::render::SettingsChoice::ItemClearAboveRate
+                            | ui::render::SettingsChoice::ItemUnifyColorsRate
+                            | ui::render::SettingsChoice::ItemStarifyScreenRate
                             | ui::render::SettingsChoice::ColorCount
                             | ui::render::SettingsChoice::ColorClusterRate
                             | ui::render::SettingsChoice::FieldWidth
@@ -561,6 +600,27 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     settings.diamond_spawn_rate_percent,
                                     increase,
                                     DIAMOND_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
+                            ui::render::SettingsChoice::ItemClearAboveRate => {
+                                settings.item_clear_above_rate_percent = adjust_rate_percent(
+                                    settings.item_clear_above_rate_percent,
+                                    increase,
+                                    ITEM_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
+                            ui::render::SettingsChoice::ItemUnifyColorsRate => {
+                                settings.item_unify_colors_rate_percent = adjust_rate_percent(
+                                    settings.item_unify_colors_rate_percent,
+                                    increase,
+                                    ITEM_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
+                            ui::render::SettingsChoice::ItemStarifyScreenRate => {
+                                settings.item_starify_screen_rate_percent = adjust_rate_percent(
+                                    settings.item_starify_screen_rate_percent,
+                                    increase,
+                                    ITEM_SPAWN_RATE_PERCENT_MIN,
                                 );
                             }
                             ui::render::SettingsChoice::ColorCount => {
@@ -633,6 +693,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
                             settings.diamond_spawn_rate_percent,
+                            settings.item_clear_above_rate_percent,
+                            settings.item_unify_colors_rate_percent,
+                            settings.item_starify_screen_rate_percent,
                             settings.color_count,
                             settings.color_cluster_rate_percent,
                         );

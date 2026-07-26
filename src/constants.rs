@@ -199,6 +199,12 @@ pub const ITEM_UNIFY_COLORS_SPAWN_PROB: f32 = 0.003;
 /// (TERM独自拡張。ユーザー指摘: 「ショートカットKアイテムつくって」)。
 pub const ITEM_STARIFY_SCREEN_SPAWN_PROB: f32 = 0.003;
 
+/// アイテムブロック3種の出現率設定の下限(%、TERM独自拡張。ユーザー指摘: 「各種
+/// アイテムの出現頻度の設定項目増やして」)。スター・ダイヤと同様、完全に出現させない
+/// (0%)設定も許可する。上限・既定値・刻み幅は`SPAWN_RATE_PERCENT_MAX/DEFAULT/STEP`を
+/// 共用する。
+pub const ITEM_SPAWN_RATE_PERCENT_MIN: u32 = 0;
+
 /// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま。
 /// TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの配分量をいじれる
 /// ようにしたい。プレイ中でもその数値をいじれるようにしたい」)。設定画面から

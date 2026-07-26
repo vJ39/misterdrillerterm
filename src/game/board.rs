@@ -268,14 +268,18 @@ fn overlay_rock_oxygen_diamond(rng: &mut ChaCha8Rng, base_color: ColorKind, row:
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         0.0,
         true, // 初期生成の候補は常に「まだ色ブロック」なのでスター抽選の対象
     )
 }
 
-/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/ダイヤ出現率を設定値(%、100=通常の
-/// まま)で調整できる版(TERM独自拡張。ユーザー指摘: 「設定でXブロックの配分量・AIRの
-/// 配分量をいじれるようにしたい」「スターブロック比率0〜」「ダイヤブロック0%設定」)。
+/// `overlay_rock_oxygen_diamond`の、岩/AIR/スター/ダイヤ・アイテム3種の出現率を
+/// 設定値(%、100=通常のまま)で調整できる版(TERM独自拡張。ユーザー指摘: 「設定で
+/// Xブロックの配分量・AIRの配分量をいじれるようにしたい」「スターブロック比率0〜」
+/// 「ダイヤブロック0%設定」「各種アイテムの出現頻度の設定項目増やして」)。
 ///
 /// `rock_cluster_bonus`(0.0〜)は岩の出現確率へ加算するボーナス(TERM独自拡張。
 /// ユーザー指摘: 「Xブロックが結合で大量にあったりするように」)。呼び出し側が
@@ -296,6 +300,9 @@ fn overlay_rock_oxygen_diamond_with_rates(
     air_rate_percent: u32,
     star_rate_percent: u32,
     diamond_rate_percent: u32,
+    item_clear_above_rate_percent: u32,
+    item_unify_colors_rate_percent: u32,
+    item_starify_screen_rate_percent: u32,
     rock_cluster_bonus: f32,
     allow_star: bool,
 ) -> Cell {
@@ -308,11 +315,16 @@ fn overlay_rock_oxygen_diamond_with_rates(
         0.0
     };
     t.diamond = (t.diamond * diamond_rate_percent as f32 / 100.0).clamp(0.0, 0.9);
+    // アイテムブロック3種(#98/#101/#107)は岩/AIR/スター/ダイヤの配分率設定とは独立した
+    // ごく低確率の値だが、他ブロック同様に設定画面から個別調整できる(TERM独自拡張。
+    // ユーザー指摘: 「各種アイテムの出現頻度の設定項目増やして」)。
+    let item_clear_above = crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB * item_clear_above_rate_percent as f32 / 100.0;
+    let item_unify_colors = crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB * item_unify_colors_rate_percent as f32 / 100.0;
+    let item_starify_screen =
+        crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB * item_starify_screen_rate_percent as f32 / 100.0;
 
     // ルーレット式抽選(TERM独自拡張)。各候補の確率ぶんを順に積み上げ、rが最初に
-    // 収まった区間を採用する。アイテムブロック3種(#98/#101/#107)は岩/AIR/スター/
-    // ダイヤの配分率設定とは独立した、ごく低確率の固定値(現時点では設定画面の
-    // 調整対象外)。
+    // 収まった区間を採用する。
     let r: f32 = rng.random_range(0.0..1.0);
     let mut threshold = t.rock;
     if r < threshold {
@@ -330,15 +342,15 @@ fn overlay_rock_oxygen_diamond_with_rates(
     if r < threshold {
         return Cell::Star { visible_ms: 0 };
     }
-    threshold += crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB;
+    threshold += item_clear_above;
     if r < threshold {
         return Cell::Item(ItemEffect::ClearAbove);
     }
-    threshold += crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB;
+    threshold += item_unify_colors;
     if r < threshold {
         return Cell::Item(ItemEffect::UnifyColors);
     }
-    threshold += crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB;
+    threshold += item_starify_screen;
     if r < threshold {
         return Cell::Item(ItemEffect::StarifyScreen);
     }
@@ -444,6 +456,7 @@ impl Board {
     /// 拡張。ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」)。
     /// 0%なら深度に関わらず常に完全ランダム抽選(結合ゼロ)になる。
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
         from_row: usize,
@@ -451,6 +464,9 @@ impl Board {
         air_rate_percent: u32,
         star_rate_percent: u32,
         diamond_rate_percent: u32,
+        item_clear_above_rate_percent: u32,
+        item_unify_colors_rate_percent: u32,
+        item_starify_screen_rate_percent: u32,
         color_count: u8,
         color_cluster_rate_percent: u32,
         gravity: &GravityState,
@@ -502,6 +518,9 @@ impl Board {
                     air_rate_percent,
                     star_rate_percent,
                     diamond_rate_percent,
+                    item_clear_above_rate_percent,
+                    item_unify_colors_rate_percent,
+                    item_starify_screen_rate_percent,
                     rock_cluster_bonus,
                     allow_star,
                 );
@@ -1113,7 +1132,7 @@ mod tests {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 4, 100, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
+        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Color(ColorKind::Red), "from_rowより手前は変わらない");
@@ -1135,7 +1154,7 @@ mod tests {
 
         // 岩/AIR/スター/ダイヤの配分率を全て0にすれば、Empty以外の全セルは必ず
         // Color(通常の色ブロック)へ再抽選される。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         for col in 0..4 {
             assert!(
@@ -1163,9 +1182,9 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 4, 100, &GravityState::new());
+        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 0, 0, 0, 4, 100, &GravityState::new());
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 4, 100, &GravityState::new());
+        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 0, 0, 0, 4, 100, &GravityState::new());
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
@@ -1185,7 +1204,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 0, 0, 0, 4, 100, &GravityState::new());
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "スター配分率0%ならスターブロックは一切出現しないはず");
@@ -1194,9 +1213,8 @@ mod tests {
     #[test]
     fn reroll_overlays_from_row_spawns_all_three_kinds_of_item_blocks() {
         // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」「ショートカット
-        // C効果のアイテムも作って」「ショートカットKアイテムつくって」。出現率は岩/AIR/
-        // スター/ダイヤの配分率設定とは独立したごく低確率の固定値のため、十分な行数で
-        // 統計的に3種とも出現することを確認する。
+        // C効果のアイテムも作って」「ショートカットKアイテムつくって」。出現率はごく
+        // 低確率の値のため、十分な行数で統計的に3種とも出現することを確認する。
         let mut board = empty_board(5000);
         for row in 0..5000 {
             for col in 0..FIELD_WIDTH {
@@ -1204,7 +1222,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 100, 100, 100, 4, 100, &GravityState::new());
 
         let clear_above_count = board
             .rows
@@ -1230,6 +1248,42 @@ mod tests {
     }
 
     #[test]
+    fn reroll_overlays_from_row_item_rate_percent_controls_each_item_independently() {
+        // ユーザー指摘: 「各種アイテムの出現頻度の設定項目増やして」。ClearAboveだけ
+        // 0%にすれば出現せず、他の2種は100%のまま出現し続けることを確認する。
+        let mut board = empty_board(5000);
+        for row in 0..5000 {
+            for col in 0..FIELD_WIDTH {
+                board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        board.reroll_overlays_from_row(0, 100, 100, 100, 100, 0, 100, 100, 4, 100, &GravityState::new());
+
+        let clear_above_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(ItemEffect::ClearAbove)))
+            .count();
+        let unify_colors_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(ItemEffect::UnifyColors)))
+            .count();
+        let starify_screen_count = board
+            .rows
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(ItemEffect::StarifyScreen)))
+            .count();
+        assert_eq!(clear_above_count, 0, "ClearAbove配分率0%なら出現しないはず");
+        assert!(unify_colors_count > 0, "UnifyColorsは100%のままなので出現し続けるはず");
+        assert!(starify_screen_count > 0, "StarifyScreenは100%のままなので出現し続けるはず");
+    }
+
+    #[test]
     fn reroll_overlays_from_row_never_converts_existing_color_or_oxygen_cells_into_stars() {
         // ユーザー指摘: 「スターブロックに変わるのはXブロックとダイヤブロックだけという
         // 前提にする」(#71の色ブロックのみルールから反転)。既存のColor/Oxygenセルは、
@@ -1240,7 +1294,7 @@ mod tests {
             board.rows[1][col] = Cell::Oxygen;
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         for row in 0..2 {
             for col in 0..FIELD_WIDTH {
@@ -1265,7 +1319,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert!(star_count > 0, "Xブロック・ダイヤブロックはスターへ変わり得るはず(0件は不自然)");
@@ -1284,7 +1338,7 @@ mod tests {
             gravity.shaking_cells.insert((0, col));
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 4, 100, &gravity);
+        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &gravity);
 
         let star_count = board.rows.iter().flatten().filter(|c| matches!(c, Cell::Star { .. })).count();
         assert_eq!(star_count, 0, "揺れ中のセルはスターへ変わらないはず");
@@ -1301,7 +1355,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         let diamond_count = board.rows.iter().flatten().filter(|&&c| c == Cell::Diamond).count();
         assert_eq!(diamond_count, 0, "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず");
@@ -1362,7 +1416,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 2, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 2, 100, &GravityState::new());
 
         let mut colors_seen: Vec<ColorKind> = Vec::new();
         for cell in board.rows.iter().flatten() {
@@ -1389,7 +1443,7 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 1, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 1, 100, &GravityState::new());
 
         for cell in board.rows.iter().flatten() {
             // アイテムブロック(TERM独自拡張)は岩/AIR/スター/ダイヤの配分率とは独立した
@@ -1445,7 +1499,7 @@ mod tests {
             }
         }
         // 岩/AIR/スター/ダイヤは無しにして、純粋に色の連結だけを観測する。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         let shallow_avg = avg_run_length_in_range(&board, 2..200);
         let deep_avg = avg_run_length_in_range(&board, 800..1000);
@@ -1503,9 +1557,9 @@ mod tests {
         }
 
         let mut zero_rate = make_board();
-        zero_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 0, &GravityState::new());
+        zero_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 0, &GravityState::new());
         let mut default_rate = make_board();
-        default_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        default_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         let zero_avg = avg_run_length_in_range(&zero_rate, 2..200);
         let default_avg = avg_run_length_in_range(&default_rate, 2..200);
@@ -1552,7 +1606,7 @@ mod tests {
             }
         }
         // 岩の出現率を上限(300%)にして、隣接ボーナスの効果を観測しやすくする。
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         let shallow_avg = avg_rock_group_size_in_range(&board, 2..200);
         let deep_avg = avg_rock_group_size_in_range(&board, 800..1000);
@@ -1581,7 +1635,7 @@ mod tests {
                     board.rows[row][col] = Cell::Color(ColorKind::Red);
                 }
             }
-            board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4, 100, &GravityState::new());
+            board.reroll_overlays_from_row(0, 100, 100, 0, 100, 0, 0, 0, 4, 100, &GravityState::new());
 
             let mut rock_cells = 0usize;
             let mut total_cells = 0usize;
@@ -1641,7 +1695,7 @@ mod tests {
                 board.rows[row][col] = Cell::Color(ColorKind::Red);
             }
         }
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
 
         for row in 800..1000 {
             let all_rock = (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }));
@@ -2773,7 +2827,7 @@ mod tests {
         for seed in 0..2u64 {
             let mut board = Board::generate(seed, 70, FIELD_WIDTH);
             let gravity_for_reroll = GravityState::new();
-            board.reroll_overlays_from_row(2, 100, 100, 100, 100, 4, 100, &gravity_for_reroll);
+            board.reroll_overlays_from_row(2, 100, 100, 100, 100, 0, 0, 0, 4, 100, &gravity_for_reroll);
 
             let mut gravity = GravityState::new();
             let player_pos = (usize::MAX, usize::MAX);

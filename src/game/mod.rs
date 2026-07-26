@@ -1105,6 +1105,10 @@ impl Game {
     /// `color_cluster_rate_percent`(%、100=通常のまま)は色ブロックの結合しやすさを
     /// 調整する(TERM独自拡張。ユーザー指摘: 「ブロック配置の結合関係の割合を設定
     /// できるようにして」)。
+    ///
+    /// `item_*_rate_percent`(%、100=通常のまま)はアイテムブロック3種(#98/#101/#107)の
+    /// 出現率をそれぞれ個別に調整する(TERM独自拡張。ユーザー指摘: 「各種アイテムの
+    /// 出現頻度の設定項目増やして」)。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_spawn_rates_from(
         &mut self,
@@ -1113,6 +1117,9 @@ impl Game {
         air_rate_percent: u32,
         star_rate_percent: u32,
         diamond_rate_percent: u32,
+        item_clear_above_rate_percent: u32,
+        item_unify_colors_rate_percent: u32,
+        item_starify_screen_rate_percent: u32,
         color_count: u8,
         color_cluster_rate_percent: u32,
     ) {
@@ -1122,6 +1129,9 @@ impl Game {
             air_rate_percent,
             star_rate_percent,
             diamond_rate_percent,
+            item_clear_above_rate_percent,
+            item_unify_colors_rate_percent,
+            item_starify_screen_rate_percent,
             color_count,
             color_cluster_rate_percent,
             &self.gravity_state,

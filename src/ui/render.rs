@@ -355,6 +355,13 @@ pub enum SettingsChoice {
     /// ダイヤブロックの出現率(%、0まで下げられる)。TERM独自拡張。
     /// ユーザー指摘: 「ダイヤブロック0%設定」
     DiamondRate,
+    /// アイテムブロック(ClearAbove、ショートカットR効果)の出現率(%、0まで下げられる)。
+    /// TERM独自拡張。ユーザー指摘: 「各種アイテムの出現頻度の設定項目増やして」
+    ItemClearAboveRate,
+    /// アイテムブロック(UnifyColors、ショートカットC効果)の出現率(%、同上)。
+    ItemUnifyColorsRate,
+    /// アイテムブロック(StarifyScreen、ショートカットK効果)の出現率(%、同上)。
+    ItemStarifyScreenRate,
     /// 出現する色ブロックの色数(1〜4)。TERM独自拡張。ユーザー指摘: 「出現する色
     /// ブロックの色数を設定で選べるようにしたい(1〜4)」
     ColorCount,
@@ -390,7 +397,10 @@ impl SettingsChoice {
             SettingsChoice::RockRate => SettingsChoice::AirRate,
             SettingsChoice::AirRate => SettingsChoice::StarRate,
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
-            SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
+            SettingsChoice::DiamondRate => SettingsChoice::ItemClearAboveRate,
+            SettingsChoice::ItemClearAboveRate => SettingsChoice::ItemUnifyColorsRate,
+            SettingsChoice::ItemUnifyColorsRate => SettingsChoice::ItemStarifyScreenRate,
+            SettingsChoice::ItemStarifyScreenRate => SettingsChoice::ColorCount,
             SettingsChoice::ColorCount => SettingsChoice::ColorClusterRate,
             SettingsChoice::ColorClusterRate => SettingsChoice::FieldWidth,
             SettingsChoice::FieldWidth => SettingsChoice::BlockFallSpeed,
@@ -412,7 +422,10 @@ impl SettingsChoice {
             SettingsChoice::AirRate => SettingsChoice::RockRate,
             SettingsChoice::StarRate => SettingsChoice::AirRate,
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
-            SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
+            SettingsChoice::ItemClearAboveRate => SettingsChoice::DiamondRate,
+            SettingsChoice::ItemUnifyColorsRate => SettingsChoice::ItemClearAboveRate,
+            SettingsChoice::ItemStarifyScreenRate => SettingsChoice::ItemUnifyColorsRate,
+            SettingsChoice::ColorCount => SettingsChoice::ItemStarifyScreenRate,
             SettingsChoice::ColorClusterRate => SettingsChoice::ColorCount,
             SettingsChoice::FieldWidth => SettingsChoice::ColorClusterRate,
             SettingsChoice::BlockFallSpeed => SettingsChoice::FieldWidth,
@@ -423,8 +436,8 @@ impl SettingsChoice {
     }
 }
 
-/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤの出現率(%)、
-/// 色ブロックの色数、現在選択中の項目をカーソル(反転表示)で示す。
+/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤ・アイテム3種の
+/// 出現率(%)、色ブロックの色数、現在選択中の項目をカーソル(反転表示)で示す。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_settings(
     frame: &mut Frame,
@@ -435,6 +448,9 @@ pub fn draw_settings(
     air_rate_percent: u32,
     star_rate_percent: u32,
     diamond_rate_percent: u32,
+    item_clear_above_rate_percent: u32,
+    item_unify_colors_rate_percent: u32,
+    item_starify_screen_rate_percent: u32,
     color_count: u8,
     color_cluster_rate_percent: u32,
     field_width: usize,
@@ -495,6 +511,21 @@ pub fn draw_settings(
         rate_line("AIR配分", air_rate_percent, selection == SettingsChoice::AirRate),
         rate_line("スター配分", star_rate_percent, selection == SettingsChoice::StarRate),
         rate_line("ダイヤ配分", diamond_rate_percent, selection == SettingsChoice::DiamondRate),
+        rate_line(
+            "Rアイテム配分",
+            item_clear_above_rate_percent,
+            selection == SettingsChoice::ItemClearAboveRate,
+        ),
+        rate_line(
+            "Cアイテム配分",
+            item_unify_colors_rate_percent,
+            selection == SettingsChoice::ItemUnifyColorsRate,
+        ),
+        rate_line(
+            "Kアイテム配分",
+            item_starify_screen_rate_percent,
+            selection == SettingsChoice::ItemStarifyScreenRate,
+        ),
         count_line("色数", color_count, selection == SettingsChoice::ColorCount),
         rate_line(
             "色ブロック結合割合",
@@ -1222,6 +1253,9 @@ mod tests {
             SettingsChoice::AirRate,
             SettingsChoice::StarRate,
             SettingsChoice::DiamondRate,
+            SettingsChoice::ItemClearAboveRate,
+            SettingsChoice::ItemUnifyColorsRate,
+            SettingsChoice::ItemStarifyScreenRate,
             SettingsChoice::ColorCount,
             SettingsChoice::ColorClusterRate,
             SettingsChoice::FieldWidth,
