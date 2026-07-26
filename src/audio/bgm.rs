@@ -65,6 +65,15 @@ fn spawn_playlist_thread(
                 break;
             }
 
+            // 無効設定中にappendすると、ループ内のpauseチェック(下記)が最初に
+            // 効くまでのわずかな間だけ新しい曲が鳴ってしまう可能性があった
+            // (TERM独自拡張。#157)。append前に無効設定を反映しておくことで
+            // この漏れを防ぐ(有効時はappend後のチェックに任せて構わないため
+            // ここでは触らない)。
+            if !music_enabled.load(Ordering::Relaxed) {
+                player.pause();
+            }
+
             let decoder = Decoder::new(Cursor::new(tracks[track_index]))
                 .expect("embedded BGM track must be a valid, bundled mp3");
             player.append(decoder);
