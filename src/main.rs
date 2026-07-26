@@ -99,6 +99,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.toggle_pause();
                         pause_overlay = PauseOverlay::None;
                     }
+                    // ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、ショートカット設定
+                    // されていない任意のキー入力でも解除されるように」。オーバーレイ
+                    // (設定/ヘルプ)表示中は対象外にする(そちらはQ/S/Hで明示的に閉じる)。
+                    InputAction::UnboundKey if game.status == GameStatus::Paused && pause_overlay == PauseOverlay::None => {
+                        game.toggle_pause();
+                    }
+                    InputAction::UnboundKey => {}
                     // M/EキーでのMUSIC/SE切り替えは、一時停止画面でのみ意味を持つ
                     // (spec.md 1章・10章、TERM独自拡張)。プレイ中(Paused以外)は無視する。
                     InputAction::ToggleMusic => {

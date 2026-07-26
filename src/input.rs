@@ -9,9 +9,12 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 use crate::game::InputAction;
 
-/// キーコードを`InputAction`へ変換する(対象外のキーは`None`)。`poll_input_batch`の実装本体。
-fn action_from_key_code(code: KeyCode) -> Option<InputAction> {
-    Some(match code {
+/// キーコードを`InputAction`へ変換する。既知のショートカットに割り当てられていない
+/// キーは`InputAction::UnboundKey`を返す(ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、
+/// ショートカット設定されていない任意のキー入力でも解除されるように」。一時停止中に
+/// 限りmain.rs側で再開トリガーとして扱う)。`poll_input_batch`の実装本体。
+fn action_from_key_code(code: KeyCode) -> InputAction {
+    match code {
         KeyCode::Left => InputAction::MoveLeft,
         KeyCode::Right => InputAction::MoveRight,
         KeyCode::Up => InputAction::FaceUp,
@@ -36,8 +39,8 @@ fn action_from_key_code(code: KeyCode) -> Option<InputAction> {
         KeyCode::Char('=') => InputAction::DebugPlayerFallFaster,
         KeyCode::Char(',') => InputAction::DebugShakeDurationLonger,
         KeyCode::Char('.') => InputAction::DebugShakeDurationShorter,
-        _ => return None,
-    })
+        _ => InputAction::UnboundKey,
+    }
 }
 
 /// `poll_ms`だけ待って入力を確認し、その時点でキューされている全キーイベントを
@@ -54,9 +57,8 @@ pub fn poll_input_batch(poll_ms: u64) -> std::io::Result<Vec<InputAction>> {
     loop {
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
-            && let Some(action) = action_from_key_code(key.code)
         {
-            actions.push(action);
+            actions.push(action_from_key_code(key.code));
         }
 
         if !event::poll(Duration::ZERO)? {
@@ -105,4 +107,26 @@ pub enum AnyKeyAction {
     /// Hキー。タイトル画面でのショートカット一覧ヘルプ画面オープンとして扱う
     /// (TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)。
     OpenHelp,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_from_key_code_maps_known_shortcuts() {
+        assert_eq!(action_from_key_code(KeyCode::Left), InputAction::MoveLeft);
+        assert_eq!(action_from_key_code(KeyCode::Char('p')), InputAction::TogglePause);
+        assert_eq!(action_from_key_code(KeyCode::Char(' ')), InputAction::Drill);
+    }
+
+    #[test]
+    fn action_from_key_code_maps_unassigned_keys_to_unbound_key() {
+        // ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、ショートカット設定されていない
+        // 任意のキー入力でも解除されるように」。既知のショートカットに割り当てられて
+        // いないキーはUnboundKeyになる(main.rs側で一時停止中の再開トリガーに使う)。
+        assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::UnboundKey);
+        assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::UnboundKey);
+        assert_eq!(action_from_key_code(KeyCode::Char('z')), InputAction::UnboundKey);
+    }
 }

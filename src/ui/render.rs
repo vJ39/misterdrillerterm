@@ -182,7 +182,7 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
             plan.game_frame,
             "PAUSED",
             &[
-                "Pキーで再開 / Qキーでタイトルへ",
+                "何かキーを押すと再開 / Qキーでタイトルへ",
                 &format!(
                     "Mキーで音楽{} / Eキーで効果音{}",
                     on_off_label(music_enabled),
