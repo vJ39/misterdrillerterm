@@ -28,6 +28,14 @@
 
 各モードの詳細仕様は [docs/spec.md](docs/spec.md) を参照。
 
+## BGM
+
+自作曲「地底のダンス」
+
+<video src="https://github.com/vJ39/misterdrillerterm/raw/main/assets/chitei-no-dance.mp4" controls width="480"></video>
+
+[🎬 mp4](assets/chitei-no-dance.mp4) / [🎵 mp3](assets/chitei-no-dance.mp3)
+
 ## ビルド方法
 
 実装が揃い次第、通常のcargoプロジェクトとしてビルド・実行できるようにする予定。
