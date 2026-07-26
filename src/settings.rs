@@ -211,8 +211,25 @@ impl Settings {
             self.field_width,
             self.bomb_spawn_rate_percent
         );
-        if let Ok(mut file) = std::fs::File::create(path) {
-            let _ = file.write_all(json.as_bytes());
+        // 一時ファイルへ書いてからrenameすることで保存をアトミックにする(TERM独自
+        // 拡張。#158)。File::create+write_allをpathへ直接行うと、書き込み途中で
+        // プロセスが中断された場合に既存の設定ファイルが不完全な内容のまま残る
+        // おそれがあった。同一ディレクトリ内でのrenameはOS側でアトミックに行われる
+        // ため、この方式なら途中経過が既存のpathへ反映されることはない。
+        let mut tmp_path = path.as_os_str().to_owned();
+        tmp_path.push(".tmp");
+        let tmp_path = std::path::PathBuf::from(tmp_path);
+
+        let Ok(mut file) = std::fs::File::create(&tmp_path) else {
+            return;
+        };
+        if file.write_all(json.as_bytes()).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return;
+        }
+        drop(file);
+        if std::fs::rename(&tmp_path, path).is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
         }
     }
 }
@@ -399,6 +416,25 @@ mod tests {
         Settings::default().save_to(&path);
 
         assert!(path.exists());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_to_does_not_leave_the_temporary_file_behind() {
+        // 一時ファイル+renameでアトミック化した実装が、成功時に`.tmp`ファイルを
+        // 残さないことを確認する回帰テスト(TERM独自拡張。#158)。
+        let path = temp_settings_path("no-leftover-tmp");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        Settings::default().save_to(&path);
+
+        assert!(path.exists());
+        let mut tmp_path = path.as_os_str().to_owned();
+        tmp_path.push(".tmp");
+        assert!(
+            !std::path::Path::new(&tmp_path).exists(),
+            "保存成功後は一時ファイルが残っていないはず"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
