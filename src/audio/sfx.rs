@@ -224,6 +224,47 @@ impl Iterator for SquareChirp {
 
 impl_source_via_oscillator!(SquareChirp);
 
+/// 周波数がfreq_startからfreq_endへ線形に変化するサイン波(上昇/下降チャープ)。
+/// 矩形波(SquareChirp)より倍音が無く滑らかな音色になるため、サイレンのような
+/// なだらかな音の上下に向く(TERM独自拡張。ユーザー指摘: 「AIRなくなりそうなときの
+/// SEが「ぴー、ぴー」って変だから、あんまりうるさくない、サイレンみたいにして」)。
+pub struct SineChirp {
+    freq_start: f32,
+    freq_end: f32,
+    phase: f32,
+    osc: Oscillator,
+}
+
+impl SineChirp {
+    fn new(freq_start: f32, freq_end: f32, duration_ms: u64, amplitude: f32) -> Self {
+        SineChirp {
+            freq_start,
+            freq_end,
+            phase: 0.0,
+            osc: Oscillator::new(duration_ms, amplitude),
+        }
+    }
+}
+
+impl Iterator for SineChirp {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.osc.finished() {
+            return None;
+        }
+        let progress = self.osc.sample_index as f32 / self.osc.total_samples as f32;
+        let freq = self.freq_start + (self.freq_end - self.freq_start) * progress;
+        self.phase = (self.phase + freq / self.osc.sample_rate as f32).fract();
+        let raw = (2.0 * std::f32::consts::PI * self.phase).sin();
+        let value = raw * self.osc.amplitude * self.osc.envelope();
+        self.osc.advance();
+        Some(value)
+    }
+}
+
+impl_source_via_oscillator!(SineChirp);
+
 /// 単一周波数の三角波(有限長・AD/末尾フェード付き)。BGMのベースライン用。
 /// 矩形波より倍音が少なく丸い音色になるため、低音のベースパートに向く。
 pub struct TriangleWave {
@@ -358,6 +399,11 @@ pub fn square_chirp(freq_start: f32, freq_end: f32, duration_ms: u64, amplitude:
     SquareChirp::new(freq_start, freq_end, duration_ms, amplitude)
 }
 
+/// 周波数が線形に変化するサイン波(チャープ)を作る。
+pub fn sine_chirp(freq_start: f32, freq_end: f32, duration_ms: u64, amplitude: f32) -> SineChirp {
+    SineChirp::new(freq_start, freq_end, duration_ms, amplitude)
+}
+
 /// 単発の音をミキサーへ即座に流す(fire-and-forget、他の音との重複再生も可)。
 fn play_tone<S>(mixer: &Mixer, source: S, volume: f32)
 where
@@ -451,9 +497,20 @@ pub fn play_oxygen_pickup(mixer: &Mixer) {
     );
 }
 
-/// 酸素警告音: 酸素残量が20以下の間、1秒間隔で。矩形波 880Hz, 200ms。
+/// 酸素警告音: 酸素残量が20以下の間、1秒間隔で。角の立つ矩形波の「ぴーぴー」は
+/// うるさいという指摘を受け、なだらかなサイン波チャープの上下でサイレン風にした
+/// (TERM独自拡張。ユーザー指摘: 「AIRなくなりそうなときのSEが「ぴー、ぴー」って
+/// 変だから、あんまりうるさくない、サイレンみたいにして」)。500Hz→750Hz→500Hzと
+/// 滑らかに上下させ、振幅も他のSEより控えめにする。
 pub fn play_oxygen_warning(mixer: &Mixer) {
-    play_tone(mixer, square_tone(880.0, 200, 0.5), SE_VOLUME);
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(sine_chirp(500.0, 750.0, 250, 0.35)),
+            Box::new(sine_chirp(750.0, 500.0, 250, 0.35)),
+        ],
+        SE_VOLUME,
+    );
 }
 
 /// レベルアップ音: 30mごとのレベル到達時(spec.md 7章)。矩形波4音アルペジオ
