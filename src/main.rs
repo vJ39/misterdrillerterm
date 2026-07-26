@@ -207,6 +207,29 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
                     }
+                    // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
+                    // 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで切り替えできる
+                    // ように」)。トグルなので方向は問わず、押されたら反転する。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if pause_overlay == PauseOverlay::Settings
+                            && matches!(
+                                settings_selection,
+                                ui::render::SettingsChoice::Music | ui::render::SettingsChoice::Se
+                            ) =>
+                    {
+                        match settings_selection {
+                            ui::render::SettingsChoice::Music => {
+                                settings.music_enabled = !settings.music_enabled;
+                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::Se => {
+                                settings.se_enabled = !settings.se_enabled;
+                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
+                        settings.save();
+                    }
                     // ブロック落下速度・キャラ落下速度・回避硬直時間の調整(TERM独自拡張)。
                     // 配分率・色数と異なり盤面の書き換えを伴わないため、即座にgameへ反映してよい。
                     InputAction::MoveLeft | InputAction::MoveRight
@@ -454,6 +477,28 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs => {}
                         }
+                    }
+                    // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
+                    // 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで切り替えできる
+                    // ように」)。トグルなので方向は問わず、押されたら反転する。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if matches!(
+                            settings_selection,
+                            ui::render::SettingsChoice::Music | ui::render::SettingsChoice::Se
+                        ) =>
+                    {
+                        match settings_selection {
+                            ui::render::SettingsChoice::Music => {
+                                settings.music_enabled = !settings.music_enabled;
+                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::Se => {
+                                settings.se_enabled = !settings.se_enabled;
+                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
+                            }
+                            _ => {}
+                        }
+                        settings.save();
                     }
                     InputAction::MoveLeft | InputAction::MoveRight
                         if matches!(

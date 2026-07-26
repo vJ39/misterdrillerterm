@@ -488,7 +488,7 @@ pub fn draw_settings(
             selection == SettingsChoice::DodgeRecoveryMs,
         ),
         Line::from(""),
-        Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceでトグル", text_style)),
+        Line::from(Span::styled("↑↓で選択 / MUSIC・SEはSpaceか←→でトグル", text_style)),
         Line::from(Span::styled("配分・色数は←→で調整 / Qでタイトルへ", text_style)),
     ])
     .block(block)
