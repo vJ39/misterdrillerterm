@@ -2580,6 +2580,35 @@ mod tests {
     }
 
     #[test]
+    fn no_group_remains_unsupported_forever_after_reroll_at_realistic_depth() {
+        // ユーザー報告(スクリーンショット、深度418m Lv.14付近): 支えを失っているはずの
+        // ブロックが崩れず浮いたままになる箇所がある。既存のno_group_remains_unsupported_
+        // forever_on_random_boardsはBoard::generate直後(=reroll前)の浅い盤面(60行)しか
+        // 検証していなかった。実際のプレイでは開始直後にreroll_overlays_from_rowが適用され、
+        // かつ深度が進むほど岩ブロックの塊化ボーナスが強く効く(ROCK_CLUSTER_DEPTH_MAX_BONUS)
+        // ため、そのギャップを埋めて深い深度(400〜600m帯)でも同じ不変条件を確認する。
+        for seed in 0..2u64 {
+            let mut board = Board::generate(seed, 70);
+            let gravity_for_reroll = GravityState::new();
+            board.reroll_overlays_from_row(2, 100, 100, 100, 100, 4, 100, &gravity_for_reroll);
+
+            let mut gravity = GravityState::new();
+            let player_pos = (usize::MAX, usize::MAX);
+
+            for _ in 0..(SHAKE_TICKS as usize + 1) * 70 {
+                apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            }
+
+            for group in collect_fall_groups(&board) {
+                assert!(
+                    is_group_supported(&board, &group, player_pos),
+                    "seed={seed}: reroll後・深い深度で十分な時間が経っても未支持のまま残っている塊がある: {group:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn horizontal_color_runs_are_noticeably_clustered_not_speckled() {
         // ユーザー指摘(「同じ色のブロックがくっついて見えない」)を受けてLEFT_INHERIT_PROBを
         // 0.55→0.65へ引き上げた。独立抽選(0.25)なら平均ラン長は1.33程度になるはずで、
