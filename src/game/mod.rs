@@ -52,6 +52,9 @@ pub enum InputAction {
     DebugUnifyNearbyColors,
     /// デバッグ: ライフを1増やす(TERM独自拡張、動作確認用ショートカット)
     DebugAddLife,
+    /// デバッグ: 酸素(AIR)を100%まで回復する(TERM独自拡張、動作確認用ショートカット。
+    /// ユーザー指摘: 「AIRを100%にするショートカット追加」)
+    DebugFillAir,
     /// デバッグ: プレイヤーより浅い(画面上で上にある)ブロックを全削除する
     /// (TERM独自拡張、動作確認用ショートカット)
     DebugClearAbovePlayer,
@@ -1081,6 +1084,14 @@ impl Game {
         }
     }
 
+    /// デバッグ: 酸素(AIR)を100%まで回復する。Playing中のみ有効(TERM独自拡張。
+    /// ユーザー指摘: 「AIRを100%にするショートカット追加」)。
+    pub fn debug_fill_air(&mut self) {
+        if self.status == GameStatus::Playing {
+            self.player.oxygen = crate::constants::OXYGEN_MAX;
+        }
+    }
+
     /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中
     /// のみ有効。AIR(酸素カプセル)は消滅させずその場に残す(ユーザー指摘: 「Xで
     /// ブロック消したときAIRは消えずに上から落下してくるように」)。
@@ -2048,6 +2059,29 @@ mod tests {
 
         assert_eq!(game.board.cell(10, 5), Cell::Oxygen, "AIRは消えずに残るはず");
         assert_eq!(game.board.cell(10, 6), Cell::Empty, "AIR以外は通常通り消えるはず");
+    }
+
+    #[test]
+    fn debug_fill_air_restores_oxygen_to_max_while_playing() {
+        // ユーザー指摘: 「AIRを100%にするショートカット追加」。
+        let mut game = Game::new(72);
+        game.player.oxygen = 1.0;
+
+        game.debug_fill_air();
+
+        assert_eq!(game.player.oxygen, crate::constants::OXYGEN_MAX);
+    }
+
+    #[test]
+    fn debug_fill_air_does_nothing_when_not_playing() {
+        let mut game = Game::new_with_lives(72, 1);
+        game.player.oxygen = 1.0;
+        game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
+        assert_eq!(game.status, GameStatus::GameOver);
+
+        game.debug_fill_air();
+
+        assert_eq!(game.player.oxygen, 0.0, "GameOver中は酸素を回復しない");
     }
 
     #[test]

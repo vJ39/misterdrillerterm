@@ -37,6 +37,7 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // デバッグショートカット(TERM独自拡張、動作確認用)。
         KeyCode::Char('c') | KeyCode::Char('C') => InputAction::DebugUnifyNearbyColors,
         KeyCode::Char('l') | KeyCode::Char('L') => InputAction::DebugAddLife,
+        KeyCode::Char('a') | KeyCode::Char('A') => InputAction::DebugFillAir,
         // 元はXキーだったが、掘削キー(X/Z)と衝突するためRキーへ変更した。
         KeyCode::Char('r') | KeyCode::Char('R') => InputAction::DebugClearAbovePlayer,
         KeyCode::Char('[') => InputAction::DebugBlockFallSlower,
@@ -130,6 +131,8 @@ mod tests {
         assert_eq!(action_from_key_code(KeyCode::Char('Z')), InputAction::Drill);
         assert_eq!(action_from_key_code(KeyCode::Char(' ')), InputAction::TogglePause);
         assert_eq!(action_from_key_code(KeyCode::Char('r')), InputAction::DebugClearAbovePlayer);
+        assert_eq!(action_from_key_code(KeyCode::Char('a')), InputAction::DebugFillAir);
+        assert_eq!(action_from_key_code(KeyCode::Char('A')), InputAction::DebugFillAir);
     }
 
     #[test]

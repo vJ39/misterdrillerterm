@@ -322,6 +322,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         handle_events(&events, mixer.as_ref(), &se_enabled);
                     }
                     InputAction::DebugAddLife => game.debug_add_life(),
+                    InputAction::DebugFillAir => game.debug_fill_air(),
                     InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
                     InputAction::DebugBlockFallSlower => {
                         game.debug_adjust_block_fall_speed(false);
