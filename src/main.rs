@@ -543,8 +543,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.move_cooldown_ms,
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
+                            false,
                         ),
-                        PauseOverlay::Help => ui::render::draw_help(frame, None),
+                        PauseOverlay::Help => ui::render::draw_help(frame, None, false),
                     }
                 })?;
             }
@@ -572,6 +573,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.move_cooldown_ms,
                     settings.dodge_recovery_ms,
                     settings.bomb_spawn_rate_percent,
+                    true,
                 )
             })?;
 
@@ -768,7 +770,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 selection: help_jukebox_selection,
                 playing: help_jukebox_playing.as_ref().map(|(idx, _)| *idx),
             };
-            terminal.draw(|frame| ui::render::draw_help(frame, Some(&jukebox_state)))?;
+            terminal.draw(|frame| ui::render::draw_help(frame, Some(&jukebox_state), true))?;
 
             // ヘルプ画面はQキーでタイトルへ戻る(TERM独自拡張。ユーザー指摘:
             // 「ショートカットのヘルプページも必要」)。↑/↓で曲を選び、X/Zで

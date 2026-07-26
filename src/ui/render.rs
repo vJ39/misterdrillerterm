@@ -388,7 +388,11 @@ pub struct HelpJukeboxState {
 /// `Some`の時のみ、埋め込みBGMを選んで試聴できるジュークボックス欄を表示する
 /// (TERM独自拡張。#151)。一時停止中のヘルプオーバーレイでは実際のプレイ中BGMと
 /// 混ざってしまうため対象外にし、タイトルから開く独立画面のみで有効にする。
-pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>) {
+/// `standalone`はタイトルから開いた独立画面(true、Qでタイトルへ戻る)か、プレイ中の
+/// 一時停止オーバーレイ(false、Qはオーバーレイを閉じてプレイ再開するだけ)かを表す
+/// (TERM独自拡張。#155。以前は文脈を問わず「Qキーでタイトルへ戻る」と表示しており、
+/// 一時停止オーバーレイ表示中は実際の挙動と食い違っていた)。
+pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalone: bool) {
     let area = frame.area();
 
     frame.buffer_mut().set_style(
@@ -464,7 +468,11 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>) {
     }
 
     lines.push(Line::from(""));
-    lines.push(line("Qキーでタイトルへ戻る"));
+    lines.push(line(if standalone {
+        "Qキーでタイトルへ戻る"
+    } else {
+        "Qキーで閉じてプレイに戻る"
+    }));
 
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -582,6 +590,9 @@ impl SettingsChoice {
 
 /// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤ・アイテム3種の
 /// 出現率(%)、色ブロックの色数、現在選択中の項目をカーソル(反転表示)で示す。
+/// `standalone`はタイトルから開いた独立画面(true、Qでタイトルへ戻る)か、プレイ中の
+/// 一時停止オーバーレイ(false、Qはオーバーレイを閉じてプレイ再開するだけ)かを表す
+/// (TERM独自拡張。#155)。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_settings(
     frame: &mut Frame,
@@ -603,6 +614,7 @@ pub fn draw_settings(
     move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
     bomb_spawn_rate_percent: u32,
+    standalone: bool,
 ) {
     let area = frame.area();
 
@@ -767,7 +779,11 @@ pub fn draw_settings(
             text_style,
         )),
         Line::from(Span::styled(
-            "配分・色数は←→で調整 / Qでタイトルへ",
+            if standalone {
+                "配分・色数は←→で調整 / Qでタイトルへ"
+            } else {
+                "配分・色数は←→で調整 / Qで閉じる"
+            },
             text_style,
         )),
     ])
