@@ -686,6 +686,22 @@ impl Game {
         let mut events = Vec::new();
         self.frame_counter += 1;
 
+        // このフレームのブロック変化ログをまとめて1トランザクションにし(TERM独自拡張。
+        // ユーザー指摘: 「あとちょっともっさりしてるからinsert高速化したい」)、
+        // キャラの位置・向き・ステータスもフレームに1回だけ記録する(TERM独自拡張。
+        // ユーザー指摘: 「どういう種類のブロックがっていう情報とキャラの向きや位置、
+        // ステータスって残ってないと思うけど大丈夫？」)。
+        if let Some(log) = &self.debug_log {
+            log.begin_frame();
+            log.log_player_state(
+                self.frame_counter,
+                self.player.row,
+                self.player.col,
+                &format!("{:?}", self.player.facing),
+                &format!("{:?}", self.status),
+            );
+        }
+
         // 押し潰し演出・移動補間の経過時間は、GameOverでPlaying状態を抜けた後も
         // 描画側が最後まで追従できるよう、Playingガードより前に進めておく。
         self.crush_flash_remaining = self.crush_flash_remaining.saturating_sub(delta);
@@ -820,7 +836,8 @@ impl Game {
 
             if let Some(log) = &self.debug_log {
                 for &(to, from) in &result.moved_cells {
-                    log.log_move(self.frame_counter, to, from);
+                    let kind = self.board.cell(to.0, to.1);
+                    log.log_move(self.frame_counter, to, from, &format!("{kind:?}"));
                 }
             }
             self.last_block_moves = result.moved_cells;
@@ -990,17 +1007,17 @@ impl Game {
     /// 隣接ブロックがあったら、消える演出を延長してそれも消す」)。これにより、重力で
     /// 落下したブロックが着地して連鎖的に4連結消滅した場合、古い方の演出が先に
     /// フェードアウトして途切れず、1つの連続した「連鎖」に見えるようにする。
-    fn note_vanished_cells(&mut self, cells: impl IntoIterator<Item = board::Pos>) {
+    fn note_vanished_cells(&mut self, cells: impl IntoIterator<Item = (board::Pos, Cell)>) {
         let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS);
-        let new_cells: Vec<board::Pos> = cells.into_iter().collect();
+        let new_cells: Vec<(board::Pos, Cell)> = cells.into_iter().collect();
 
         if let Some(log) = &self.debug_log {
-            for &pos in &new_cells {
-                log.log_vanish(self.frame_counter, pos);
+            for &(pos, kind) in &new_cells {
+                log.log_vanish(self.frame_counter, pos, &format!("{kind:?}"));
             }
         }
 
-        for &(row, col) in &new_cells {
+        for &((row, col), _) in &new_cells {
             for (dr, dc) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
                 let nr = row as isize + dr;
                 let nc = col as isize + dc;
@@ -1014,7 +1031,7 @@ impl Game {
             }
         }
 
-        self.recently_vanished.extend(new_cells.into_iter().map(|pos| (pos, flash)));
+        self.recently_vanished.extend(new_cells.into_iter().map(|(pos, _)| (pos, flash)));
     }
 
     /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=消滅直後、1.0=演出完了
@@ -1261,7 +1278,7 @@ impl Game {
                 let cell = self.board.cell(row, col);
                 if !matches!(cell, Cell::Oxygen | Cell::Item(_)) {
                     if cell != Cell::Empty {
-                        cleared.push((row, col));
+                        cleared.push(((row, col), cell));
                     }
                     self.board.set(row, col, Cell::Empty);
                 }
@@ -2021,13 +2038,13 @@ mod tests {
         // 4連結消滅が起きた場合、先に消えたセルの演出が途切れず1つの連鎖に見えるように
         // する。
         let mut game = Game::new(1);
-        game.note_vanished_cells(vec![(0, 0)]);
+        game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))]);
         game.update(Duration::from_millis(BLOCK_VANISH_FLASH_MS / 2));
         let progress_before = game.vanish_flash_progress((0, 0)).unwrap();
         assert!(progress_before > 0.0, "前提: フラッシュが進行中であること");
 
         // 隣接セル(0,1)が新たに消滅 → (0,0)の残り時間もリセットされて延長されるはず。
-        game.note_vanished_cells(vec![(0, 1)]);
+        game.note_vanished_cells(vec![((0, 1), Cell::Color(ColorKind::Red))]);
         let progress_after = game.vanish_flash_progress((0, 0)).unwrap();
         assert!(progress_after < progress_before, "隣接消滅で演出が延長され、進捗が巻き戻るはず");
         assert!(game.vanish_flash_progress((0, 1)).is_some(), "新しく消滅したセルもフラッシュ中のはず");
@@ -2036,12 +2053,12 @@ mod tests {
     #[test]
     fn note_vanished_cells_does_not_extend_non_adjacent_still_flashing_cells() {
         let mut game = Game::new(1);
-        game.note_vanished_cells(vec![(0, 0)]);
+        game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))]);
         game.update(Duration::from_millis(BLOCK_VANISH_FLASH_MS / 2));
         let progress_before = game.vanish_flash_progress((0, 0)).unwrap();
 
         // 隣接していない遠いセル(5,5)が消滅しても、(0,0)の演出は延長されないはず。
-        game.note_vanished_cells(vec![(5, 5)]);
+        game.note_vanished_cells(vec![((5, 5), Cell::Color(ColorKind::Red))]);
         let progress_after = game.vanish_flash_progress((0, 0)).unwrap();
         assert!(
             (progress_after - progress_before).abs() < f32::EPSILON,

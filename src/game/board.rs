@@ -795,9 +795,11 @@ pub struct FallTickOutcome {
     /// この効果を実際に発動する
     pub items_collected: Vec<ItemEffect>,
     /// このティックで自動消滅(4連結以上の色ブロック・岩ブロック)により消えたセルの
-    /// 座標(TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
-    /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
-    pub vanished_cells: Vec<Pos>,
+    /// 座標と、消える直前のセル内容(TERM独自拡張。ユーザー指摘: 「ブロックが消える
+    /// 瞬間に消える演出してほしい」「どういう種類のブロックがっていう情報...残ってない
+    /// と思うけど大丈夫？」)。描画側(render.rs)がこの座標に一瞬フラッシュ演出を出し、
+    /// デバッグログ(#93)がセル内容を記録する。
+    pub vanished_cells: Vec<(Pos, Cell)>,
 }
 
 /// あるセル`pos`が「支持されている」か(spec.md 4.2)。
@@ -1117,10 +1119,11 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
                 }
                 if vanish_group.len() >= 4 {
                     for &(vr, vc) in &vanish_group {
+                        let kind = board.cell(vr, vc);
                         board.set(vr, vc, Cell::Empty);
+                        outcome.vanished_cells.push(((vr, vc), kind));
                     }
                     outcome.auto_vanished_blocks += vanish_group.len();
-                    outcome.vanished_cells.extend(vanish_group);
                 }
             }
             Cell::Rock { .. } => {
@@ -1130,10 +1133,11 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
                 }
                 if vanish_group.len() >= 4 {
                     for &(vr, vc) in &vanish_group {
+                        let kind = board.cell(vr, vc);
                         board.set(vr, vc, Cell::Empty);
+                        outcome.vanished_cells.push(((vr, vc), kind));
                     }
                     outcome.auto_vanished_rock_blocks += vanish_group.len();
-                    outcome.vanished_cells.extend(vanish_group);
                 }
             }
             _ => {}
@@ -1149,8 +1153,8 @@ pub fn apply_gravity_tick(board: &mut Board, player_pos: (usize, usize), gravity
 /// 「画面内にきたら、溶けて自然と消えるスターブロックも欲しい」「スターブロックは
 /// 画面内に見えてから5秒たったら消えはじめること」)。画面外のスターブロックは
 /// 経過時間が進まない(画面内に戻ってきたら残りの猶予から再開する)。戻り値は消滅した
-/// スターブロックの個数。
-pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) -> Vec<Pos> {
+/// スターブロックの座標と消える直前のセル内容(TERM独自拡張。デバッグログ(#93)用)。
+pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) -> Vec<(Pos, Cell)> {
     let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
     let row_start = player_row.saturating_sub(range);
     let row_end = (player_row + range).min(board.depth_rows().saturating_sub(1));
@@ -1164,7 +1168,7 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
                 let updated = visible_ms.saturating_add(delta_ms);
                 if updated >= vanish_at_ms {
                     board.set(r, c, Cell::Empty);
-                    melted.push((r, c));
+                    melted.push(((r, c), Cell::Star { visible_ms: updated }));
                 } else {
                     board.set(r, c, Cell::Star { visible_ms: updated });
                 }
@@ -1540,7 +1544,11 @@ mod tests {
 
         let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS);
 
-        assert_eq!(melted, vec![(0, 0)], "猶予時間+溶解時間が経過すれば1個消えるはず");
+        assert_eq!(
+            melted,
+            vec![((0, 0), Cell::Star { visible_ms: STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS })],
+            "猶予時間+溶解時間が経過すれば1個消えるはず"
+        );
         assert_eq!(board.cell(0, 0), Cell::Empty, "溶け切ったスターは消えているはず");
     }
 
