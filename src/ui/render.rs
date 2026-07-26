@@ -1200,14 +1200,7 @@ fn draw_logical_cell(
             colors::OXYGEN_FG,
             colors::OXYGEN_BG,
         ),
-        BoardCell::Diamond => draw_fixed_unit(
-            buf,
-            x,
-            y,
-            [['◆', '◆'], ['◆', '◆']],
-            colors::DIAMOND_FG,
-            colors::DIAMOND_BG,
-        ),
+        BoardCell::Diamond => draw_diamond_block(buf, x, y, board, row, col),
         // スターブロックは氷の結晶のようにきらめかせる(TERM独自拡張。#134。ユーザー
         // 指摘: 「スター化したブロックはもっとキラキラしたモーションしてほしい
         // 本当に氷見たく いまのままだとただの白い正方形だ」)。#128/#132と同じく
@@ -1351,6 +1344,14 @@ fn conn_mask_rock(board: &Board, row: usize, col: usize) -> ConnMask {
     })
 }
 
+/// ダイヤブロック用の接続判定(TERM独自拡張。#141。ユーザー指摘: 「ダイヤブロック
+/// の見た目を岩ボコのような形状にして」)。岩ブロックと同じく、隣接するダイヤ
+/// ブロック同士の境界を消して1つの塊(ゴツゴツした岩のような連続した形状)に
+/// 見えるようにする。
+fn conn_mask_diamond(board: &Board, row: usize, col: usize) -> ConnMask {
+    conn_mask_by(board, row, col, |cell| matches!(cell, BoardCell::Diamond))
+}
+
 fn draw_color_block(
     buf: &mut Buffer,
     x: u16,
@@ -1407,35 +1408,13 @@ fn put_edge(buf: &mut Buffer, x: u16, y: u16, connected: bool, fg: Color, bg: Co
 
 // --- 9.4 岩・酸素・ダイヤブロックの描画 ---
 
-/// 岩・酸素・ダイヤ共通: 常に4方向とも非接続(=フルに縁取られた独立ユニット)として描く。
-/// 角は丸罫線、辺の位置(中央2列×2行)には種類ごとの記号を敷き詰める(spec.md 9.4)。
-fn draw_fixed_unit(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    content: [[char; 2]; 2],
-    fg: Color,
-    bg: Color,
-) {
-    put(buf, x, y, '╭', fg, bg);
-    put(buf, x + 3, y, '╮', fg, bg);
-    put(buf, x, y + 1, '╰', fg, bg);
-    put(buf, x + 3, y + 1, '╯', fg, bg);
-
-    put(buf, x + 1, y, content[0][0], fg, bg);
-    put(buf, x + 2, y, content[0][1], fg, bg);
-    put(buf, x + 1, y + 1, content[1][0], fg, bg);
-    put(buf, x + 2, y + 1, content[1][1], fg, bg);
-}
-
 /// AIR・アイテムブロック共通の描画(TERM独自拡張。#106/#128/#132。ユーザー指摘:
 /// 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」「C/R/Kアイテムも
-/// アイテムっぽい形状に変えよう」)。`draw_fixed_unit`は角に丸罫線の"glyph"を
-/// 乗せるだけでセル自体の背景は正方形のまま塗りつぶすため、依然として正方形に
-/// 見えてしまう。ここでは四隅のセルを四分割ブロック文字(`▘▝▖▗`)でフィールド
-/// 背景色(`FIELD_EMPTY_BG`)側に3/4欠き取り、実際に輪郭が斜めに丸まったシルエット
-/// (八角形状)になるようにする。中央2列×2行の`content`は呼び出し側で種類ごとに
-/// 変える。
+/// アイテムっぽい形状に変えよう」)。角に丸罫線の"glyph"を乗せるだけでセル自体の
+/// 背景は正方形のまま塗りつぶす描画だと、依然として正方形に見えてしまう。ここでは
+/// 四隅のセルを四分割ブロック文字(`▘▝▖▗`)でフィールド背景色(`FIELD_EMPTY_BG`)側に
+/// 3/4欠き取り、実際に輪郭が斜めに丸まったシルエット(八角形状)になるようにする。
+/// 中央2列×2行の`content`は呼び出し側で種類ごとに変える。
 fn draw_rounded_unit(buf: &mut Buffer, x: u16, y: u16, content: [[char; 2]; 2], fg: Color, bg: Color) {
     let field_bg = colors::FIELD_EMPTY_BG;
     // 各隅セルは、外向きの角(=フィールド側)を`field_bg`、内向きの1/4だけを`bg`
@@ -1488,6 +1467,28 @@ fn draw_rock_block(
     put(buf, x + 2, y, glyphs[0][1], fg, bg);
     put(buf, x + 1, y + 1, glyphs[1][0], fg, bg);
     put(buf, x + 2, y + 1, glyphs[1][1], fg, bg);
+}
+
+/// ダイヤブロックの描画(TERM独自拡張。#141。ユーザー指摘: 「ダイヤブロックの
+/// 見た目を岩ボコのような形状にして」)。以前は`draw_fixed_unit`で常に単独の
+/// 角丸ボックスとして描いていたため、隣接していても1個ずつ独立した箱の並びに
+/// しか見えなかった。岩ブロック(`draw_rock_block`)と同じ接続判定
+/// (`conn_mask_diamond`)を使い、隣接するダイヤブロック同士の境界を消すことで、
+/// ゴツゴツした岩の塊のような連続した形状になるようにする。
+fn draw_diamond_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize) {
+    let mask = conn_mask_diamond(board, row, col);
+    let bg = colors::DIAMOND_BG;
+    let fg = colors::DIAMOND_FG;
+
+    put_corner(buf, x, y, mask.up, mask.left, '╭', fg, bg);
+    put_corner(buf, x + 3, y, mask.up, mask.right, '╮', fg, bg);
+    put_corner(buf, x, y + 1, mask.down, mask.left, '╰', fg, bg);
+    put_corner(buf, x + 3, y + 1, mask.down, mask.right, '╯', fg, bg);
+
+    put(buf, x + 1, y, '◆', fg, bg);
+    put(buf, x + 2, y, '◆', fg, bg);
+    put(buf, x + 1, y + 1, '◆', fg, bg);
+    put(buf, x + 2, y + 1, '◆', fg, bg);
 }
 
 // --- 9.5 プレイヤースプライト ---
@@ -2235,6 +2236,47 @@ mod tests {
         draw_color_block(&mut buf, 0, 0, &board, 1, 0, ColorKind::Red);
 
         // 右隣が別色のため、右側の角は罫線(丸み)のままで空白にはならない。
+        assert_eq!(buf.cell(Position::new(3, 0)).unwrap().symbol(), "╮");
+        assert_eq!(buf.cell(Position::new(3, 1)).unwrap().symbol(), "╯");
+    }
+
+    #[test]
+    fn horizontally_connected_diamond_cells_form_one_unbroken_border_without_a_seam() {
+        // ユーザー指摘: 「ダイヤブロックの見た目を岩ボコのような形状にして」(#141)。
+        // 岩ブロック・色ブロックと同じく、隣接するダイヤブロック同士は境界を消して
+        // 1つの塊に見えるようにする。継ぎ目に縦線'│'が入って区切られないことを
+        // 確認する。
+        let mut board = board_with(3);
+        board.rows[1][0] = BoardCell::Diamond;
+        board.rows[1][1] = BoardCell::Diamond;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 2));
+
+        draw_diamond_block(&mut buf, 0, 0, &board, 1, 0);
+        draw_diamond_block(&mut buf, 4, 0, &board, 1, 1);
+
+        for y in [0u16, 1] {
+            for x in [3u16, 4] {
+                let symbol = buf.cell(Position::new(x, y)).unwrap().symbol();
+                assert_eq!(
+                    symbol, "─",
+                    "継ぎ目(x={x},y={y})は縦線で区切られず、横線で繋がっているはず"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn horizontally_isolated_diamond_cell_keeps_its_border() {
+        // ユーザー指摘: 「ダイヤブロックの見た目を岩ボコのような形状にして」(#141)。
+        // 隣がダイヤブロックでなければ(#141以前と同じく)角の丸みが残ることを
+        // 確認する。
+        let mut board = board_with(3);
+        board.rows[1][0] = BoardCell::Diamond;
+        board.rows[1][1] = BoardCell::Rock { hits: 0 }; // ダイヤではないので接続しない
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 2));
+
+        draw_diamond_block(&mut buf, 0, 0, &board, 1, 0);
+
         assert_eq!(buf.cell(Position::new(3, 0)).unwrap().symbol(), "╮");
         assert_eq!(buf.cell(Position::new(3, 1)).unwrap().symbol(), "╯");
     }
