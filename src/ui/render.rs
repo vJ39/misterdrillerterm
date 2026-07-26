@@ -606,7 +606,12 @@ fn draw_falling_blocks(
         if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
             continue; // 補間の一時的なはみ出しは描画をスキップする
         }
-        fill_block(buf, x, y, natural_cell_bg(cell));
+        // 落下中も静止時と同じグリフ模様(色ブロックの接続罫線・岩のXマーク・
+        // ダイヤ/スター等の固定グリフ)で描画する(TERM独自拡張。ユーザー指摘:
+        // 「落下アニメーションで模様が消えて、色味だけでしか認識できない」
+        // 「あいまいな物体が落ちているように見える」)。接続罫線の判定は着地先
+        // (to_row, to_col)時点の盤面を基準にする(その時点で既に確定している)。
+        draw_logical_cell(buf, x, y, &game.board, to_row, to_col, cell);
     }
 }
 
@@ -1091,6 +1096,35 @@ mod tests {
         Board {
             rows: vec![[BoardCell::Empty; FIELD_WIDTH]; rows],
         }
+    }
+
+    #[test]
+    fn falling_diamond_still_shows_its_glyph_not_just_a_flat_fill() {
+        // ユーザー指摘: 「落下アニメーションで模様が消えて、色味だけでしか認識できない」
+        // 「あいまいな物体が落ちているように見える」。落下中も静止時と同じグリフ
+        // (ダイヤなら◆)で描画されることを確認する。
+        let mut game = Game::new(1);
+        for row in game.board.rows.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = BoardCell::Empty;
+            }
+        }
+        game.player.row = 1;
+        game.player.col = 5;
+        game.board.rows[0][3] = BoardCell::Diamond;
+
+        let tick = (crate::constants::SHAKE_TICKS as u64 + 1) * crate::constants::FALL_TICK_MS + 10;
+        game.update(std::time::Duration::from_millis(tick));
+
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+        assert!(!moved_map.is_empty(), "ダイヤが落下しているはず");
+
+        let inner = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(inner);
+        draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
+
+        let has_diamond_glyph = buf.content.iter().any(|cell| cell.symbol() == "◆");
+        assert!(has_diamond_glyph, "落下中もダイヤの◆グリフが描画されているはず");
     }
 
     // --- 設定画面のカーソル移動(TERM独自拡張) ---
