@@ -2058,6 +2058,36 @@ mod tests {
     }
 
     #[test]
+    fn title_screen_art_to_text_height_ratio_approximates_the_golden_ratio() {
+        // ユーザー指摘: 「スプラッシュの構成を黄金比に」(#129。アート:ロゴ/案内文の
+        // 高さ比を黄金比にする、と明示的に確認済み)。アート解像度を優先してきた
+        // #124/#127の方針より構成比を優先する選択のため、比率がずれたら回帰で
+        // 気づけるようにする。
+        const GOLDEN_RATIO: f32 = 1.618_034;
+        const TOLERANCE: f32 = 0.15;
+
+        let canvas = intro::build_canvas();
+        let art_rows = canvas.to_lines(TITLE_ART_SCALE).len() as f32;
+
+        let mut text_lines = build_title_logo_lines().to_vec();
+        text_lines.extend([
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+        ]);
+        let text_rows = text_lines.len() as f32;
+
+        let ratio = art_rows / text_rows;
+        assert!(
+            (ratio - GOLDEN_RATIO).abs() < TOLERANCE,
+            "アート:テキストの高さ比が黄金比から外れている\
+             (比率={ratio}、art_rows={art_rows}、text_rows={text_rows})"
+        );
+    }
+
+    #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // ユーザー指摘: 「設定画面から時間要素の細かいものが結構消えてるぞ」。設定項目が
         // 増えるたびに枠の高さが実際の内容行数を収められているか回帰確認する
