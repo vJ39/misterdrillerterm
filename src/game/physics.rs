@@ -228,11 +228,15 @@ fn is_overhead_unstable(board: &Board, gravity: &GravityState, target: (usize, u
 /// 押し潰される(TERM独自拡張。ユーザー指摘: 「落下中のブロックは掘れない(つぶされる)。
 /// 結合して止まってるブロックが上にあるときは掘れる」「ぐらぐら中は、上に掘ったら掘れる」)。
 ///
-/// 掘削キーを挟んだ場合は、Left/Rightの2ステップ段差登り(move_lateral)における
-/// 「ぶつかって停止中」の状態をリセットする(spec.md 1章、TERM独自拡張)。
+/// Left/Rightの2ステップ段差登り(move_lateral)における「ぶつかって停止中」の状態
+/// (`player.bumped_direction`)はここでは変更しない(TERM独自拡張)。カーソルキーを
+/// 押しっぱなしにしながらZ/Xキー(掘削)も同時に押すと、段差登りの2回目の入力を
+/// 待っている最中にこの状態が失われ、登りかけていた段差がキャンセルされたように
+/// 見えるバグがあったため(ユーザー指摘: 「カーソル押しっぱなしのときにzやx押すと
+/// 進むのをキャンセルしてしまう」)、掘削では触らないようにした。段差登りの判定
+/// (`move_lateral`)自体は呼び出し時点の盤面を都度見て判定するため、掘削を挟んでも
+/// 誤って段差を登ってしまうことはない。
 pub fn drill_facing(board: &mut Board, player: &mut Player, gravity: &GravityState) -> DrillOutcome {
-    player.bumped_direction = None;
-
     let (dr, dc) = player.facing.delta();
     let nr = player.row as isize + dr;
     let nc = player.col as isize + dc;
@@ -606,16 +610,19 @@ mod tests {
     // --- Drill(Space): 移動せず掘削、facing=Downの時だけ降下 ---
 
     #[test]
-    fn drill_facing_resets_the_bumped_direction() {
-        // 掘削キーを挟んだ場合は、Left/Rightの「ぶつかって停止中」の状態をリセットして
-        // よい(実装者判断、spec.md 1章のTERM独自拡張)。
+    fn drill_facing_does_not_reset_the_bumped_direction() {
+        // ユーザー指摘: 「カーソル押しっぱなしのときにzやx押すと進むのをキャンセル
+        // してしまう」。段差登りの2回目の入力を待っている間に掘削キーが押されても、
+        // 「ぶつかって停止中」の状態(player.bumped_direction)は保持されたままになる
+        // (以前は掘削のたびにリセットしており、これが原因でキャンセルされたように
+        // 見えていた)。
         let mut board = empty_board(3);
         let mut player = Player::new();
         player.bumped_direction = Some(Direction::Right);
 
         drill_facing(&mut board, &mut player, &GravityState::new());
 
-        assert_eq!(player.bumped_direction, None);
+        assert_eq!(player.bumped_direction, Some(Direction::Right));
     }
 
     #[test]

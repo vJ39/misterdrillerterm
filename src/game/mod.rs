@@ -1416,6 +1416,37 @@ mod tests {
     }
 
     #[test]
+    fn drilling_between_bump_and_second_press_does_not_cancel_the_pending_climb() {
+        // ユーザー指摘: 「カーソル押しっぱなしのときにzやx押すと進むのをキャンセル
+        // してしまう」。1回目のぶつかり(bumped_direction記憶)と2回目の同方向入力
+        // (段差登り)の間に掘削キー(Z/X)が挟まっても、段差登りがキャンセルされない
+        // ことを確認する。
+        let mut game = Game::new(6);
+        game.player.row = 1;
+        let target_col = game.player.col + 1;
+        game.board.rows[game.player.row][target_col] = Cell::Rock { hits: 0 }; // 1発では壊れない
+        // row 0(1段上)は生成上つねにEmpty(安全地帯、spec.md 3.2)
+
+        game.try_move_right(); // 1回目: ぶつかって停止
+        assert_eq!(game.player.bumped_direction, Some(Direction::Right));
+
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        game.try_drill(); // 間に掘削キーを挟む(岩は1発では壊れず残る)
+        assert_eq!(
+            game.player.bumped_direction,
+            Some(Direction::Right),
+            "掘削を挟んでもぶつかり状態は保持されるはず"
+        );
+
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        game.try_move_right(); // 2回目: 同じ方向への再入力で登る
+
+        assert_eq!(game.player.row, 0, "掘削を挟んでも段差登りがキャンセルされてはいけない");
+        assert_eq!(game.player.col, target_col);
+    }
+
+    #[test]
     fn move_left_never_drills_and_climbs_over_a_blocking_color_block_on_second_press() {
         // move_right版と左右対称の確認(Gameの公開API try_move_leftを経由した統合テスト)。
         let mut game = Game::new(60);
