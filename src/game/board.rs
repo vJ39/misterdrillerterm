@@ -1453,6 +1453,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deep_rock_clustering_does_not_fill_the_whole_field_at_default_settings() {
+        // ユーザー報告(スクリーンショット2枚、深度620m・831m): 岩の塊化ボーナスが
+        // 強すぎて画面のほぼ全域が岩で埋め尽くされ、経路が実質的に塞がれていた
+        // (「絶対無理」)。既定設定(rock_rate_percent=100%)の最深帯でも、岩マスの
+        // 割合が画面全体を覆ってしまわないことを統計的に確認する。
+        //
+        // reroll_overlays_from_rowは呼び出しごとに新しい乱数系列を使う(再現性を
+        // 求めない設計)ため、1回きりの試行では閾値ぎりぎりでたまたま通ってしまう
+        // (またはたまたま落ちる)ことがある。複数回試行した平均で判定し、統計的な
+        // ふらつきに左右されない検証にする。
+        fn rock_fraction_in_deepest_band() -> f64 {
+            let mut board = empty_board(1000);
+            for row in 0..1000 {
+                for col in 0..FIELD_WIDTH {
+                    board.rows[row][col] = Cell::Color(ColorKind::Red);
+                }
+            }
+            board.reroll_overlays_from_row(0, 100, 100, 0, 100, 4, 100, &GravityState::new());
+
+            let mut rock_cells = 0usize;
+            let mut total_cells = 0usize;
+            for row in 800..1000 {
+                for col in 0..FIELD_WIDTH {
+                    total_cells += 1;
+                    if matches!(board.cell(row, col), Cell::Rock { .. }) {
+                        rock_cells += 1;
+                    }
+                }
+            }
+            rock_cells as f64 / total_cells as f64
+        }
+
+        const TRIALS: usize = 20;
+        let avg_fraction: f64 = (0..TRIALS).map(|_| rock_fraction_in_deepest_band()).sum::<f64>() / TRIALS as f64;
+        assert!(
+            avg_fraction < 0.45,
+            "最深帯の岩マス比率(平均)が高すぎて画面全体が岩で埋まっている疑いがある: {avg_fraction:.3}"
+        );
+    }
+
     // --- 横一列が岩ブロックで完全に埋まる配置の禁止(TERM独自拡張) ---
 
     #[test]
