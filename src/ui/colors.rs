@@ -102,13 +102,16 @@ pub const ITEM_UNIFY_COLORS_FG: Color = Color::Rgb(230, 255, 250);
 pub const ITEM_STARIFY_SCREEN_BG: Color = Color::Rgb(80, 70, 130);
 pub const ITEM_STARIFY_SCREEN_FG: Color = Color::Rgb(255, 215, 120);
 
-/// ボム(TERM独自拡張。#96)の前景色。
-pub const BOMB_FG: Color = Color::Rgb(20, 20, 20);
-/// ボムの背景色(点滅の暗い方)。
-pub const BOMB_BG_DIM: Color = Color::Rgb(120, 30, 30);
-/// ボムの背景色(点滅の明るい方)。起爆が近づくほど点滅を速める(既存の「揺れ」
+/// ボムの丸い本体の色(TERM独自拡張。#96/#125。ユーザー指摘: 「ボムは、丸い
+/// 「いかにもな」爆弾の形状しておいてほしい」)。他のブロックと違い塗りつぶした
+/// 背景ではなく、プレイヤー/白ボンと同じくキャラクタースプライトとして描く
+/// (本体自体は点滅しない、常に一定の色)。
+pub const BOMB_BODY_FG: Color = Color::Rgb(50, 50, 50);
+/// 導火線の火花の色(点滅の暗い方)。
+pub const BOMB_SPARK_DIM: Color = Color::Rgb(200, 120, 40);
+/// 導火線の火花の色(点滅の明るい方)。起爆が近づくほど点滅を速める(既存の「揺れ」
 /// 「スター点滅」と同じく、爆発前に必ず視覚的な予兆を出す設計方針)。
-pub const BOMB_BG_BRIGHT: Color = Color::Rgb(255, 60, 40);
+pub const BOMB_SPARK_BRIGHT: Color = Color::Rgb(255, 220, 60);
 
 /// 白ボン(TERM独自拡張。#123)の前景色。名前の通り白系にする。
 pub const SHIROBON_FG: Color = Color::Rgb(240, 240, 240);

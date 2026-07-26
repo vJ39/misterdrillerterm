@@ -832,61 +832,83 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     draw_player(buf, inner, top_row, game);
 }
 
-/// ボム(TERM独自拡張。#96/#123)を盤面の上に重ねて描画する。ブロックとは別レイヤーの
-/// オブジェクトなので、通常のセル描画ループとは独立してここで扱う。段階(`BombPhase`)に
-/// 応じて、白ボンの登場(Entering)→ボムが転がってくる(Rolling)→設置されて点滅
-/// カウントダウン(Ticking)の3段階を描き分ける(ユーザー指摘: 「白ボンが画面の外から
-/// とことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...ってなって、
-/// 爆発する」)。起爆が近づくほど点滅を速める(既存の「揺れ」「スター点滅」と同じ、
-/// 爆発前に必ず視覚的な予兆を出す設計方針)。
+/// ボム(TERM独自拡張。#96/#123/#125)を盤面の上に重ねて描画する。ブロックとは別
+/// レイヤーのオブジェクトなので、通常のセル描画ループとは独立してここで扱う。段階
+/// (`BombPhase`)に応じて、白ボンの登場(Entering)→ボムが転がってくる(Rolling)→
+/// 設置されて点滅カウントダウン(Ticking)の3段階を描き分ける(ユーザー指摘: 「白ボンが
+/// 画面の外からとことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...
+/// ってなって、爆発する」)。白ボンはボムより1行上に表示する(ユーザー指摘: 「爆弾は
+/// キャラよりも下側にも配置されるようにしてほしい」)。起爆が近づくほど導火線の火花の
+/// 点滅を速める(既存の「揺れ」「スター点滅」と同じ、爆発前に必ず視覚的な予兆を
+/// 出す設計方針)。
 fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize, game: &Game) {
     for bomb in game.bombs() {
-        // originとposは常に同じ行(TERM独自拡張。#123)。
-        let row = bomb.pos.0;
-        if row < top_row {
-            continue;
-        }
-        let screen_row = row - top_row;
-        if screen_row >= visible_rows {
-            continue;
-        }
-        let y = inner.y + screen_row as u16 * CELL_H;
+        // originとposは常に同じ行(TERM独自拡張。#123)で、ボム自体はその行に描く。
+        // 白ボンはユーザー指摘により1行上に表示する。
+        let bomb_row = bomb.pos.0;
+        let shirobon_row = bomb_row.saturating_sub(1);
 
         match bomb.phase {
             BombPhase::Entering => {
-                let x = inner.x + bomb.origin.1 as u16 * CELL_W;
-                if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+                let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, shirobon_row, bomb.origin.1) else {
                     continue;
-                }
+                };
                 draw_shirobon_sprite(buf, x, y);
             }
             BombPhase::Rolling => {
                 let t = (bomb.phase_elapsed_ms as f32 / BOMB_ROLL_MS as f32).clamp(0.0, 1.0);
                 let col = bomb.origin.1 as f32 + (bomb.pos.1 as f32 - bomb.origin.1 as f32) * t;
-                let px = inner.x as f32 + col * CELL_W as f32;
-                if px < inner.x as f32 {
+                let Some((x, y)) = cell_screen_pos_f32(inner, top_row, visible_rows, bomb_row, col) else {
                     continue;
-                }
-                let x = px.round() as u16;
-                if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
-                    continue;
-                }
-                draw_fixed_unit(buf, x, y, [['*', '*'], ['B', 'B']], colors::BOMB_FG, colors::BOMB_BG_DIM);
+                };
+                draw_bomb_sprite(buf, x, y, colors::BOMB_SPARK_DIM);
             }
             BombPhase::Ticking => {
-                let x = inner.x + bomb.pos.1 as u16 * CELL_W;
-                if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+                let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1) else {
                     continue;
-                }
-                let bg = if bomb_is_bright_frame(bomb.remaining_ms) {
-                    colors::BOMB_BG_BRIGHT
-                } else {
-                    colors::BOMB_BG_DIM
                 };
-                draw_fixed_unit(buf, x, y, [['*', '*'], ['B', 'B']], colors::BOMB_FG, bg);
+                let spark = if bomb_is_bright_frame(bomb.remaining_ms) {
+                    colors::BOMB_SPARK_BRIGHT
+                } else {
+                    colors::BOMB_SPARK_DIM
+                };
+                draw_bomb_sprite(buf, x, y, spark);
             }
         }
     }
+}
+
+/// フィールド内の論理セル位置(行・列)を、現在のスクロール位置(`top_row`)・
+/// 可視行数を踏まえて画面座標(x, y)へ変換する(TERM独自拡張。#125)。範囲外なら`None`。
+fn cell_screen_pos(inner: Rect, top_row: usize, visible_rows: usize, row: usize, col: usize) -> Option<(u16, u16)> {
+    cell_screen_pos_f32(inner, top_row, visible_rows, row, col as f32)
+}
+
+/// `cell_screen_pos`の列位置を小数(補間中の途中位置)で受け取る版(TERM独自拡張。#125)。
+fn cell_screen_pos_f32(
+    inner: Rect,
+    top_row: usize,
+    visible_rows: usize,
+    row: usize,
+    col: f32,
+) -> Option<(u16, u16)> {
+    if row < top_row {
+        return None;
+    }
+    let screen_row = row - top_row;
+    if screen_row >= visible_rows || col < 0.0 {
+        return None;
+    }
+    let y = inner.y + screen_row as u16 * CELL_H;
+    let x = inner.x as f32 + col * CELL_W as f32;
+    if x < inner.x as f32 {
+        return None;
+    }
+    let x = x.round() as u16;
+    if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
+        return None;
+    }
+    Some((x, y))
 }
 
 /// 白ボンのスプライト(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
@@ -897,6 +919,20 @@ fn draw_shirobon_sprite(buf: &mut Buffer, x: u16, y: u16) {
             put(buf, x + dx as u16, y + dy as u16, ch, colors::SHIROBON_FG, colors::FIELD_EMPTY_BG);
         }
     }
+}
+
+/// ボム本体のスプライト(TERM独自拡張。#96/#125。ユーザー指摘: 「ボムは、丸い
+/// 「いかにもな」爆弾の形状しておいてほしい」)。上段に導火線の火花(`spark_color`、
+/// 起爆が近づくほど点滅が速まる)、下段に丸い本体を描く。本体自体は点滅しない。
+fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, spark_color: Color) {
+    put(buf, x, y, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+    put(buf, x + 1, y, '\'', spark_color, colors::FIELD_EMPTY_BG);
+    put(buf, x + 2, y, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+    put(buf, x + 3, y, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+    put(buf, x, y + 1, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+    put(buf, x + 1, y + 1, '●', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+    put(buf, x + 2, y + 1, '●', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+    put(buf, x + 3, y + 1, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
 }
 
 /// ボムの点滅が「明るい方」の周期かどうか(TERM独自拡張。#96)。残り時間が
