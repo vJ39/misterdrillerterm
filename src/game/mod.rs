@@ -118,9 +118,17 @@ pub enum GameEvent {
     DrillImpact,
     /// 岩ブロックへヒットしたが、まだ破壊に至らない(spec.md 10章「岩ブロックヒット音」)
     RockHitIntact,
-    /// ブロックが消滅した(直接掘削消滅・自動消滅・岩の5回目破壊のいずれも。
-    /// spec.md 10章「破壊音」)。消滅したブロック数を伴う
+    /// ブロックが消滅した(色ブロックの直接掘削消滅・自動消滅・スター消滅のいずれも。
+    /// spec.md 10章「破壊音」)。消滅したブロック数を伴う。岩ブロックの消滅は専用の
+    /// `RockDestroyed`を使う(TERM独自拡張。ユーザー指摘: 「Xブロックを壊したときに
+    /// 専用SEを鳴らす」)
     BlockDestroyed { blocks: usize },
+    /// 岩ブロック(Xブロック)が消滅した(直接掘削の5回目破壊・自動消滅のいずれも。
+    /// TERM独自拡張)。消滅したブロック数を伴う
+    RockDestroyed { blocks: usize },
+    /// ヒヤリ回避スライダー演出が発動した瞬間(TERM独自拡張。ユーザー指摘:
+    /// 「キャラがスライディングした瞬間...専用SEを鳴らす」)
+    DodgeTriggered,
     /// 酸素カプセルを取得した
     OxygenCollected,
     /// ダイヤブロックを取得した
@@ -442,7 +450,7 @@ impl Game {
             }
             DrillOutcome::RockDestroyed { blocks } => {
                 events.push(GameEvent::DrillImpact);
-                events.push(GameEvent::BlockDestroyed { blocks });
+                events.push(GameEvent::RockDestroyed { blocks });
                 self.check_oxygen_zero(events);
             }
             DrillOutcome::ColorDestroyed { blocks } => {
@@ -720,6 +728,7 @@ impl Game {
                 self.dodge_stage = DodgeStage::Sliding;
                 self.dodge_stage_remaining = Duration::from_millis(DODGE_SLIDE_MS);
                 self.dodge_watch_cell = None;
+                events.push(GameEvent::DodgeTriggered);
             }
 
             self.last_block_moves = result.moved_cells;
@@ -733,9 +742,10 @@ impl Game {
                 });
             }
             if result.auto_vanished_rock_blocks > 0 {
-                // 岩ブロックの自動消滅は得点対象外だが、破壊音は色ブロックと同様に鳴らす
-                // (spec.md 4.9・10章)。
-                events.push(GameEvent::BlockDestroyed {
+                // 岩ブロックの自動消滅は得点対象外だが、専用の破壊音を鳴らす
+                // (spec.md 4.9・10章。TERM独自拡張。ユーザー指摘: 「Xブロックを
+                // 壊したときに専用SEを鳴らす」)。
+                events.push(GameEvent::RockDestroyed {
                     blocks: result.auto_vanished_rock_blocks,
                 });
             }
@@ -1464,7 +1474,7 @@ mod tests {
         assert_eq!(game.player.row, target_row - 1, "掘っただけでは移動しない");
         assert!(events
             .iter()
-            .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 1 })));
+            .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 1 })));
 
         game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下で開いたマスへ進む
         assert_eq!(game.player.row, target_row, "自由落下で続けて1マス下降する");
@@ -1497,7 +1507,7 @@ mod tests {
         assert_eq!(game.player.score, 0, "岩ブロックの消滅は得点対象外");
         assert!(events
             .iter()
-            .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 1 })));
+            .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 1 })));
     }
 
     #[test]
@@ -1522,8 +1532,8 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 })),
-            "4個以上連結した岩ブロックの自動消滅でBlockDestroyedイベントが発生する"
+                .any(|e| matches!(e, GameEvent::RockDestroyed { blocks: 4 })),
+            "4個以上連結した岩ブロックの自動消滅でRockDestroyedイベントが発生する"
         );
         assert_eq!(game.board.cell(999, 0), Cell::Empty);
         assert_eq!(game.board.cell(999, 1), Cell::Empty);
@@ -2063,11 +2073,16 @@ mod tests {
         }
 
         assert!(!game.is_dodge_sliding(), "落下前はまだスライダー演出は発火していないはず");
-        game.update(Duration::from_millis(FALL_TICK_MS + 10)); // 揺れが明けて実際に落下するティック
+        let events = game.update(Duration::from_millis(FALL_TICK_MS + 10)); // 揺れが明けて実際に落下するティック
 
         assert!(game.is_dodge_sliding(), "旧位置へ実際に脅威だったブロックが着地したので発火するはず");
         assert_eq!(game.board.cell(5, 5), Cell::Color(ColorKind::Red), "ブロックは旧位置(5,5)へ着地しているはず");
         assert_eq!(game.status, GameStatus::Playing, "プレイヤー自身は無事なはず");
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::DodgeTriggered)),
+            "ユーザー指摘: 「キャラがスライディングした瞬間...専用SEを鳴らす」。発動と同時に\
+             GameEvent::DodgeTriggeredが発火するはず"
+        );
     }
 
     #[test]

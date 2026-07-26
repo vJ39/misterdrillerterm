@@ -600,6 +600,8 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::DrillImpact => audio::sfx::play_dig(mixer),
             GameEvent::RockHitIntact => audio::sfx::play_rock_hit(mixer),
             GameEvent::BlockDestroyed { blocks } => audio::sfx::play_destroy(mixer, *blocks),
+            GameEvent::RockDestroyed { blocks } => audio::sfx::play_rock_destroy(mixer, *blocks),
+            GameEvent::DodgeTriggered => audio::sfx::play_dodge(mixer),
             GameEvent::OxygenCollected => audio::sfx::play_oxygen_pickup(mixer),
             // ダイヤ取得の専用SEはspec.md 10章のSE一覧に定義が無いため無音(得点加算のみ)。
             GameEvent::DiamondCollected => {}

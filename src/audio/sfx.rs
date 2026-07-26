@@ -413,6 +413,32 @@ pub fn play_destroy(mixer: &Mixer, blocks: usize) {
     play_sequence(mixer, tones, SE_VOLUME);
 }
 
+/// 岩ブロック(Xブロック)破壊音: 色ブロックの破壊音より低く粗い「ゴツッ」という質感の
+/// 2音(TERM独自拡張。ユーザー指摘: 「Xブロックを壊したときに専用SEを鳴らす」)。
+/// `blocks`(消滅数)が4個増えるごとにもう1組追加し、`play_destroy`と同様に大量消滅時の
+/// 「たくさん消えてる」感を出す。
+pub fn play_rock_destroy(mixer: &Mixer, blocks: usize) {
+    let clunk_count = (blocks / 4 + 1).min(MAX_DESTROY_CHIRPS);
+    let tones: Vec<Box<dyn Source<Item = f32> + Send>> = (0..clunk_count)
+        .flat_map(|i| {
+            let start = 150.0 - i as f32 * 15.0;
+            [
+                Box::new(square_tone(start, 40, 0.5)) as Box<dyn Source<Item = f32> + Send>,
+                Box::new(square_tone(start * 0.6, 50, 0.5)) as Box<dyn Source<Item = f32> + Send>,
+            ]
+        })
+        .collect();
+    play_sequence(mixer, tones, SE_VOLUME);
+}
+
+/// ヒヤリ回避スライダー発動音: ブロックが落ち始める直前に間一髪回避した瞬間の「わ〜!」
+/// という驚きを表す、素早く上昇するチャープ(TERM独自拡張。ユーザー指摘: 「キャラが
+/// スライディングした瞬間...専用SEを鳴らす」)。他の効果音は全て下降チャープなので、
+/// 唯一の上昇チャープとして区別できるようにする。
+pub fn play_dodge(mixer: &Mixer) {
+    play_tone(mixer, square_chirp(300.0, 700.0, 80, 0.5), SE_VOLUME);
+}
+
 /// air取得音: 酸素カプセル取得時。矩形波2音 523Hz(60ms)→784Hz(60ms)。
 pub fn play_oxygen_pickup(mixer: &Mixer) {
     play_sequence(
