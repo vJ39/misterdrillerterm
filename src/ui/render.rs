@@ -843,15 +843,17 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     draw_player(buf, inner, top_row, game);
 }
 
-/// ボム(TERM独自拡張。#96/#123/#125)を盤面の上に重ねて描画する。ブロックとは別
-/// レイヤーのオブジェクトなので、通常のセル描画ループとは独立してここで扱う。段階
+/// ボム(TERM独自拡張。#96/#123/#125/#133)を盤面の上に重ねて描画する。ブロックとは
+/// 別レイヤーのオブジェクトなので、通常のセル描画ループとは独立してここで扱う。段階
 /// (`BombPhase`)に応じて、白ボンの登場(Entering)→ボムが転がってくる(Rolling)→
 /// 設置されて点滅カウントダウン(Ticking)の3段階を描き分ける(ユーザー指摘: 「白ボンが
 /// 画面の外からとことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...
 /// ってなって、爆発する」)。白ボンはボムより1行上に表示する(ユーザー指摘: 「爆弾は
 /// キャラよりも下側にも配置されるようにしてほしい」)。起爆が近づくほど導火線の火花の
 /// 点滅を速める(既存の「揺れ」「スター点滅」と同じ、爆発前に必ず視覚的な予兆を
-/// 出す設計方針)。
+/// 出す設計方針)。転がり中(Rolling)は横移動だけでなく`bomb_roll_is_bouncing_up`で
+/// 縦にも弾ませる(#133。ユーザー指摘: 「ぽーんぽーんぽんぽんころころ...って弾ませ
+/// ながらモーションがないと回転寿司みたいにすーって入ってきちゃ駄目」)。
 fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize, game: &Game) {
     for bomb in game.bombs() {
         // originとposは常に同じ行(TERM独自拡張。#123)で、ボム自体はその行に描く。
@@ -869,10 +871,15 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
             BombPhase::Rolling => {
                 let t = (bomb.phase_elapsed_ms as f32 / BOMB_ROLL_MS as f32).clamp(0.0, 1.0);
                 let col = bomb.origin.1 as f32 + (bomb.pos.1 as f32 - bomb.origin.1 as f32) * t;
-                let Some((x, y)) = cell_screen_pos_f32(inner, top_row, visible_rows, bomb_row, col) else {
+                let display_row = if bomb_roll_is_bouncing_up(t) {
+                    bomb_row.saturating_sub(1)
+                } else {
+                    bomb_row
+                };
+                let Some((x, y)) = cell_screen_pos_f32(inner, top_row, visible_rows, display_row, col) else {
                     continue;
                 };
-                draw_bomb_sprite(buf, x, y, colors::BOMB_SPARK_DIM);
+                draw_bomb_sprite(buf, x, y, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
             }
             BombPhase::Ticking => {
                 let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1) else {
@@ -883,7 +890,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 } else {
                     colors::BOMB_SPARK_DIM
                 };
-                draw_bomb_sprite(buf, x, y, spark);
+                draw_bomb_sprite(buf, x, y, spark, bomb.remaining_ms);
             }
         }
     }
@@ -932,18 +939,55 @@ fn draw_shirobon_sprite(buf: &mut Buffer, x: u16, y: u16) {
     }
 }
 
-/// ボム本体のスプライト(TERM独自拡張。#96/#125。ユーザー指摘: 「ボムは、丸い
-/// 「いかにもな」爆弾の形状しておいてほしい」)。上段に導火線の火花(`spark_color`、
-/// 起爆が近づくほど点滅が速まる)、下段に丸い本体を描く。本体自体は点滅しない。
-fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, spark_color: Color) {
-    put(buf, x, y, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
-    put(buf, x + 1, y, '\'', spark_color, colors::FIELD_EMPTY_BG);
-    put(buf, x + 2, y, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
-    put(buf, x + 3, y, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
-    put(buf, x, y + 1, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
-    put(buf, x + 1, y + 1, '●', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
-    put(buf, x + 2, y + 1, '●', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
-    put(buf, x + 3, y + 1, ' ', colors::BOMB_BODY_FG, colors::FIELD_EMPTY_BG);
+/// 転がり中(Rolling)の弾みの周期。区間を`BOMB_ROLL_BOUNCE_COUNT`回に分割し、
+/// 各区間の前半だけ1マス上へ跳ねさせる(TERM独自拡張。#133)。
+const BOMB_ROLL_BOUNCE_COUNT: u32 = 3;
+
+/// 進捗`t`(0.0=転がり開始、1.0=設置直前)の時点でボムが1マス上に跳ねている
+/// (=ジャンプ中)かどうか(TERM独自拡張。#133。ユーザー指摘: 「爆弾がぽーん
+/// ぽーんぽんぽんころころ...って弾ませながらモーションがないと回転寿司みたいに
+/// すーって入ってきちゃ駄目」)。横方向の線形移動しかしていなかった従来の
+/// 見た目(コンベア/回転寿司のようにすっと滑るだけ)を避けるため、縦方向にも
+/// 複数回の跳ねを加える。
+fn bomb_roll_is_bouncing_up(t: f32) -> bool {
+    let t = t.clamp(0.0, 1.0);
+    if t >= 1.0 {
+        return false;
+    }
+    let segment = 1.0 / BOMB_ROLL_BOUNCE_COUNT as f32;
+    let local = (t / segment).fract();
+    local < 0.5
+}
+
+/// 導火線の火花が「ちりちり」明滅する周期(TERM独自拡張。#130)。この時間ごとに
+/// 火花の位置・グリフを切り替え、単調な点滅でなく飛び散るような見た目にする。
+const BOMB_CRACKLE_FRAME_MS: u32 = 70;
+const BOMB_CRACKLE_GLYPHS: [char; 4] = ['\'', '`', '.', '*'];
+
+/// ボム本体のスプライト(TERM独自拡張。#96/#125/#130。ユーザー指摘: 「ボムは、丸い
+/// 「いかにもな」爆弾の形状しておいてほしい」「爆弾、背景と同化してるから、もっと
+/// 輪郭くっきり、火花ちりちりアニメーションさせて」)。以前は本体グリフの前景色に
+/// しか`BOMB_BODY_FG`を使わず、周囲はフィールド背景色のまま透過していたため、
+/// 暗い色同士で輪郭が背景に溶け込んで見えていた。セル全体を本体色で塗りつぶした
+/// 上に、明るい縁取り色(`BOMB_RIM_FG`)で丸い輪郭を描き、上段の導火線の火花は
+/// `crackle_ms`に応じて位置・グリフを切り替えてちりちりと弾けるようにする。
+fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, spark_color: Color, crackle_ms: u32) {
+    let body = colors::BOMB_BODY_FG;
+    let rim = colors::BOMB_RIM_FG;
+
+    let frame = (crackle_ms / BOMB_CRACKLE_FRAME_MS) as usize;
+    let spark_glyph = BOMB_CRACKLE_GLYPHS[frame % BOMB_CRACKLE_GLYPHS.len()];
+    let spark_on_left = frame.is_multiple_of(2);
+
+    put(buf, x, y, ' ', body, body);
+    put(buf, x + 1, y, if spark_on_left { spark_glyph } else { ' ' }, spark_color, body);
+    put(buf, x + 2, y, if spark_on_left { ' ' } else { spark_glyph }, spark_color, body);
+    put(buf, x + 3, y, ' ', body, body);
+
+    put(buf, x, y + 1, '(', rim, body);
+    put(buf, x + 1, y + 1, '●', rim, body);
+    put(buf, x + 2, y + 1, '●', rim, body);
+    put(buf, x + 3, y + 1, ')', rim, body);
 }
 
 /// ボムの点滅が「明るい方」の周期かどうか(TERM独自拡張。#96)。残り時間が
@@ -1672,6 +1716,55 @@ mod tests {
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS), '★');
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS * 2 - 1), '★');
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS * 2), '☆');
+    }
+
+    #[test]
+    fn bomb_roll_is_bouncing_up_hops_multiple_times_while_settling_by_the_end() {
+        // ユーザー指摘: 「爆弾がぽーんぽーんぽんぽんころころ...って弾ませながら
+        // モーションがないと回転寿司みたいにすーって入ってきちゃ駄目」。転がる
+        // 区間(t=0.0〜1.0)の間に複数回跳ね、設置直前(t=1.0)には必ず地面に
+        // 着地している(跳ねていない)ことを確認する。
+        assert!(bomb_roll_is_bouncing_up(0.0), "転がり始めは跳ねているはず");
+        assert!(!bomb_roll_is_bouncing_up(0.2), "1回目の跳ねの後半は着地しているはず");
+        assert!(
+            bomb_roll_is_bouncing_up(1.0 / BOMB_ROLL_BOUNCE_COUNT as f32),
+            "2回目の跳ねが始まるはず"
+        );
+        assert!(!bomb_roll_is_bouncing_up(1.0), "設置直前は必ず着地しているはず");
+        assert!(!bomb_roll_is_bouncing_up(0.999), "設置直前は着地に近いはず");
+    }
+
+    #[test]
+    fn draw_bomb_sprite_fills_the_whole_cell_with_body_color_not_just_the_glyphs() {
+        // ユーザー指摘: 「爆弾、背景と同化してるから、もっと輪郭くっきり」。以前は
+        // グリフ以外の部分がフィールド背景色のまま透過していたため、本体の輪郭が
+        // 背景に溶け込んで見えていた。セル全体の背景が本体色で塗りつぶされている
+        // ことを確認する。
+        let inner = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(inner);
+        draw_bomb_sprite(&mut buf, 0, 0, colors::BOMB_SPARK_DIM, 0);
+
+        for y in 0..2u16 {
+            for x in 0..4u16 {
+                let bg = buf.cell(Position::new(x, y)).unwrap().bg;
+                assert_eq!(bg, colors::BOMB_BODY_FG, "({x},{y})は本体色で塗りつぶされているはず");
+            }
+        }
+    }
+
+    #[test]
+    fn draw_bomb_sprite_crackle_alternates_the_spark_glyph_and_position_over_time() {
+        // ユーザー指摘: 「火花ちりちりアニメーションさせて」。異なる`crackle_ms`を
+        // 渡すと、火花の位置(左右どちらのマス)かグリフが変わることを確認する。
+        let inner = Rect::new(0, 0, 4, 2);
+        let mut buf_a = Buffer::empty(inner);
+        draw_bomb_sprite(&mut buf_a, 0, 0, colors::BOMB_SPARK_DIM, 0);
+        let mut buf_b = Buffer::empty(inner);
+        draw_bomb_sprite(&mut buf_b, 0, 0, colors::BOMB_SPARK_DIM, BOMB_CRACKLE_FRAME_MS);
+
+        let symbols_a: Vec<String> = (0..4).map(|x| buf_a.cell(Position::new(x, 0)).unwrap().symbol().to_string()).collect();
+        let symbols_b: Vec<String> = (0..4).map(|x| buf_b.cell(Position::new(x, 0)).unwrap().symbol().to_string()).collect();
+        assert_ne!(symbols_a, symbols_b, "crackle_msが進むと上段の見た目が変わるはず");
     }
 
     fn board_with(rows: usize) -> Board {
