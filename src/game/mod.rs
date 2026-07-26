@@ -540,14 +540,20 @@ impl Game {
     }
 
     /// プレイヤーの現在列を中心に左右1列ずつ(=3列分)、プレイヤーより浅い
-    /// (画面上で上にある)行を全てEmptyにする(TERM独自拡張)。
+    /// (画面上で上にある)行を全てEmptyにする(TERM独自拡張)。ただしAIR(酸素
+    /// カプセル)は消滅させずその場に残す(ユーザー指摘: 「キャラが死んだとき
+    /// (AIR不足/つぶされたとき)...AIRは消えずに上から落下してくるように」)。
+    /// 周囲がEmptyになれば通常の重力tickが未支持と判定して自然に落下させるため、
+    /// ここでは単に上書きを避けるだけでよい。
     fn clear_three_columns_above_player(&mut self) {
         let col = self.player.col;
         let col_start = col.saturating_sub(1);
         let col_end = (col + 1).min(FIELD_WIDTH - 1);
         for row in 0..self.player.row {
             for c in col_start..=col_end {
-                self.board.set(row, c, Cell::Empty);
+                if !matches!(self.board.cell(row, c), Cell::Oxygen) {
+                    self.board.set(row, c, Cell::Empty);
+                }
             }
         }
     }
@@ -992,14 +998,18 @@ impl Game {
         }
     }
 
-    /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中のみ有効。
+    /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中
+    /// のみ有効。AIR(酸素カプセル)は消滅させずその場に残す(ユーザー指摘: 「Xで
+    /// ブロック消したときAIRは消えずに上から落下してくるように」)。
     pub fn debug_clear_above_player(&mut self) {
         if self.status != GameStatus::Playing {
             return;
         }
         for row in 0..self.player.row {
             for col in 0..FIELD_WIDTH {
-                self.board.set(row, col, Cell::Empty);
+                if !matches!(self.board.cell(row, col), Cell::Oxygen) {
+                    self.board.set(row, col, Cell::Empty);
+                }
             }
         }
     }
@@ -1695,6 +1705,56 @@ mod tests {
         }
         assert_eq!(game.board.cell(999, 3), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
         assert_eq!(game.board.cell(999, 7), Cell::Color(ColorKind::Green), "対象外の列はクリアされない");
+    }
+
+    #[test]
+    fn crush_death_lets_oxygen_capsules_fall_instead_of_vanishing() {
+        // ユーザー指摘: 「キャラが死んだとき(AIR不足/つぶされたとき)...AIRは消えずに
+        // 上から落下してくるように」。3列クリアの範囲内にあったAIRは消滅させず、
+        // 周囲がEmptyになった結果、通常の重力で自然に落下することを確認する。
+        let mut game = Game::new_with_lives(70, 2); // ライフ2、押し潰されても即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし(押し潰す)
+        game.board.rows[990][5] = Cell::Oxygen; // クリア範囲内のAIR(支えなし、押し潰しと並行して自然落下もする)
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        assert_eq!(game.player.lives, 1, "演出完了でライフが減っているはず");
+
+        // クリア直後、AIRは消滅していない(盤面のどこかにCell::Oxygenとして残っている)。
+        let oxygen_count = |game: &Game| game.board.rows.iter().flatten().filter(|c| **c == Cell::Oxygen).count();
+        assert_eq!(oxygen_count(&game), 1, "3列クリアされてもAIRは消滅せず盤面に残っているはず");
+
+        // その後の重力tickでAIRが自然に落下し、最終的に押し潰したブロックの真上
+        // (プレイヤーの真上、998行目)に着地する。
+        let mut settled = false;
+        for _ in 0..2000 {
+            game.update(Duration::from_millis(FALL_TICK_MS));
+            if game.board.cell(998, 5) == Cell::Oxygen {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "AIRは消えずに落下し、押し潰したブロックの上に着地するはず");
+        assert_eq!(oxygen_count(&game), 1, "落下完了後もAIRは1個のまま消滅していないはず");
+    }
+
+    #[test]
+    fn debug_clear_above_player_leaves_oxygen_capsules_in_place_to_fall_naturally() {
+        // ユーザー指摘: 「Xでブロック消したときAIRは消えずに上から落下してくるように」。
+        let mut game = Game::new(71);
+        clear_board(&mut game);
+        game.player.row = 50;
+        game.player.col = 5;
+        game.board.rows[10][5] = Cell::Oxygen;
+        game.board.rows[10][6] = Cell::Rock { hits: 2 }; // 比較用: AIR以外は通常通り消える
+
+        game.debug_clear_above_player();
+
+        assert_eq!(game.board.cell(10, 5), Cell::Oxygen, "AIRは消えずに残るはず");
+        assert_eq!(game.board.cell(10, 6), Cell::Empty, "AIR以外は通常通り消えるはず");
     }
 
     #[test]
