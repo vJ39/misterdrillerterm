@@ -620,12 +620,19 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
     }
 
     let px = inner.x as f32 + interp_col * CELL_W as f32;
-    let py = inner.y as f32 + screen_row * CELL_H as f32;
+    // 「天に召される」演出中(TERM独自拡張)は、進捗に応じてスプライトを上へ
+    // ドリフトさせる(ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、
+    // 一度天に召される演出をして」)。
+    let ascend_offset = game.ascend_progress() * ASCEND_RISE_CELLS * CELL_H as f32;
+    let py = inner.y as f32 + screen_row * CELL_H as f32 - ascend_offset;
     if px < 0.0 || py < 0.0 {
         return;
     }
     let x = px.round() as u16;
     let y = py.round() as u16;
+    if y < inner.y {
+        return; // 天に召される演出で上端より高く昇った分は描画しない(そのまま見えなくなる)
+    }
     if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
         return; // 補間の一時的なはみ出しは描画をスキップする(クラッシュ防止)
     }
@@ -643,6 +650,9 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
         draw_player_sprite(buf, x, y, game.player.facing, bg);
     }
 }
+
+/// 「天に召される」演出でスプライトが上へ昇る距離(論理セル単位、TERM独自拡張)。
+const ASCEND_RISE_CELLS: f32 = 2.0;
 
 /// 1論理セルぶん(4文字×2行)を描画する。
 fn draw_logical_cell(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize, cell: BoardCell) {

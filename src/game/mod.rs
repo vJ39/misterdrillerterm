@@ -11,7 +11,7 @@ pub mod player;
 use std::time::Duration;
 
 use crate::constants::{
-    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
     DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
     DEBUG_UNIFY_COLORS_RANGE_ROWS, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_MS,
     INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS, OXYGEN_WARNING_THRESHOLD,
@@ -158,6 +158,13 @@ pub struct Game {
     /// 押し潰しミス発生時、残りこれだけの間「潰れた」見た目を表示し続ける
     /// (0になったらGameOverオーバーレイの表示を許す。TERM独自拡張、9章)。
     crush_flash_remaining: Duration,
+    /// 押し潰されてもライフが残っている場合、「天に召される」演出の残り時間
+    /// (TERM独自拡張)。`Some`の間はゲームプレイ全体(重力・自由落下・酸素減少・入力)
+    /// を凍結し、0になった時点で死亡地点の3列クリア・ライフ減算・酸素回復をまとめて
+    /// 行いその場に復活する(ユーザー指摘: 「潰れたとき、もっとわかりやすいように
+    /// 死んで、一度天に召される演出をして、ブロックが消える処理されてから、元の位置に
+    /// 復活」)。ライフが0になる場合はこの演出を行わず、即座にGameOverへ進む。
+    ascending_remaining: Option<Duration>,
     /// 描画専用: プレイヤーの直前の論理位置(移動の見た目補間アニメーション用、
     /// TERM独自拡張、9章)。ロジック上の当たり判定・掘削・落下判定には一切使わない。
     render_prev_position: (usize, usize),
@@ -203,6 +210,7 @@ impl Game {
             invulnerability_ticks_remaining: 0,
             last_level_reported,
             crush_flash_remaining: Duration::ZERO,
+            ascending_remaining: None,
             render_prev_position: start_position,
             // 開始時点では補間の必要が無いため、既に完了した扱いにしておく
             // (さもないと初期表示が(0,0)相当からアニメーションしてしまう)。
@@ -295,7 +303,7 @@ impl Game {
     /// Left/Rightの2ステップ段差登り(TERM独自拡張)における「ぶつかって停止中」の
     /// 状態もリセットする(方向キーを挟んだ場合の扱い)。
     pub fn face_up(&mut self) {
-        if self.status == GameStatus::Playing {
+        if self.status == GameStatus::Playing && !self.is_dying() {
             self.player.facing = Direction::Up;
             self.player.bumped_direction = None;
         }
@@ -306,7 +314,7 @@ impl Game {
     /// Left/Rightの2ステップ段差登り(TERM独自拡張)における「ぶつかって停止中」の
     /// 状態もリセットする(方向キーを挟んだ場合の扱い)。
     pub fn face_down(&mut self) {
-        if self.status == GameStatus::Playing {
+        if self.status == GameStatus::Playing && !self.is_dying() {
             self.player.facing = Direction::Down;
             self.player.bumped_direction = None;
         }
@@ -335,7 +343,7 @@ impl Game {
     /// 掘削(Drill)とは独立したクールダウンなので、同一フレームで両方の入力が来ても
     /// 互いをブロックしない(TERM独自拡張。ユーザー指摘対応)。
     fn consume_move_cooldown(&mut self) -> bool {
-        if self.status != GameStatus::Playing {
+        if self.status != GameStatus::Playing || self.is_dying() {
             return false;
         }
         if self.move_cooldown_remaining > Duration::ZERO {
@@ -348,7 +356,7 @@ impl Game {
     /// 掘削系入力(Drill)のクールダウンが明けているかを確認し、明けていればリセットする。
     /// 移動(MoveLeft/MoveRight)とは独立したクールダウン(TERM独自拡張)。
     fn consume_drill_cooldown(&mut self) -> bool {
-        if self.status != GameStatus::Playing {
+        if self.status != GameStatus::Playing || self.is_dying() {
             return false;
         }
         if self.drill_cooldown_remaining > Duration::ZERO {
@@ -399,19 +407,30 @@ impl Game {
     /// ミス(酸素切れ/押し潰し)を処理する(spec.md 8章)。ライフが残っていれば
     /// 無敵時間を設定して続行、無くなっていればゲームオーバーにする。
     ///
-    /// `is_crush`が`true`(=落下ブロックに押し潰された)場合は、GameOverオーバーレイの
-    /// 表示前に一呼吸置く「潰れた」演出を開始する(TERM独自拡張、9章)。酸素切れ由来の
-    /// ミスではこの演出は行わない。
+    /// `is_crush`が`true`(=落下ブロックに押し潰された)場合、ライフが残っていれば
+    /// 「天に召される」演出(`ascending_remaining`、TERM独自拡張)から開始し、死亡地点の
+    /// 3列クリア・ライフ減算・酸素回復は演出が終わるまで`update()`側で遅延させる
+    /// (ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、一度天に召される
+    /// 演出をして、ブロックが消える処理されてから、元の位置に復活」)。ライフが0になる
+    /// 場合はこの演出を行わず、従来通り即座にGameOverダイアログへ進む(ユーザー指摘:
+    /// 「livesが0になったときはただちにゲームオーバーのダイアログ出てOK」)。
+    /// 酸素切れ由来のミスはどちらの演出も行わず即座に処理する。
     fn apply_miss(&mut self, events: &mut Vec<GameEvent>, is_crush: bool) {
         if is_crush {
             self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
-            // 死んだ場所の左右列を含めて3列分、プレイヤーより上のブロックを全て
-            // クリアする(TERM独自拡張。ユーザー指摘: 「キャラがブロックつぶされて
-            // 死んだら、死んだ場所の左右列を含めて3列分の、キャラから上部ブロック
-            // すべてクリアすること」)。再開直後(ライフが残っての復帰・GameOver
-            // ダイアログでの「その場から復活」のどちらでも)に同じ場所でまた
-            // 押し潰されるのを防ぐための安全対策。
-            self.clear_three_columns_above_player();
+
+            if self.player.lives <= 1 {
+                self.clear_three_columns_above_player();
+                let game_over = self.player.lose_life();
+                debug_assert!(game_over, "lives<=1のはずなのでlose_lifeは必ずtrueを返す");
+                self.status = GameStatus::GameOver;
+                self.game_over_selection = GameOverChoice::BackToTitle;
+                events.push(GameEvent::GameOverMiss);
+                return;
+            }
+
+            self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
+            return;
         }
 
         let game_over = self.player.lose_life();
@@ -423,6 +442,28 @@ impl Game {
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
             events.push(GameEvent::LifeLost);
         }
+    }
+
+    /// 「天に召される」演出(TERM独自拡張)の進行を1フレームぶん進める。演出中は
+    /// `true`を返し、呼び出し側(`update`)はその場合ゲームプレイ全体(重力・自由落下・
+    /// 酸素減少・入力)を凍結してこのフレームの処理を終える。演出が終わった瞬間、
+    /// 死亡地点の3列クリア・ライフ減算・酸素回復をまとめて行い、その場に復活する。
+    fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) -> bool {
+        let Some(remaining) = self.ascending_remaining else {
+            return false;
+        };
+        let remaining = remaining.saturating_sub(delta);
+        if remaining == Duration::ZERO {
+            self.ascending_remaining = None;
+            self.clear_three_columns_above_player();
+            let game_over = self.player.lose_life();
+            debug_assert!(!game_over, "ライフ0のケースはapply_missで即座に処理済みのはず");
+            self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
+            events.push(GameEvent::LifeLost);
+        } else {
+            self.ascending_remaining = Some(remaining);
+        }
+        true
     }
 
     /// プレイヤーの現在列を中心に左右1列ずつ(=3列分)、プレイヤーより浅い
@@ -463,6 +504,13 @@ impl Game {
         self.render_anim_elapsed += delta.as_secs_f32();
 
         if self.status != GameStatus::Playing {
+            return events;
+        }
+
+        // 「天に召される」演出中(TERM独自拡張)は、ここでゲームプレイ全体(重力・
+        // 自由落下・酸素減少・入力)を凍結する。演出が終わった時点でのブロッククリア・
+        // ライフ減算・酸素回復はtick_ascending内で行う。
+        if self.tick_ascending(delta, &mut events) {
             return events;
         }
 
@@ -629,9 +677,28 @@ impl Game {
         (self.fall_tick_accum.as_secs_f32() / tick_secs).clamp(0.0, 1.0)
     }
 
+    /// 「天に召される」演出中かどうか(TERM独自拡張)。この間は移動・掘削入力を無視する。
+    fn is_dying(&self) -> bool {
+        self.ascending_remaining.is_some()
+    }
+
     /// 押し潰しの「潰れた」演出が表示中かどうか(GameOverオーバーレイの表示可否判定にも使う)。
     pub fn crush_flash_active(&self) -> bool {
-        self.crush_flash_remaining > Duration::ZERO
+        self.crush_flash_remaining > Duration::ZERO || self.ascending_remaining.is_some()
+    }
+
+    /// 「天に召される」演出の進捗(0.0=演出開始直後、1.0=演出完了直前。TERM独自拡張)。
+    /// 演出中でなければ0.0を返す。描画側(render.rs)がこれを使って、キャラのスプライトを
+    /// 少しずつ上へドリフトさせる(「天に召される」見た目の演出)。
+    pub fn ascend_progress(&self) -> f32 {
+        let Some(remaining) = self.ascending_remaining else {
+            return 0.0;
+        };
+        let total = CRUSH_ASCEND_MS as f32 / 1000.0;
+        if total <= 0.0 {
+            return 1.0;
+        }
+        (1.0 - remaining.as_secs_f32() / total).clamp(0.0, 1.0)
     }
 
     /// 指定セルが現在「震えている」(支えを失い、落下開始までの猶予期間中)かどうか
@@ -1422,6 +1489,9 @@ mod tests {
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
         game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        // 押し潰し直後は「天に召される」演出中で、ライフ減算・3列クリアは演出が
+        // 終わるまで遅延される(TERM独自拡張)。演出の完了を待つ。
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
 
         assert_eq!(game.player.lives, 1, "押し潰されてライフを1つ失っているはず");
         for row in 0..999 {
@@ -1445,9 +1515,58 @@ mod tests {
         game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
         assert!(game.crush_flash_active(), "押し潰し直後は演出が有効なはず");
 
-        // CRUSH_FLASH_MSぶん時間を進めると演出は終わる
+        // ライフが残っているので「天に召される」演出(CRUSH_ASCEND_MS)が動く。
+        // これが終わるまでは演出が有効なままのはず。
         game.update(Duration::from_millis(crate::constants::CRUSH_FLASH_MS + 10));
-        assert!(!game.crush_flash_active(), "CRUSH_FLASH_MS経過後は演出が終わっているはず");
+        assert!(
+            game.crush_flash_active(),
+            "天に召される演出(CRUSH_ASCEND_MS)がまだ終わっていないはず"
+        );
+
+        // CRUSH_ASCEND_MSぶん時間を進めると演出は終わる
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        assert!(!game.crush_flash_active(), "CRUSH_ASCEND_MS経過後は演出が終わっているはず");
+    }
+
+    #[test]
+    fn crush_on_the_last_life_skips_the_ascending_sequence_and_ends_the_game_immediately() {
+        // ユーザー指摘: 「livesが0になったときはただちにゲームオーバーのダイアログ
+        // 出てOK」。最後のライフでの押し潰しは「天に召される」演出を行わず、
+        // 即座にGameOverへ進む。
+        let mut game = Game::new_with_lives(35, 1); // ライフ1(最後の1機)
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+
+        assert_eq!(game.status, GameStatus::GameOver, "演出を待たず即座にGameOverになるはず");
+        assert_eq!(game.player.lives, 0);
+    }
+
+    #[test]
+    fn ascending_sequence_freezes_gameplay_until_it_completes() {
+        // 「天に召される」演出中はゲームプレイ全体(入力・重力・自由落下)を凍結する。
+        let mut game = Game::new_with_lives(36, 2); // ライフ2、押し潰されても即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+        // (999,4)はclear_board済みでEmptyのまま=フリーズしていなければ普通に移動できる。
+
+        game.update(Duration::from_millis((SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10));
+        assert_eq!(game.player.lives, 2, "演出中はまだライフ減算前のはず");
+
+        // 演出中は移動入力を受け付けない。
+        let events = game.try_move_left();
+        assert!(events.is_empty());
+        assert_eq!(game.player.col, 5, "演出中は移動できないはず");
+
+        // 演出が終われば通常のプレイに戻り、ライフも減っている。
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        assert_eq!(game.player.lives, 1, "演出完了時にライフが減るはず");
+        assert_eq!(game.status, GameStatus::Playing);
     }
 
     #[test]
@@ -1476,7 +1595,11 @@ mod tests {
 
         // 揺れが明けた次のティックで初めて落下し、押し潰される。
         game.update(Duration::from_millis(FALL_TICK_MS + 10));
-        assert_eq!(game.player.lives, LIVES_DEFAULT - 1, "揺れが明けてから押し潰されるはず");
+        assert_eq!(game.player.lives, LIVES_DEFAULT, "押し潰し直後は「天に召される」演出中でまだライフ減算前のはず");
+
+        // 演出が終わるとライフが減る。
+        game.update(Duration::from_millis(crate::constants::CRUSH_ASCEND_MS + 10));
+        assert_eq!(game.player.lives, LIVES_DEFAULT - 1, "演出後に押し潰されるはず");
     }
 
     // --- 移動の見た目補間アニメーション(TERM独自拡張、9章) ---
