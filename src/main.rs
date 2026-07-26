@@ -961,7 +961,9 @@ enum PauseOverlay {
 /// Xブロックの配分量・AIRの配分量をいじれるようにしたい」「スターブロック比率0〜」)。
 fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
     if increase {
-        (current + SPAWN_RATE_PERCENT_STEP).min(SPAWN_RATE_PERCENT_MAX)
+        current
+            .saturating_add(SPAWN_RATE_PERCENT_STEP)
+            .min(SPAWN_RATE_PERCENT_MAX)
     } else {
         current.saturating_sub(SPAWN_RATE_PERCENT_STEP).max(min)
     }
@@ -972,7 +974,7 @@ fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
 /// (1〜4)」)。
 fn adjust_color_count(current: u8, increase: bool) -> u8 {
     if increase {
-        (current + 1).min(COLOR_COUNT_MAX)
+        current.saturating_add(1).min(COLOR_COUNT_MAX)
     } else {
         current.saturating_sub(1).max(COLOR_COUNT_MIN)
     }
@@ -983,7 +985,9 @@ fn adjust_color_count(current: u8, increase: bool) -> u8 {
 /// `increase`はms値そのものの増減方向(true=ms増加=遅くなる)を表す。
 fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
     if increase {
-        (current + DEBUG_FALL_TICK_STEP_MS).min(DEBUG_FALL_TICK_MS_MAX)
+        current
+            .saturating_add(DEBUG_FALL_TICK_STEP_MS)
+            .min(DEBUG_FALL_TICK_MS_MAX)
     } else {
         current
             .saturating_sub(DEBUG_FALL_TICK_STEP_MS)
@@ -996,7 +1000,9 @@ fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
 /// そのものの増減方向(true=ms増加=遅くなる)を表す。
 fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
     if increase {
-        (current + MOVE_COOLDOWN_MS_STEP).min(MOVE_COOLDOWN_MS_MAX)
+        current
+            .saturating_add(MOVE_COOLDOWN_MS_STEP)
+            .min(MOVE_COOLDOWN_MS_MAX)
     } else {
         current
             .saturating_sub(MOVE_COOLDOWN_MS_STEP)
@@ -1008,7 +1014,9 @@ fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
 /// 「設定値に列の数を変更できるようにして」)。新規ゲーム開始時にのみ反映される。
 fn adjust_field_width(current: usize, increase: bool) -> usize {
     if increase {
-        (current + FIELD_WIDTH_STEP).min(FIELD_WIDTH_MAX)
+        current
+            .saturating_add(FIELD_WIDTH_STEP)
+            .min(FIELD_WIDTH_MAX)
     } else {
         current
             .saturating_sub(FIELD_WIDTH_STEP)
@@ -1021,7 +1029,9 @@ fn adjust_field_width(current: usize, increase: bool) -> usize {
 /// インターバル=この設定値も作る」)。
 fn adjust_dodge_recovery_ms(current: u64, increase: bool) -> u64 {
     if increase {
-        (current + DODGE_RECOVERY_MS_STEP).min(DODGE_RECOVERY_MS_MAX)
+        current
+            .saturating_add(DODGE_RECOVERY_MS_STEP)
+            .min(DODGE_RECOVERY_MS_MAX)
     } else {
         // DODGE_RECOVERY_MS_MINは0固定のため、saturating_subの結果に対する.max()は不要
         // (clippy::unnecessary_min_or_max)。
@@ -1193,5 +1203,46 @@ mod tests {
         assert_eq!(cycle_jukebox_selection(3, 4, true), 0, "末尾の次は先頭へ");
         assert_eq!(cycle_jukebox_selection(2, 4, false), 1);
         assert_eq!(cycle_jukebox_selection(0, 4, false), 3, "先頭の前は末尾へ");
+    }
+
+    #[test]
+    fn adjust_rate_percent_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        // 破損したsettings.jsonでcurrentがu32::MAX付近になっていても、raw加算での
+        // オーバーフローpanicはせず、上限へ飽和するだけのはず(TERM独自拡張。#153)。
+        assert_eq!(
+            adjust_rate_percent(u32::MAX, true, SPAWN_RATE_PERCENT_MIN),
+            SPAWN_RATE_PERCENT_MAX
+        );
+    }
+
+    #[test]
+    fn adjust_color_count_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(adjust_color_count(u8::MAX, true), COLOR_COUNT_MAX);
+    }
+
+    #[test]
+    fn adjust_fall_speed_ms_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(adjust_fall_speed_ms(u64::MAX, true), DEBUG_FALL_TICK_MS_MAX);
+    }
+
+    #[test]
+    fn adjust_move_cooldown_ms_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(
+            adjust_move_cooldown_ms(u64::MAX, true),
+            MOVE_COOLDOWN_MS_MAX
+        );
+    }
+
+    #[test]
+    fn adjust_field_width_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(adjust_field_width(usize::MAX, true), FIELD_WIDTH_MAX);
+    }
+
+    #[test]
+    fn adjust_dodge_recovery_ms_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(
+            adjust_dodge_recovery_ms(u64::MAX, true),
+            DODGE_RECOVERY_MS_MAX
+        );
     }
 }
