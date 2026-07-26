@@ -15,7 +15,8 @@ use crate::constants::{
     DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
     DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
     DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP,
-    FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX,
+    FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS,
+    LIVES_DEFAULT, LIVES_MAX,
     MOVE_ANIM_DURATION_MS, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
 };
 use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState};
@@ -160,9 +161,20 @@ pub struct Game {
     /// (TERM独自拡張。ユーザー指摘: 「カーソルとスペース、両方押してるときにどちらかが
     /// 効かない」。1つの共有クールダウンだと、同一フレームで移動キーと掘削キーが両方
     /// 来た場合に片方がブロックされてしまうため分離した)。
-    move_cooldown_remaining: Duration,
-    /// 掘削系入力(Drill)専用のクールダウン。移動(MoveLeft/MoveRight)とは別に管理する。
-    drill_cooldown_remaining: Duration,
+    ///
+    /// 「前回の入力受理からの経過時間」を毎フレーム蓄積するアキュムレータとして持つ
+    /// (`fall_tick_accum`等と同じ考え方)。`INPUT_COOLDOWN_MS`ぶん貯まったら入力を
+    /// 受理し、そのぶんだけ差し引く(0へリセットしない)。これにより、ターミナルの
+    /// キーリピート間隔とクールダウン周期が一致しない場合に生じる「一定間隔で移動が
+    /// 遅くなって見える」ビート(うなり)を軽減する(TERM独自拡張。ユーザー指摘:
+    /// 「左右にキャラ走るとき、速くなったり遅くなったりしてる。一定のインターバルで
+    /// 速度が落ちたりする」)。ただし長時間入力が無い間に際限なく貯め込んで後から
+    /// 連続入力がまとめて即座に通ってしまわないよう、`INPUT_COOLDOWN_ACCUM_CAP_MS`
+    /// (クールダウン自体の1.5倍)で上限を設ける。
+    move_cooldown_accum: Duration,
+    /// 掘削系入力(Drill)専用のクールダウンアキュムレータ。移動(MoveLeft/MoveRight)
+    /// とは別に管理する。`move_cooldown_accum`と同じ考え方。
+    drill_cooldown_accum: Duration,
     oxygen_warning_accum: Duration,
     /// ライフ消費で再開した直後、残り何ティックの間 押し潰し判定を無効化するか
     /// (spec.md 5章末尾、TERM独自拡張)。
@@ -240,8 +252,10 @@ impl Game {
             block_fall_tick_ms: FALL_TICK_MS,
             player_fall_tick_ms: FALL_TICK_MS,
             shake_duration_ms: SHAKE_DURATION_MS,
-            move_cooldown_remaining: Duration::ZERO,
-            drill_cooldown_remaining: Duration::ZERO,
+            // ゲーム開始直後は即座に入力を受理できるよう、アキュムレータを満タン
+            // (=1クールダウンぶん貯まっている状態)から始める。
+            move_cooldown_accum: Duration::from_millis(INPUT_COOLDOWN_MS),
+            drill_cooldown_accum: Duration::from_millis(INPUT_COOLDOWN_MS),
             oxygen_warning_accum: Duration::ZERO,
             invulnerability_ticks_remaining: 0,
             last_level_reported,
@@ -392,10 +406,14 @@ impl Game {
         if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
         }
-        if self.move_cooldown_remaining > Duration::ZERO {
+        let slot = Duration::from_millis(INPUT_COOLDOWN_MS);
+        if self.move_cooldown_accum < slot {
             return false;
         }
-        self.move_cooldown_remaining = Duration::from_millis(INPUT_COOLDOWN_MS);
+        // 0へリセットせず、消費した1スロットぶんだけ差し引く。ターミナルのキー
+        // リピートがちょうどクールダウン周期をわずかに過ぎたタイミングで届いた
+        // 場合、その超過ぶんは次のスロットへ繰り越される(TERM独自拡張)。
+        self.move_cooldown_accum -= slot;
         true
     }
 
@@ -405,10 +423,11 @@ impl Game {
         if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
         }
-        if self.drill_cooldown_remaining > Duration::ZERO {
+        let slot = Duration::from_millis(INPUT_COOLDOWN_MS);
+        if self.drill_cooldown_accum < slot {
             return false;
         }
-        self.drill_cooldown_remaining = Duration::from_millis(INPUT_COOLDOWN_MS);
+        self.drill_cooldown_accum -= slot;
         true
     }
 
@@ -617,12 +636,9 @@ impl Game {
         if !self.is_dying() {
             self.player.elapsed_seconds += delta.as_secs_f32();
 
-            if self.move_cooldown_remaining > Duration::ZERO {
-                self.move_cooldown_remaining = self.move_cooldown_remaining.saturating_sub(delta);
-            }
-            if self.drill_cooldown_remaining > Duration::ZERO {
-                self.drill_cooldown_remaining = self.drill_cooldown_remaining.saturating_sub(delta);
-            }
+            let accum_cap = Duration::from_millis(INPUT_COOLDOWN_ACCUM_CAP_MS);
+            self.move_cooldown_accum = (self.move_cooldown_accum + delta).min(accum_cap);
+            self.drill_cooldown_accum = (self.drill_cooldown_accum + delta).min(accum_cap);
             self.drill_flash_remaining = self.drill_flash_remaining.saturating_sub(delta);
 
             // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
@@ -1226,6 +1242,56 @@ mod tests {
     }
 
     #[test]
+    fn move_cooldown_overshoot_carries_forward_to_the_next_slot() {
+        // ユーザー指摘: 「左右にキャラ走るとき、速くなったり遅くなったりしてる。
+        // 一定のインターバルで速度が落ちたりする」。クールダウンぶんを使い切った後、
+        // 少し余分に時間が経ってから次の入力が来た場合、その超過ぶんは繰り越され、
+        // その次の入力までの待ち時間がその分だけ短くなることを確認する
+        // (0へリセットする旧実装では、この繰り越しが起きずジッターの原因になっていた)。
+        let mut game = Game::new(6);
+        for col in 4..=8 {
+            game.board.rows[game.player.row + 1][col] = Cell::Rock { hits: 0 };
+        }
+
+        game.try_move_right(); // 1回目: 即座に受理される(accumが満タンから始まるため。accum=0になる)
+        let col_after_first = game.player.col;
+
+        // クールダウン(80ms)に30ms上乗せしてから2回目を試みる(超過30ms)。
+        game.update(Duration::from_millis(INPUT_COOLDOWN_MS + 30));
+        game.try_move_left();
+        let col_after_second = game.player.col;
+        assert_ne!(col_after_second, col_after_first, "2回目は受理されるはず(accumが30msへ繰り越される)");
+
+        // 3回目: 繰り越された30msぶん、フルの80ms待たなくても(50ms経過だけで)受理されるはず
+        // (30+50=80msでちょうどスロットに達する)。
+        game.update(Duration::from_millis(INPUT_COOLDOWN_MS - 30));
+        game.try_move_right();
+        assert_ne!(game.player.col, col_after_second, "繰り越し分により50ms経過でも受理されるはず");
+    }
+
+    #[test]
+    fn move_cooldown_accum_does_not_bank_unbounded_after_a_long_idle_period() {
+        // 長時間入力が無い間にアキュムレータが際限なく貯まると、後からまとめて
+        // 連続入力が全て即座に通ってしまう(バースト)。上限で頭打ちにして
+        // それを防いでいることを確認する。
+        let mut game = Game::new(7);
+        for col in 4..=8 {
+            game.board.rows[game.player.row + 1][col] = Cell::Rock { hits: 0 };
+        }
+
+        // 10秒間、何も入力せず放置する(アキュムレータが上限で頭打ちになるはず)。
+        game.update(Duration::from_secs(10));
+
+        game.try_move_right(); // 1回目: 受理される
+        let col_after_first = game.player.col;
+        game.try_move_left(); // 2回目: 直後なのでまだクールダウン中のはず(受理されない)
+        assert_eq!(
+            game.player.col, col_after_first,
+            "長時間放置後でも2回目は直後には受理されない(バーストしない)はず"
+        );
+    }
+
+    #[test]
     fn face_up_resets_the_bumped_direction() {
         // 上下の向き変更を挟んだ場合、Left/Rightの「ぶつかって停止中」の状態はリセット
         // され、次に同じ方向へ入力してもいきなりは登れない(実装者判断、spec.md 1章)。
@@ -1283,8 +1349,8 @@ mod tests {
         assert_eq!(game.player.facing, Direction::Right);
         assert!(first_events.is_empty());
 
-        game.move_cooldown_remaining = Duration::ZERO;
-            game.drill_cooldown_remaining = Duration::ZERO; // クールダウンを明ける(本テストの本題ではない)
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+            game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS); // クールダウンを明ける(本テストの本題ではない)
         let second_events = game.try_move_right(); // 2回目: 同じ方向への再入力で登る
 
         assert_eq!(game.player.row, 0); // 1段登った
@@ -1311,8 +1377,8 @@ mod tests {
         assert_eq!(game.player.facing, Direction::Left);
         assert!(first_events.is_empty());
 
-        game.move_cooldown_remaining = Duration::ZERO;
-            game.drill_cooldown_remaining = Duration::ZERO; // クールダウンを明ける(本テストの本題ではない)
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+            game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS); // クールダウンを明ける(本テストの本題ではない)
         let second_events = game.try_move_left(); // 2回目: 同じ方向への再入力で登る
 
         assert_eq!(game.player.row, 0); // 1段登った
@@ -1381,8 +1447,8 @@ mod tests {
             assert_eq!(game.player.row, target_row - 1, "岩が壊れるまでは降下しない");
             assert!(events.iter().any(|e| matches!(e, GameEvent::RockHitIntact)));
             // 次のヒットのためクールダウンを明ける(spec.md 9.9のクールダウンは本テストの本題ではない)
-            game.move_cooldown_remaining = Duration::ZERO;
-            game.drill_cooldown_remaining = Duration::ZERO;
+            game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+            game.drill_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
         }
 
         let events = game.try_drill(); // 5回目: 破壊
