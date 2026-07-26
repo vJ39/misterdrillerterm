@@ -25,6 +25,8 @@ use board::{tick_star_melting, BlockMove, Board, Cell, ColorKind, GravityState, 
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
+use crate::debug_log::DebugLog;
+
 /// キー入力から得られるゲーム側のアクション(spec.md 1章)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputAction {
@@ -266,6 +268,14 @@ pub struct Game {
     recently_vanished: Vec<(board::Pos, Duration)>,
     /// GameOverダイアログでの現在の選択項目(TERM独自拡張)。GameOver状態でのみ意味を持つ。
     game_over_selection: GameOverChoice,
+    /// `update()`が呼ばれるたびに1増えるフレーム通し番号(TERM独自拡張。#85調査用。
+    /// ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
+    /// ブロック状態遷移ログ(`debug_log`)の各行と突き合わせるための識別子。
+    frame_counter: u64,
+    /// #85調査用のブロック状態遷移ログ(TERM独自拡張)。`refresh_debug_log`で明示的に
+    /// 有効化するまでは`None`(no-op)のままなので、通常のテスト等では disk I/O が
+    /// 発生しない。
+    debug_log: Option<DebugLog>,
 }
 
 impl Game {
@@ -329,6 +339,8 @@ impl Game {
             last_block_moves: Vec::new(),
             recently_vanished: Vec::new(),
             game_over_selection: GameOverChoice::BackToTitle,
+            frame_counter: 0,
+            debug_log: None,
         }
     }
 
@@ -672,6 +684,7 @@ impl Game {
     /// メインループから毎フレーム呼ぶ。deltaぶんの時間経過(酸素減少・落下tick)を反映する。
     pub fn update(&mut self, delta: Duration) -> Vec<GameEvent> {
         let mut events = Vec::new();
+        self.frame_counter += 1;
 
         // 押し潰し演出・移動補間の経過時間は、GameOverでPlaying状態を抜けた後も
         // 描画側が最後まで追従できるよう、Playingガードより前に進めておく。
@@ -805,6 +818,11 @@ impl Game {
                 events.push(GameEvent::DodgeTriggered);
             }
 
+            if let Some(log) = &self.debug_log {
+                for &(to, from) in &result.moved_cells {
+                    log.log_move(self.frame_counter, to, from);
+                }
+            }
             self.last_block_moves = result.moved_cells;
 
             if result.oxygen_collected > 0 {
@@ -948,6 +966,21 @@ impl Game {
         &self.last_block_moves
     }
 
+    /// #85(揺れているブロックが浮いたまま落下しない)の調査用に、ブロック状態遷移
+    /// ログの記録先を新規に作り直して有効化する(TERM独自拡張。ユーザー指摘:
+    /// 「タイトルからゲームスタートした時点でログdbは毎回リフレッシュするものと
+    /// する」)。開けなかった場合は記録自体を諦め、ゲーム進行には影響させない。
+    pub fn refresh_debug_log(&mut self) {
+        self.debug_log = DebugLog::open_fresh();
+    }
+
+    /// `update()`が呼ばれるたびに1増えるフレーム通し番号(TERM独自拡張。#85調査用。
+    /// ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
+    /// ブロック状態遷移ログの各行と突き合わせるための識別子として画面に表示する。
+    pub fn debug_frame(&self) -> u64 {
+        self.frame_counter
+    }
+
     /// 消滅したセルを消滅フラッシュ演出の対象として記録する(TERM独自拡張。
     /// ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
     ///
@@ -960,6 +993,12 @@ impl Game {
     fn note_vanished_cells(&mut self, cells: impl IntoIterator<Item = board::Pos>) {
         let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS);
         let new_cells: Vec<board::Pos> = cells.into_iter().collect();
+
+        if let Some(log) = &self.debug_log {
+            for &pos in &new_cells {
+                log.log_vanish(self.frame_counter, pos);
+            }
+        }
 
         for &(row, col) in &new_cells {
             for (dr, dc) in [(-1isize, 0isize), (1, 0), (0, -1), (0, 1)] {
@@ -2845,6 +2884,19 @@ mod tests {
         let game = Game::new(32);
         assert_eq!(game.move_anim_progress(), 1.0);
         assert_eq!(game.render_prev_position(), game.player.position());
+    }
+
+    #[test]
+    fn debug_frame_starts_at_zero_and_increments_once_per_update_call() {
+        // ユーザー指摘: 「#85のデバッグ情報として、フレームのユニーク番号を取得
+        // できるようにしておき」。refresh_debug_logを呼ばない限りdisk I/Oは発生しない
+        // (debug_logがNoneのままno-opになる)ので、通常のテストには影響しない。
+        let mut game = Game::new(1);
+        assert_eq!(game.debug_frame(), 0);
+        game.update(Duration::from_millis(16));
+        assert_eq!(game.debug_frame(), 1);
+        game.update(Duration::from_millis(16));
+        assert_eq!(game.debug_frame(), 2);
     }
 
     #[test]

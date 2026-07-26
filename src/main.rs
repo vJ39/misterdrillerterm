@@ -3,6 +3,7 @@
 
 mod audio;
 mod constants;
+mod debug_log;
 mod game;
 mod input;
 mod settings;
@@ -678,6 +679,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される(TERM独自
                         // 拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
                         let mut game = Game::new_with_width(seed, settings.field_width);
+                        // #85調査用のブロック状態遷移ログをタイトルからのゲーム開始時に
+                        // 毎回作り直す(TERM独自拡張。ユーザー指摘: 「タイトルからゲーム
+                        // スタートした時点でログdbは毎回リフレッシュするものとする」)。
+                        game.refresh_debug_log();
                         // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
                         // (settings.rs)、新しいゲーム開始時にも引き継ぐ(TERM独自拡張)。
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);

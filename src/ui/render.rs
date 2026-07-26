@@ -1094,6 +1094,13 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
     write_line(buf, inner, &mut row, "TIME", label_style);
     let elapsed = game.player.elapsed_seconds as u32;
     write_line(buf, inner, &mut row, &format!("  {:02}:{:02}", elapsed / 60, elapsed % 60), label_style);
+    write_line(buf, inner, &mut row, "", label_style);
+
+    // #85(揺れているブロックが浮いたまま落下しない)の調査用(TERM独自拡張。
+    // ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
+    // ブロック状態遷移ログ(debug_log)の記録と突き合わせるための番号を表示する。
+    write_line(buf, inner, &mut row, "FRAME", label_style);
+    write_line(buf, inner, &mut row, &format!("  {}", game.debug_frame()), label_style);
 }
 
 /// `inner`の`*row`行目(0始まり)へ、幅いっぱいにパディングした1行を明示スタイルで書く。
