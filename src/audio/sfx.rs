@@ -562,6 +562,24 @@ pub fn play_bomb_explosion(mixer: &Mixer) {
     );
 }
 
+/// Lv.10ごとのライフ獲得音(TERM独自拡張。#169。ユーザー指摘: 「Lv.10ごとに
+/// Live+1」)。通常のレベルアップ音(play_level_up、矩形波4音)と重ねて鳴るため、
+/// サイン波の駆け上がる5音にして聞き分けられるようにする(play_item_collectedと
+/// 同じ音色系統)。
+pub fn play_extra_life(mixer: &Mixer) {
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(sine_chord(&[659.0], 60, 0.6, 5, 10, 0.8)),
+            Box::new(sine_chord(&[784.0], 60, 0.6, 5, 10, 0.8)),
+            Box::new(sine_chord(&[988.0], 60, 0.6, 5, 10, 0.8)),
+            Box::new(sine_chord(&[1319.0], 60, 0.6, 5, 10, 0.8)),
+            Box::new(sine_chord(&[1568.0], 120, 0.6, 5, 10, 0.8)),
+        ],
+        SE_VOLUME,
+    );
+}
+
 /// ボム起爆直前の導火線カウントダウン音(TERM独自拡張。#168。ユーザー指摘:
 /// 「爆弾が爆発しそうな赤くチカチカするとき爆弾の爆発しそうな導火線の音させろ」)。
 /// 本体が激しく赤く点滅し始める瞬間(残り`constants::BOMB_DANGER_MS`)に1回だけ

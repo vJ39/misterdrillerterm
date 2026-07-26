@@ -1095,6 +1095,7 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::DiamondCollected => {}
             GameEvent::OxygenWarningTick => audio::sfx::play_oxygen_warning(mixer),
             GameEvent::LevelUp { .. } => audio::sfx::play_level_up(mixer),
+            GameEvent::ExtraLifeAtLevel { .. } => audio::sfx::play_extra_life(mixer),
             GameEvent::LifeLost => audio::sfx::play_life_lost(mixer),
             GameEvent::Revived => audio::sfx::play_revive(mixer),
             GameEvent::GameOverMiss => audio::sfx::play_miss(mixer),

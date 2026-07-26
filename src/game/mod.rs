@@ -214,6 +214,11 @@ pub enum GameEvent {
     OxygenWarningTick,
     /// レベル(30mごと)が上がった
     LevelUp { level: usize },
+    /// Lv.10ごとに到達し、ライフを1つ獲得した(TERM独自拡張。#169。ユーザー指摘:
+    /// 「Lv.10ごとにLive+1」)。既にライフが上限(`LIVES_MAX`)の場合もイベント自体は
+    /// 発生する(実際に加算されたかは呼び出し側では区別しない、既存の`LifeLost`等と
+    /// 同じ考え方)。
+    ExtraLifeAtLevel { level: usize },
     /// ライフを1つ失ったが、まだライフが残っている(その場で酸素全回復して再開)
     LifeLost,
     /// 「天に召される」演出が終わり、その場に復活した瞬間(TERM独自拡張。ユーザー指摘:
@@ -895,6 +900,12 @@ impl Game {
         if level > self.last_level_reported {
             self.last_level_reported = level;
             events.push(GameEvent::LevelUp { level });
+            // Lv.10ごとにライフ+1(TERM独自拡張。#169。ユーザー指摘:
+            // 「Lv.10ごとにLive+1」)。LIVES_MAXでクランプする。
+            if level.is_multiple_of(10) {
+                self.player.lives = (self.player.lives + 1).min(LIVES_MAX);
+                events.push(GameEvent::ExtraLifeAtLevel { level });
+            }
         }
 
         if self.status == GameStatus::Playing && self.player.depth_m() >= FIELD_DEPTH_M {
@@ -2432,6 +2443,49 @@ mod tests {
             events
                 .iter()
                 .any(|e| matches!(e, GameEvent::LevelUp { level: 2 }))
+        );
+        assert!(
+            !events.contains(&GameEvent::ExtraLifeAtLevel { level: 2 }),
+            "Lv.10の倍数でないレベルアップではライフを獲得しないはず"
+        );
+    }
+
+    #[test]
+    fn reaching_level_10_grants_an_extra_life() {
+        // ユーザー指摘: 「Lv.10ごとにLive+1」(#169)。
+        let mut game = Game::new(5);
+        game.player.row = 9 * crate::constants::LEVEL_STEP_M - 1; // depth=270, level=9のまま
+        game.player.facing = Direction::Down;
+        game.player.lives = 2;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        game.try_drill(); // 掘るだけでは移動しない
+        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下でdepth=271 -> level 10へ
+
+        assert!(
+            events.contains(&GameEvent::ExtraLifeAtLevel { level: 10 }),
+            "Lv.10到達でライフ獲得イベントが発生するはず: {events:?}"
+        );
+        assert_eq!(game.player.lives, 3, "ライフが1増えているはず");
+    }
+
+    #[test]
+    fn extra_life_at_level_10_is_clamped_at_the_lives_max() {
+        // 既にライフが上限(LIVES_MAX)の場合、イベント自体は発生するが上限を
+        // 超えて増えないことを確認する(#169)。
+        let mut game = Game::new(5);
+        game.player.row = 9 * crate::constants::LEVEL_STEP_M - 1;
+        game.player.facing = Direction::Down;
+        game.player.lives = LIVES_MAX;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        game.try_drill();
+        let events = game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert!(events.contains(&GameEvent::ExtraLifeAtLevel { level: 10 }));
+        assert_eq!(
+            game.player.lives, LIVES_MAX,
+            "既に上限ならそれ以上増えないはず"
         );
     }
 
