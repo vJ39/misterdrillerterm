@@ -243,7 +243,7 @@ pub fn draw_title(frame: &mut Frame) {
         Line::from(Span::styled("ミスタードリラーTERM", text_style)),
         Line::from(Span::styled("MISTER DRILLER TERM", text_style)),
         Line::from(""),
-        Line::from(Span::styled("何かキーを押してスタート", text_style)),
+        Line::from(Span::styled("Enterキーを押してスタート", text_style)),
         Line::from(Span::styled("(Qキーで終了)", text_style)),
         Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
     ];
@@ -1093,7 +1093,7 @@ fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoi
         choice_line("タイトルへ戻る", selection == GameOverChoice::BackToTitle),
         choice_line("その場から復活", selection == GameOverChoice::Revive),
         Line::from(""),
-        Line::from(Span::styled("↑↓で選択 / Spaceで決定", text_style)),
+        Line::from(Span::styled("↑↓で選択 / Enterで決定", text_style)),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))

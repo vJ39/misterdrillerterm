@@ -299,10 +299,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::FaceUp | InputAction::FaceDown if game.status == GameStatus::GameOver => {
                         game.toggle_game_over_selection();
                     }
-                    InputAction::Drill if game.status == GameStatus::GameOver => match game.game_over_selection() {
-                        GameOverChoice::BackToTitle => back_to_title = true,
-                        GameOverChoice::Revive => game.revive(),
-                    },
+                    InputAction::Confirm if game.status == GameStatus::GameOver => {
+                        match game.game_over_selection() {
+                            GameOverChoice::BackToTitle => back_to_title = true,
+                            GameOverChoice::Revive => game.revive(),
+                        }
+                    }
+                    InputAction::Confirm => {}
                     InputAction::MoveLeft => {
                         let events = game.try_move_left();
                         handle_events(&events, mixer.as_ref(), &se_enabled);

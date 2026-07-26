@@ -27,6 +27,10 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Char(' ') => InputAction::TogglePause,
         KeyCode::Char('p') | KeyCode::Char('P') => InputAction::TogglePause,
         KeyCode::Char('q') | KeyCode::Char('Q') => InputAction::Quit,
+        // GameOverダイアログの選択確定・タイトル画面からの開始はEnterキーのみで行う
+        // (TERM独自拡張。ユーザー指摘: 「メニューから進むのEnter」「他のボタンで
+        // 進んではいけない」)。
+        KeyCode::Enter => InputAction::Confirm,
         // 一時停止中のみ意味を持つ、MUSIC/SE個別トグル(TERM独自拡張。ユーザー指摘:
         // 「サウンドON/OFFではなくMUSIC/SEをそれぞれトグルできるように」)。
         KeyCode::Char('m') | KeyCode::Char('M') => InputAction::ToggleMusic,
@@ -76,10 +80,11 @@ pub fn poll_input_batch(poll_ms: u64) -> std::io::Result<Vec<InputAction>> {
     Ok(actions)
 }
 
-/// スプラッシュ/タイトル画面の「何かキーを押して進む」用。`poll_input`が対応する
-/// キー(矢印・スペース・p/q/s)以外の入力(Enter等)も含め、Pressイベント全般を
-/// 「進む」とみなす。Qキー・Sキーのみ区別して返す(タイトル画面ではQがアプリ終了、
-/// スプラッシュ画面でもQは終了として扱うため。Sキーは設定画面を開く)。
+/// タイトル画面用。Q/S/HキーはそれぞれQuit/OpenSettings/OpenHelpとして区別し、
+/// 「進む」(`Advance`)はEnterキーのみで発動する(TERM独自拡張。ユーザー指摘:
+/// 「メニューから進むのEnter」「他のボタンで進んではいけない」。以前はQ/S/H以外の
+/// 任意のキーで進めたが、誤操作防止のためEnter専用にした)。それ以外のキーは
+/// `None`(無視)を返す。
 pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
     if !event::poll(Duration::from_millis(poll_ms))? {
         return Ok(None);
@@ -97,14 +102,15 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
         KeyCode::Char('q') | KeyCode::Char('Q') => AnyKeyAction::Quit,
         KeyCode::Char('s') | KeyCode::Char('S') => AnyKeyAction::OpenSettings,
         KeyCode::Char('h') | KeyCode::Char('H') => AnyKeyAction::OpenHelp,
-        _ => AnyKeyAction::Advance,
+        KeyCode::Enter => AnyKeyAction::Advance,
+        _ => return Ok(None),
     }))
 }
 
 /// `poll_any_key`の戻り値。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnyKeyAction {
-    /// Q・S・H以外の任意のキー(Enter含む)。「進む」トリガーとして扱う。
+    /// Enterキー。「進む」トリガーとして扱う。
     Advance,
     /// Qキー。呼び出し側でアプリ/スプラッシュの終了として扱う。
     Quit,
@@ -133,6 +139,8 @@ mod tests {
         assert_eq!(action_from_key_code(KeyCode::Char('r')), InputAction::DebugClearAbovePlayer);
         assert_eq!(action_from_key_code(KeyCode::Char('a')), InputAction::DebugFillAir);
         assert_eq!(action_from_key_code(KeyCode::Char('A')), InputAction::DebugFillAir);
+        // ユーザー指摘: 「メニューから進むのEnter」「他のボタンで進んではいけない」。
+        assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::Confirm);
     }
 
     #[test]
@@ -140,7 +148,6 @@ mod tests {
         // ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、ショートカット設定されていない
         // 任意のキー入力でも解除されるように」。既知のショートカットに割り当てられて
         // いないキーはUnboundKeyになる(main.rs側で一時停止中の再開トリガーに使う)。
-        assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::UnboundKey);
         assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::UnboundKey);
         assert_eq!(action_from_key_code(KeyCode::Char('y')), InputAction::UnboundKey);
     }
