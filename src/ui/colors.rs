@@ -111,6 +111,9 @@ pub const BOMB_BODY_FG: Color = Color::Rgb(20, 20, 24);
 /// 背景と同化してるから、もっと輪郭くっきり」)。本体色(ほぼ黒)よりはっきり明るい
 /// 銀灰色にし、フィールド背景色との対比よりも本体そのものとの対比で輪郭を出す。
 pub const BOMB_RIM_FG: Color = Color::Rgb(205, 210, 220);
+/// 起爆間際に本体が激しく点滅する警告色(TERM独自拡張。#138。ユーザー指摘:
+/// 「爆発直前で爆弾がチカチカ激しく赤く光るようにして」)。
+pub const BOMB_BODY_DANGER_FG: Color = Color::Rgb(220, 30, 30);
 /// 導火線の火花の色(点滅の暗い方)。
 pub const BOMB_SPARK_DIM: Color = Color::Rgb(200, 120, 40);
 /// 導火線の火花の色(点滅の明るい方)。起爆が近づくほど点滅を速める(既存の「揺れ」

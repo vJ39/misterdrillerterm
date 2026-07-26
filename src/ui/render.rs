@@ -879,7 +879,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 let Some((x, y)) = cell_screen_pos_f32(inner, top_row, visible_rows, display_row, col) else {
                     continue;
                 };
-                draw_bomb_sprite(buf, x, y, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
+                draw_bomb_sprite(buf, x, y, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
             }
             BombPhase::Ticking => {
                 let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1) else {
@@ -890,7 +890,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 } else {
                     colors::BOMB_SPARK_DIM
                 };
-                draw_bomb_sprite(buf, x, y, spark, bomb.remaining_ms);
+                draw_bomb_sprite(buf, x, y, bomb_body_color(bomb.remaining_ms), spark, bomb.remaining_ms);
             }
         }
     }
@@ -964,15 +964,16 @@ fn bomb_roll_is_bouncing_up(t: f32) -> bool {
 const BOMB_CRACKLE_FRAME_MS: u32 = 70;
 const BOMB_CRACKLE_GLYPHS: [char; 4] = ['\'', '`', '.', '*'];
 
-/// ボム本体のスプライト(TERM独自拡張。#96/#125/#130。ユーザー指摘: 「ボムは、丸い
-/// 「いかにもな」爆弾の形状しておいてほしい」「爆弾、背景と同化してるから、もっと
-/// 輪郭くっきり、火花ちりちりアニメーションさせて」)。以前は本体グリフの前景色に
-/// しか`BOMB_BODY_FG`を使わず、周囲はフィールド背景色のまま透過していたため、
-/// 暗い色同士で輪郭が背景に溶け込んで見えていた。セル全体を本体色で塗りつぶした
-/// 上に、明るい縁取り色(`BOMB_RIM_FG`)で丸い輪郭を描き、上段の導火線の火花は
-/// `crackle_ms`に応じて位置・グリフを切り替えてちりちりと弾けるようにする。
-fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, spark_color: Color, crackle_ms: u32) {
-    let body = colors::BOMB_BODY_FG;
+/// ボム本体のスプライト(TERM独自拡張。#96/#125/#130/#138。ユーザー指摘: 「ボムは、
+/// 丸い「いかにもな」爆弾の形状しておいてほしい」「爆弾、背景と同化してるから、
+/// もっと輪郭くっきり、火花ちりちりアニメーションさせて」「爆発直前で爆弾がチカチカ
+/// 激しく赤く光るようにして」)。以前は本体グリフの前景色にしか`BOMB_BODY_FG`を
+/// 使わず、周囲はフィールド背景色のまま透過していたため、暗い色同士で輪郭が背景に
+/// 溶け込んで見えていた。セル全体を本体色(`body`。起爆間際は`bomb_body_color`で
+/// 赤く点滅させたものを渡す)で塗りつぶした上に、明るい縁取り色(`BOMB_RIM_FG`)で
+/// 丸い輪郭を描き、上段の導火線の火花は`crackle_ms`に応じて位置・グリフを切り替えて
+/// ちりちりと弾けるようにする。
+fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, body: Color, spark_color: Color, crackle_ms: u32) {
     let rim = colors::BOMB_RIM_FG;
 
     let frame = (crackle_ms / BOMB_CRACKLE_FRAME_MS) as usize;
@@ -1004,6 +1005,24 @@ fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
         BOMB_BLINK_PERIOD_MS
     };
     (remaining_ms / period).is_multiple_of(2)
+}
+
+/// 起爆間際は導火線の火花だけでなく本体そのものも激しく赤く点滅させる
+/// (TERM独自拡張。#138。ユーザー指摘: 「爆発直前で爆弾がチカチカ激しく赤く
+/// 光るようにして」)。残り時間が`BOMB_BODY_FLASH_THRESHOLD_MS`を切ったら、
+/// `BOMB_BODY_FLASH_PERIOD_MS`ごとに通常の本体色と警告色(赤)を切り替える。
+const BOMB_BODY_FLASH_THRESHOLD_MS: u32 = 1000;
+const BOMB_BODY_FLASH_PERIOD_MS: u32 = 100;
+
+fn bomb_body_color(remaining_ms: u32) -> Color {
+    if remaining_ms > BOMB_BODY_FLASH_THRESHOLD_MS {
+        return colors::BOMB_BODY_FG;
+    }
+    if (remaining_ms / BOMB_BODY_FLASH_PERIOD_MS).is_multiple_of(2) {
+        colors::BOMB_BODY_DANGER_FG
+    } else {
+        colors::BOMB_BODY_FG
+    }
 }
 
 /// 直近の重力ティックで落下したブロックを、移動前の位置から移動後の位置へ向けて
@@ -1821,7 +1840,7 @@ mod tests {
         // ことを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
-        draw_bomb_sprite(&mut buf, 0, 0, colors::BOMB_SPARK_DIM, 0);
+        draw_bomb_sprite(&mut buf, 0, 0, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, 0);
 
         for y in 0..2u16 {
             for x in 0..4u16 {
@@ -1832,14 +1851,41 @@ mod tests {
     }
 
     #[test]
+    fn bomb_body_color_flashes_red_only_once_the_fuse_is_almost_out() {
+        // ユーザー指摘: 「爆発直前で爆弾がチカチカ激しく赤く光るようにして」(#138)。
+        // 残り時間が`BOMB_BODY_FLASH_THRESHOLD_MS`を超えている間は通常色のまま、
+        // それを切ったら警告色(赤)と通常色を激しく切り替えることを確認する。
+        assert_eq!(
+            bomb_body_color(BOMB_BODY_FLASH_THRESHOLD_MS + 1),
+            colors::BOMB_BODY_FG,
+            "閾値を超えている間は通常色のはず"
+        );
+        assert_eq!(
+            bomb_body_color(BOMB_BODY_FLASH_THRESHOLD_MS),
+            colors::BOMB_BODY_DANGER_FG,
+            "閾値ちょうどでは警告色に切り替わっているはず"
+        );
+        assert_eq!(
+            bomb_body_color(BOMB_BODY_FLASH_PERIOD_MS - 1),
+            colors::BOMB_BODY_DANGER_FG
+        );
+        assert_eq!(bomb_body_color(0), colors::BOMB_BODY_DANGER_FG, "起爆直前は警告色のはず");
+        assert_eq!(
+            bomb_body_color(BOMB_BODY_FLASH_PERIOD_MS),
+            colors::BOMB_BODY_FG,
+            "半周期ずれた時点では通常色に戻り、点滅していることが確認できるはず"
+        );
+    }
+
+    #[test]
     fn draw_bomb_sprite_crackle_alternates_the_spark_glyph_and_position_over_time() {
         // ユーザー指摘: 「火花ちりちりアニメーションさせて」。異なる`crackle_ms`を
         // 渡すと、火花の位置(左右どちらのマス)かグリフが変わることを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf_a = Buffer::empty(inner);
-        draw_bomb_sprite(&mut buf_a, 0, 0, colors::BOMB_SPARK_DIM, 0);
+        draw_bomb_sprite(&mut buf_a, 0, 0, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, 0);
         let mut buf_b = Buffer::empty(inner);
-        draw_bomb_sprite(&mut buf_b, 0, 0, colors::BOMB_SPARK_DIM, BOMB_CRACKLE_FRAME_MS);
+        draw_bomb_sprite(&mut buf_b, 0, 0, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, BOMB_CRACKLE_FRAME_MS);
 
         let symbols_a: Vec<String> = (0..4).map(|x| buf_a.cell(Position::new(x, 0)).unwrap().symbol().to_string()).collect();
         let symbols_b: Vec<String> = (0..4).map(|x| buf_b.cell(Position::new(x, 0)).unwrap().symbol().to_string()).collect();
