@@ -1643,16 +1643,22 @@ fn draw_player_sprite(buf: &mut Buffer, x: u16, y: u16, lines: [&str; 2], bg: Co
 /// `None`なら静止スプライト、`Some(_)`なら`DRILL_ANIM_FRAME_MS`ごとに交互する方向別の
 /// 2フレームを返す(掘削は常にfacing方向に対して行われるため、facingがそのまま
 /// 掘削方向になる)。
+///
+/// 目(oo/OO)を丸括弧で挟んでヘルメットの縁を表現し、進行方向の先端は開けたまま
+/// にする(掘削の刃が突き出る側、TERM独自拡張。#160。ユーザー指摘: 「キャラが
+/// せめて、ドリルかなんか、それっぽいやつにしてほしい ホリススムくんのシルエット
+/// に見えたらなおよし」)。上下は正面から見た形なので左右対称に閉じ、左右は
+/// 進行方向側だけ`<`/`>`のドリル先端を開けておく。
 fn player_sprite(facing: Direction, drilling_frame: Option<bool>) -> [&'static str; 2] {
     match (facing, drilling_frame) {
-        (Direction::Down, Some(true)) => [" oo ", " || "],
-        (Direction::Down, _) => [" oo ", " \\/ "],
-        (Direction::Up, Some(true)) => [" /\\ ", " OO "],
-        (Direction::Up, _) => [" /\\ ", " oo "],
-        (Direction::Left, Some(true)) => ["<oo ", "<==="],
-        (Direction::Left, _) => ["<oo ", "<== "],
-        (Direction::Right, Some(true)) => [" oo>", "===>"],
-        (Direction::Right, _) => [" oo>", " ==>"],
+        (Direction::Down, Some(true)) => ["(oo)", " || "],
+        (Direction::Down, _) => ["(oo)", " \\/ "],
+        (Direction::Up, Some(true)) => [" /\\ ", "(OO)"],
+        (Direction::Up, _) => [" /\\ ", "(oo)"],
+        (Direction::Left, Some(true)) => ["<oo)", "<==="],
+        (Direction::Left, _) => ["<oo)", "<== "],
+        (Direction::Right, Some(true)) => ["(oo>", "===>"],
+        (Direction::Right, _) => ["(oo>", " ==>"],
     }
 }
 
@@ -1892,6 +1898,40 @@ fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoi
 mod tests {
     use super::*;
     use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
+
+    #[test]
+    fn player_sprite_lines_are_always_exactly_one_logical_cell_wide() {
+        // #160でヘルメットの縁(丸括弧)を追加した際、幅がCELL_W(4文字)からずれると
+        // 隣のセルとの描画位置がずれてしまうため回帰確認する。
+        let directions = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
+        for dir in directions {
+            for drilling_frame in [None, Some(false), Some(true)] {
+                let sprite = player_sprite(dir, drilling_frame);
+                for line in sprite {
+                    assert_eq!(
+                        line.chars().count(),
+                        CELL_W as usize,
+                        "{dir:?}/{drilling_frame:?}の行\"{line}\"がCELL_W({CELL_W})文字ではない"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn player_sprite_keeps_the_eyes_open_on_the_leading_edge_facing_the_drill_direction() {
+        // ユーザー指摘: 「キャラがせめて、ドリルかなんか、それっぽいやつにして
+        // ほしい ホリススムくんのシルエットに見えたらなおよし」(#160)。ヘルメットの
+        // 縁(丸括弧)は進行方向側を開けたままにし、ドリルの刃が突き出る側だと
+        // わかるようにする。
+        assert!(player_sprite(Direction::Left, None)[0].starts_with('<'));
+        assert!(player_sprite(Direction::Right, None)[0].ends_with('>'));
+    }
 
     #[test]
     fn star_glyph_toggles_every_sparkle_period_starting_from_visible() {
