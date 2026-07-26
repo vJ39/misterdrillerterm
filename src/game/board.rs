@@ -1339,14 +1339,27 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
 }
 
 /// ボムの爆風が届くセル(原点を含む)を計算する(TERM独自拡張。#96。
-/// ユーザー指摘: 「白ボンが、爆弾をランダムに投げてくるイメージで」)。上下左右へ
-/// `range`マスずつ伸ばし、`vJ39/bombermanterm`の`explosion_cells`と同じロジックで
-/// Xブロック・ダイヤブロックに当たったらそのマスまでで止める(そこから先へは
-/// 伸ばさない)。Empty・その他のセルは素通りする。盤面外へは伸びない。
-pub fn bomb_blast_cells(board: &Board, origin: Pos, range: usize) -> Vec<Pos> {
+/// ユーザー指摘: 「白ボンが、爆弾をランダムに投げてくるイメージで」)。上下へ
+/// `row_range`マス、左右へ`col_range`マスずつ伸ばし、`vJ39/bombermanterm`の
+/// `explosion_cells`と同じロジックでXブロック・ダイヤブロックに当たったらそのマス
+/// までで止める(そこから先へは伸ばさない)。Empty・その他のセルは素通りする。
+/// 盤面外へは伸びない。上下・左右で別々の距離を取れるようにしているのは、
+/// 「横は画面幅全部・縦は画面の縦方向全部」というように軸ごとに求められる
+/// 「画面内全域」の大きさが異なるため(TERM独自拡張。#142)。
+pub fn bomb_blast_cells(
+    board: &Board,
+    origin: Pos,
+    row_range: usize,
+    col_range: usize,
+) -> Vec<Pos> {
     let mut cells = vec![origin];
-    let deltas: [(isize, isize); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-    for (dr, dc) in deltas {
+    let deltas: [(isize, isize, usize); 4] = [
+        (-1, 0, row_range),
+        (1, 0, row_range),
+        (0, -1, col_range),
+        (0, 1, col_range),
+    ];
+    for (dr, dc, range) in deltas {
         let mut r = origin.0 as isize;
         let mut c = origin.1 as isize;
         for _ in 0..range {
@@ -1896,10 +1909,20 @@ mod tests {
     #[test]
     fn bomb_blast_cells_reaches_full_range_through_empty_cells() {
         let board = empty_board(10);
-        let cells = bomb_blast_cells(&board, (5, 5), 2);
+        let cells = bomb_blast_cells(&board, (5, 5), 2, 2);
         // 原点 + 上下左右2マスずつ = 9セル、全てEmptyなので途中で止まらないはず。
         assert_eq!(cells.len(), 9);
-        for pos in [(3, 5), (4, 5), (5, 5), (6, 5), (7, 5), (5, 3), (5, 4), (5, 6), (5, 7)] {
+        for pos in [
+            (3, 5),
+            (4, 5),
+            (5, 5),
+            (6, 5),
+            (7, 5),
+            (5, 3),
+            (5, 4),
+            (5, 6),
+            (5, 7),
+        ] {
             assert!(cells.contains(&pos), "{pos:?}が爆風範囲に含まれるはず");
         }
     }
@@ -1908,9 +1931,12 @@ mod tests {
     fn bomb_blast_cells_stops_at_the_first_rock_in_each_direction() {
         let mut board = empty_board(10);
         board.rows[5][7] = Cell::Rock { hits: 0 }; // 原点(5,5)から右へ2マス目
-        let cells = bomb_blast_cells(&board, (5, 5), 2);
+        let cells = bomb_blast_cells(&board, (5, 5), 2, 2);
         assert!(cells.contains(&(5, 6)), "岩の手前のマスは含まれるはず");
-        assert!(cells.contains(&(5, 7)), "岩自体のマスは含まれるはず(そこで止まる)");
+        assert!(
+            cells.contains(&(5, 7)),
+            "岩自体のマスは含まれるはず(そこで止まる)"
+        );
         assert!(!cells.contains(&(5, 8)), "岩の先へは爆風が伸びないはず");
     }
 
@@ -1918,7 +1944,7 @@ mod tests {
     fn bomb_blast_cells_stops_at_diamond_the_same_way_as_rock() {
         let mut board = empty_board(10);
         board.rows[4][5] = Cell::Diamond; // 原点(5,5)から上へ1マス目
-        let cells = bomb_blast_cells(&board, (5, 5), 2);
+        let cells = bomb_blast_cells(&board, (5, 5), 2, 2);
         assert!(cells.contains(&(4, 5)), "ダイヤ自体のマスは含まれるはず");
         assert!(!cells.contains(&(3, 5)), "ダイヤの先へは爆風が伸びないはず");
     }
@@ -1926,10 +1952,35 @@ mod tests {
     #[test]
     fn bomb_blast_cells_does_not_go_out_of_bounds() {
         let board = empty_board(3);
-        let cells = bomb_blast_cells(&board, (0, 0), 2);
+        let cells = bomb_blast_cells(&board, (0, 0), 2, 2);
         for &(r, c) in &cells {
-            assert!(r < board.depth_rows() && c < board.width(), "盤面外セル{:?}が含まれている", (r, c));
+            assert!(
+                r < board.depth_rows() && c < board.width(),
+                "盤面外セル{:?}が含まれている",
+                (r, c)
+            );
         }
+    }
+
+    #[test]
+    fn bomb_blast_cells_applies_row_range_and_col_range_independently() {
+        // 縦(row_range)と横(col_range)で異なる距離を渡した場合、それぞれ独立に
+        // 適用されるはず(TERM独自拡張。#142。ユーザー指摘: 「爆発範囲は、横全部、
+        // 縦方向も全部(画面内ね)に拡大したい」を受け、軸ごとに距離を分離した)。
+        // 盤面境界(幅12・20行)には届かない距離にして、範囲自体が効いていることを
+        // 確認する。
+        let board = empty_board(20);
+        let cells = bomb_blast_cells(&board, (10, 5), 3, 2);
+        assert!(cells.contains(&(7, 5)), "row_range=3の上端は含まれるはず");
+        assert!(
+            !cells.contains(&(6, 5)),
+            "row_range=3を超えた先は含まれないはず"
+        );
+        assert!(cells.contains(&(10, 7)), "col_range=2の右端は含まれるはず");
+        assert!(
+            !cells.contains(&(10, 8)),
+            "col_range=2を超えた先は含まれないはず"
+        );
     }
 
     #[test]

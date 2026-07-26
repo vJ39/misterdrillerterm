@@ -286,10 +286,7 @@ mod tests {
         assert_eq!(settings.dodge_recovery_ms, DODGE_RECOVERY_MS_DEFAULT);
         assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_DEFAULT);
         assert_eq!(settings.field_width, FIELD_WIDTH_DEFAULT);
-        assert_eq!(
-            settings.bomb_spawn_rate_percent,
-            SPAWN_RATE_PERCENT_DEFAULT
-        );
+        assert_eq!(settings.bomb_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
     }
 
     #[test]

@@ -827,7 +827,12 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             // 一瞬覆う(TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、
             // ボンバーマンTERMのように炎アニメーションほしい」)。
             if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
-                fill_block(buf, draw_x, y, colors::explosion_flame_bg(tier, t, natural_cell_bg(cell)));
+                fill_block(
+                    buf,
+                    draw_x,
+                    y,
+                    colors::explosion_flame_bg(tier, t, natural_cell_bg(cell)),
+                );
             } else if cell == BoardCell::Empty
                 && let Some(t) = game.vanish_flash_progress((board_row, col))
             {
@@ -863,7 +868,9 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
 
         match bomb.phase {
             BombPhase::Entering => {
-                let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, shirobon_row, bomb.origin.1) else {
+                let Some((x, y)) =
+                    cell_screen_pos(inner, top_row, visible_rows, shirobon_row, bomb.origin.1)
+                else {
                     continue;
                 };
                 draw_shirobon_sprite(buf, x, y);
@@ -876,22 +883,42 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 } else {
                     bomb_row
                 };
-                let Some((x, y)) = cell_screen_pos_f32(inner, top_row, visible_rows, display_row, col) else {
+                let Some((x, y)) =
+                    cell_screen_pos_f32(inner, top_row, visible_rows, display_row, col)
+                else {
                     continue;
                 };
-                draw_bomb_sprite(buf, x, y, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
+                draw_bomb_sprite(
+                    buf,
+                    x,
+                    y,
+                    colors::BOMB_BODY_FG,
+                    colors::BOMB_SPARK_DIM,
+                    bomb.phase_elapsed_ms,
+                );
             }
             BombPhase::Settling => {
                 // 落下・左右バウンド中(TERM独自拡張。#140)は現在位置(`bomb.pos`、
                 // 重力・跳ねに応じて毎tick更新される)へそのまま描く。起爆カウント
                 // ダウンはまだ始まっていないため、火花は暗い方の色で固定する。
-                let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb.pos.0, bomb.pos.1) else {
+                let Some((x, y)) =
+                    cell_screen_pos(inner, top_row, visible_rows, bomb.pos.0, bomb.pos.1)
+                else {
                     continue;
                 };
-                draw_bomb_sprite(buf, x, y, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, bomb.phase_elapsed_ms);
+                draw_bomb_sprite(
+                    buf,
+                    x,
+                    y,
+                    colors::BOMB_BODY_FG,
+                    colors::BOMB_SPARK_DIM,
+                    bomb.phase_elapsed_ms,
+                );
             }
             BombPhase::Ticking => {
-                let Some((x, y)) = cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1) else {
+                let Some((x, y)) =
+                    cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1)
+                else {
                     continue;
                 };
                 let spark = if bomb_is_bright_frame(bomb.remaining_ms) {
@@ -899,7 +926,14 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 } else {
                     colors::BOMB_SPARK_DIM
                 };
-                draw_bomb_sprite(buf, x, y, bomb_body_color(bomb.remaining_ms), spark, bomb.remaining_ms);
+                draw_bomb_sprite(
+                    buf,
+                    x,
+                    y,
+                    bomb_body_color(bomb.remaining_ms),
+                    spark,
+                    bomb.remaining_ms,
+                );
             }
         }
     }
@@ -907,7 +941,13 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
 
 /// フィールド内の論理セル位置(行・列)を、現在のスクロール位置(`top_row`)・
 /// 可視行数を踏まえて画面座標(x, y)へ変換する(TERM独自拡張。#125)。範囲外なら`None`。
-fn cell_screen_pos(inner: Rect, top_row: usize, visible_rows: usize, row: usize, col: usize) -> Option<(u16, u16)> {
+fn cell_screen_pos(
+    inner: Rect,
+    top_row: usize,
+    visible_rows: usize,
+    row: usize,
+    col: usize,
+) -> Option<(u16, u16)> {
     cell_screen_pos_f32(inner, top_row, visible_rows, row, col as f32)
 }
 
@@ -943,7 +983,14 @@ fn cell_screen_pos_f32(
 fn draw_shirobon_sprite(buf: &mut Buffer, x: u16, y: u16) {
     for (dy, line) in [" oo ", " () "].iter().enumerate() {
         for (dx, ch) in line.chars().enumerate() {
-            put(buf, x + dx as u16, y + dy as u16, ch, colors::SHIROBON_FG, colors::FIELD_EMPTY_BG);
+            put(
+                buf,
+                x + dx as u16,
+                y + dy as u16,
+                ch,
+                colors::SHIROBON_FG,
+                colors::FIELD_EMPTY_BG,
+            );
         }
     }
 }
@@ -982,7 +1029,14 @@ const BOMB_CRACKLE_GLYPHS: [char; 4] = ['\'', '`', '.', '*'];
 /// 赤く点滅させたものを渡す)で塗りつぶした上に、明るい縁取り色(`BOMB_RIM_FG`)で
 /// 丸い輪郭を描き、上段の導火線の火花は`crackle_ms`に応じて位置・グリフを切り替えて
 /// ちりちりと弾けるようにする。
-fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, body: Color, spark_color: Color, crackle_ms: u32) {
+fn draw_bomb_sprite(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    body: Color,
+    spark_color: Color,
+    crackle_ms: u32,
+) {
     let rim = colors::BOMB_RIM_FG;
 
     let frame = (crackle_ms / BOMB_CRACKLE_FRAME_MS) as usize;
@@ -990,8 +1044,22 @@ fn draw_bomb_sprite(buf: &mut Buffer, x: u16, y: u16, body: Color, spark_color: 
     let spark_on_left = frame.is_multiple_of(2);
 
     put(buf, x, y, ' ', body, body);
-    put(buf, x + 1, y, if spark_on_left { spark_glyph } else { ' ' }, spark_color, body);
-    put(buf, x + 2, y, if spark_on_left { ' ' } else { spark_glyph }, spark_color, body);
+    put(
+        buf,
+        x + 1,
+        y,
+        if spark_on_left { spark_glyph } else { ' ' },
+        spark_color,
+        body,
+    );
+    put(
+        buf,
+        x + 2,
+        y,
+        if spark_on_left { ' ' } else { spark_glyph },
+        spark_color,
+        body,
+    );
     put(buf, x + 3, y, ' ', body, body);
 
     put(buf, x, y + 1, '(', rim, body);
@@ -1415,7 +1483,14 @@ fn put_edge(buf: &mut Buffer, x: u16, y: u16, connected: bool, fg: Color, bg: Co
 /// 四隅のセルを四分割ブロック文字(`▘▝▖▗`)でフィールド背景色(`FIELD_EMPTY_BG`)側に
 /// 3/4欠き取り、実際に輪郭が斜めに丸まったシルエット(八角形状)になるようにする。
 /// 中央2列×2行の`content`は呼び出し側で種類ごとに変える。
-fn draw_rounded_unit(buf: &mut Buffer, x: u16, y: u16, content: [[char; 2]; 2], fg: Color, bg: Color) {
+fn draw_rounded_unit(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    content: [[char; 2]; 2],
+    fg: Color,
+    bg: Color,
+) {
     let field_bg = colors::FIELD_EMPTY_BG;
     // 各隅セルは、外向きの角(=フィールド側)を`field_bg`、内向きの1/4だけを`bg`
     // (本体色)で残す。
@@ -1833,12 +1908,18 @@ mod tests {
         // 区間(t=0.0〜1.0)の間に複数回跳ね、設置直前(t=1.0)には必ず地面に
         // 着地している(跳ねていない)ことを確認する。
         assert!(bomb_roll_is_bouncing_up(0.0), "転がり始めは跳ねているはず");
-        assert!(!bomb_roll_is_bouncing_up(0.2), "1回目の跳ねの後半は着地しているはず");
+        assert!(
+            !bomb_roll_is_bouncing_up(0.2),
+            "1回目の跳ねの後半は着地しているはず"
+        );
         assert!(
             bomb_roll_is_bouncing_up(1.0 / BOMB_ROLL_BOUNCE_COUNT as f32),
             "2回目の跳ねが始まるはず"
         );
-        assert!(!bomb_roll_is_bouncing_up(1.0), "設置直前は必ず着地しているはず");
+        assert!(
+            !bomb_roll_is_bouncing_up(1.0),
+            "設置直前は必ず着地しているはず"
+        );
         assert!(!bomb_roll_is_bouncing_up(0.999), "設置直前は着地に近いはず");
     }
 
@@ -1850,12 +1931,23 @@ mod tests {
         // ことを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
-        draw_bomb_sprite(&mut buf, 0, 0, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, 0);
+        draw_bomb_sprite(
+            &mut buf,
+            0,
+            0,
+            colors::BOMB_BODY_FG,
+            colors::BOMB_SPARK_DIM,
+            0,
+        );
 
         for y in 0..2u16 {
             for x in 0..4u16 {
                 let bg = buf.cell(Position::new(x, y)).unwrap().bg;
-                assert_eq!(bg, colors::BOMB_BODY_FG, "({x},{y})は本体色で塗りつぶされているはず");
+                assert_eq!(
+                    bg,
+                    colors::BOMB_BODY_FG,
+                    "({x},{y})は本体色で塗りつぶされているはず"
+                );
             }
         }
     }
@@ -1879,7 +1971,11 @@ mod tests {
             bomb_body_color(BOMB_BODY_FLASH_PERIOD_MS - 1),
             colors::BOMB_BODY_DANGER_FG
         );
-        assert_eq!(bomb_body_color(0), colors::BOMB_BODY_DANGER_FG, "起爆直前は警告色のはず");
+        assert_eq!(
+            bomb_body_color(0),
+            colors::BOMB_BODY_DANGER_FG,
+            "起爆直前は警告色のはず"
+        );
         assert_eq!(
             bomb_body_color(BOMB_BODY_FLASH_PERIOD_MS),
             colors::BOMB_BODY_FG,
@@ -1893,13 +1989,46 @@ mod tests {
         // 渡すと、火花の位置(左右どちらのマス)かグリフが変わることを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf_a = Buffer::empty(inner);
-        draw_bomb_sprite(&mut buf_a, 0, 0, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, 0);
+        draw_bomb_sprite(
+            &mut buf_a,
+            0,
+            0,
+            colors::BOMB_BODY_FG,
+            colors::BOMB_SPARK_DIM,
+            0,
+        );
         let mut buf_b = Buffer::empty(inner);
-        draw_bomb_sprite(&mut buf_b, 0, 0, colors::BOMB_BODY_FG, colors::BOMB_SPARK_DIM, BOMB_CRACKLE_FRAME_MS);
+        draw_bomb_sprite(
+            &mut buf_b,
+            0,
+            0,
+            colors::BOMB_BODY_FG,
+            colors::BOMB_SPARK_DIM,
+            BOMB_CRACKLE_FRAME_MS,
+        );
 
-        let symbols_a: Vec<String> = (0..4).map(|x| buf_a.cell(Position::new(x, 0)).unwrap().symbol().to_string()).collect();
-        let symbols_b: Vec<String> = (0..4).map(|x| buf_b.cell(Position::new(x, 0)).unwrap().symbol().to_string()).collect();
-        assert_ne!(symbols_a, symbols_b, "crackle_msが進むと上段の見た目が変わるはず");
+        let symbols_a: Vec<String> = (0..4)
+            .map(|x| {
+                buf_a
+                    .cell(Position::new(x, 0))
+                    .unwrap()
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        let symbols_b: Vec<String> = (0..4)
+            .map(|x| {
+                buf_b
+                    .cell(Position::new(x, 0))
+                    .unwrap()
+                    .symbol()
+                    .to_string()
+            })
+            .collect();
+        assert_ne!(
+            symbols_a, symbols_b,
+            "crackle_msが進むと上段の見た目が変わるはず"
+        );
     }
 
     fn board_with(rows: usize) -> Board {
@@ -1950,7 +2079,14 @@ mod tests {
         // 確認する(中央2列×2行だけが酸素カプセルの地色`OXYGEN_BG`のまま残るはず)。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
-        draw_rounded_unit(&mut buf, 0, 0, [['◜', '◝'], ['◟', '◞']], colors::OXYGEN_FG, colors::OXYGEN_BG);
+        draw_rounded_unit(
+            &mut buf,
+            0,
+            0,
+            [['◜', '◝'], ['◟', '◞']],
+            colors::OXYGEN_FG,
+            colors::OXYGEN_BG,
+        );
 
         for &(x, y) in &[(0u16, 0u16), (3, 0), (0, 1), (3, 1)] {
             let bg = buf.cell(Position::new(x, y)).unwrap().bg;
@@ -1976,9 +2112,21 @@ mod tests {
         // AIR(#128)と同じく、C/R/Kアイテムも四隅がフィールド背景色まで欠き取られ、
         // 単なる正方形の塗りつぶしでなくなっていることを確認する。
         let items = [
-            ([['↑', '↑'], ['R', 'R']], colors::ITEM_CLEAR_ABOVE_FG, colors::ITEM_CLEAR_ABOVE_BG),
-            ([['◐', '◑'], ['C', 'C']], colors::ITEM_UNIFY_COLORS_FG, colors::ITEM_UNIFY_COLORS_BG),
-            ([['☆', '☆'], ['K', 'K']], colors::ITEM_STARIFY_SCREEN_FG, colors::ITEM_STARIFY_SCREEN_BG),
+            (
+                [['↑', '↑'], ['R', 'R']],
+                colors::ITEM_CLEAR_ABOVE_FG,
+                colors::ITEM_CLEAR_ABOVE_BG,
+            ),
+            (
+                [['◐', '◑'], ['C', 'C']],
+                colors::ITEM_UNIFY_COLORS_FG,
+                colors::ITEM_UNIFY_COLORS_BG,
+            ),
+            (
+                [['☆', '☆'], ['K', 'K']],
+                colors::ITEM_STARIFY_SCREEN_FG,
+                colors::ITEM_STARIFY_SCREEN_BG,
+            ),
         ];
         for (content, fg, bg) in items {
             let inner = Rect::new(0, 0, 4, 2);

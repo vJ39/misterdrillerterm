@@ -14,16 +14,17 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_RANGE, BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS,
-    BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS,
-    BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
-    CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
-    DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN,
-    DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS,
-    DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS,
-    DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M,
-    FIELD_WIDTH_DEFAULT, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS,
-    INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
+    BLOCK_VANISH_FLASH_MS, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_ENTER_MS,
+    BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS,
+    BOMB_SETTLE_TICK_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
+    BOMB_SPAWN_DEPTH_MAX_BONUS, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
+    DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
+    DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
+    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
+    FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
+    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
+    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
     MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
     STAR_VISIBLE_RANGE_ROWS, depth_fraction,
@@ -1018,7 +1019,11 @@ impl Game {
                         // 1フレームのdeltaが大きく複数tickぶんまたぐ場合(低フレームレート等)
                         // でも歩数が実時間ぶんきちんと進むよう、またいだ回数ぶん繰り返す。
                         for _ in 0..(new_ticks - prev_ticks) {
-                            bomb_settle_step(&self.board, &mut bomb.pos, &mut bomb.settle_bounce_dir);
+                            bomb_settle_step(
+                                &self.board,
+                                &mut bomb.pos,
+                                &mut bomb.settle_bounce_dir,
+                            );
                         }
                         if bomb.phase_elapsed_ms >= BOMB_SETTLE_MS {
                             bomb.phase = BombPhase::Ticking;
@@ -1045,7 +1050,12 @@ impl Game {
             }
             for &i in exploded.iter().rev() {
                 let bomb = self.bombs.remove(i);
-                let blast_cells = bomb_blast_cells(&self.board, bomb.pos, BOMB_BLAST_RANGE);
+                let blast_cells = bomb_blast_cells(
+                    &self.board,
+                    bomb.pos,
+                    BOMB_BLAST_ROW_RANGE,
+                    BOMB_BLAST_COL_RANGE,
+                );
                 let mut hit_player = false;
                 let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS);
                 // 爆風が届いた色ブロックは一色に統一する(TERM独自拡張。#137。ユーザー
@@ -1099,7 +1109,9 @@ impl Game {
                         for &(r, c) in &group {
                             self.board.set(r, c, Cell::Empty);
                         }
-                        events.push(GameEvent::BlockDestroyed { blocks: group.len() });
+                        events.push(GameEvent::BlockDestroyed {
+                            blocks: group.len(),
+                        });
                         self.note_vanished_cells(vanished);
                     }
                 }
@@ -1674,7 +1686,8 @@ impl Game {
     /// ランダムに選び、ボムを設置する(TERM独自拡張。#96)。候補が無ければ何もしない。
     fn spawn_bomb_at_random_empty_cell(&mut self) {
         let start_row = self.player.row.saturating_sub(STAR_VISIBLE_RANGE_ROWS);
-        let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
+        let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS)
+            .min(self.board.depth_rows().saturating_sub(1));
         let width = self.board.width();
         let candidates: Vec<board::Pos> = (start_row..=end_row)
             .flat_map(|row| (0..width).map(move |col| (row, col)))
@@ -1688,7 +1701,11 @@ impl Game {
         // 白ボンは画面の左端・右端のどちらかから登場する(TERM独自拡張。#123。
         // ユーザー指摘: 「白ボンが画面の外からとことこやってきて」)。同じ行の
         // 反対側の端から登場すれば、必ず盤面内を横切って転がってくる形になる。
-        let edge_col = if self.rng.random_range(0..2) == 0 { 0 } else { width.saturating_sub(1) };
+        let edge_col = if self.rng.random_range(0..2) == 0 {
+            0
+        } else {
+            width.saturating_sub(1)
+        };
         self.bombs.push(Bomb {
             pos,
             origin: (pos.0, edge_col),
@@ -3798,7 +3815,11 @@ mod tests {
 
         game.debug_place_bomb();
 
-        assert_eq!(game.bombs.len(), 1, "候補が1マスしかないのでボムが1個設置されるはず");
+        assert_eq!(
+            game.bombs.len(),
+            1,
+            "候補が1マスしかないのでボムが1個設置されるはず"
+        );
         assert_eq!(game.bombs[0].pos, (510, 7));
         assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS);
         assert_eq!(
@@ -3806,7 +3827,10 @@ mod tests {
             BombPhase::Entering,
             "白ボンが登場する段階から始まるはず"
         );
-        assert_eq!(game.bombs[0].origin.0, 510, "登場位置は最終設置マスと同じ行のはず");
+        assert_eq!(
+            game.bombs[0].origin.0, 510,
+            "登場位置は最終設置マスと同じ行のはず"
+        );
         assert!(
             game.bombs[0].origin.1 == 0 || game.bombs[0].origin.1 == game.board.width() - 1,
             "登場位置は画面の左端か右端のはず: {:?}",
@@ -3837,17 +3861,26 @@ mod tests {
         // Entering段階の途中では、まだRollingへ進まないはず。
         game.update(Duration::from_millis(BOMB_ENTER_MS as u64 / 2));
         assert_eq!(game.bombs[0].phase, BombPhase::Entering);
-        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Entering中は起爆カウントダウンが始まらないはず");
+        assert_eq!(
+            game.bombs[0].remaining_ms, BOMB_FUSE_MS,
+            "Entering中は起爆カウントダウンが始まらないはず"
+        );
 
         // Enteringを終えるとRollingへ進む。
         game.update(Duration::from_millis(BOMB_ENTER_MS as u64));
         assert_eq!(game.bombs[0].phase, BombPhase::Rolling);
-        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Rolling中も起爆カウントダウンが始まらないはず");
+        assert_eq!(
+            game.bombs[0].remaining_ms, BOMB_FUSE_MS,
+            "Rolling中も起爆カウントダウンが始まらないはず"
+        );
 
         // Rollingを終えるとSettling(左右に跳ねて落ち着き先を探す段階、#140)へ進む。
         game.update(Duration::from_millis(BOMB_ROLL_MS as u64));
         assert_eq!(game.bombs[0].phase, BombPhase::Settling);
-        assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS, "Settling中も起爆カウントダウンが始まらないはず");
+        assert_eq!(
+            game.bombs[0].remaining_ms, BOMB_FUSE_MS,
+            "Settling中も起爆カウントダウンが始まらないはず"
+        );
 
         // Settlingを終えるとTickingへ進み、そこで初めて起爆カウントダウンが始まる。
         game.update(Duration::from_millis(BOMB_SETTLE_MS as u64));
@@ -3863,7 +3896,10 @@ mod tests {
 
         game.debug_place_bomb();
 
-        assert!(game.bombs.is_empty(), "Playing中以外ではボムを設置しないはず");
+        assert!(
+            game.bombs.is_empty(),
+            "Playing中以外ではボムを設置しないはず"
+        );
     }
 
     #[test]
@@ -3907,12 +3943,19 @@ mod tests {
         let events = game.update(Duration::from_millis(60));
 
         assert!(game.bombs.is_empty(), "爆発したボムはリストから消えるはず");
-        assert!(matches!(game.board.cell(520, 6), Cell::Star { .. }), "爆風内の岩はスターに変わるはず");
+        assert!(
+            matches!(game.board.cell(520, 6), Cell::Star { .. }),
+            "爆風内の岩はスターに変わるはず"
+        );
         assert!(
             matches!(game.board.cell(521, 5), Cell::Star { .. }),
             "爆風内のダイヤはスターに変わるはず"
         );
-        assert_eq!(game.board.cell(520, 4), Cell::Oxygen, "AIRは爆風の影響を受けないはず");
+        assert_eq!(
+            game.board.cell(520, 4),
+            Cell::Oxygen,
+            "AIRは爆風の影響を受けないはず"
+        );
         assert_eq!(
             game.board.cell(519, 5),
             Cell::Item(ItemEffect::ClearAbove),
@@ -3942,17 +3985,27 @@ mod tests {
         game.board.rows[520][6] = Cell::Color(ColorKind::Red);
         game.board.rows[520][7] = Cell::Color(ColorKind::Blue);
         game.board.rows[521][5] = Cell::Color(ColorKind::Green);
-        game.board.rows[520][0] = Cell::Color(ColorKind::Yellow); // 爆風範囲外(距離5、左方向)
+        // 爆風範囲外(縦距離BOMB_BLAST_ROW_RANGE+1、画面外。#142で横は画面幅全部が
+        // 範囲になったため、範囲外を示すには縦方向を使う)。
+        game.board.rows[520 - BOMB_BLAST_ROW_RANGE - 1][5] = Cell::Color(ColorKind::Yellow);
 
         game.update(Duration::from_millis(60));
 
         let Cell::Color(unified) = game.board.cell(520, 6) else {
             panic!("爆風内の色ブロックは色ブロックのままのはず");
         };
-        assert_eq!(game.board.cell(520, 7), Cell::Color(unified), "爆風内は全て同じ色になるはず");
-        assert_eq!(game.board.cell(521, 5), Cell::Color(unified), "爆風内は全て同じ色になるはず");
         assert_eq!(
-            game.board.cell(520, 0),
+            game.board.cell(520, 7),
+            Cell::Color(unified),
+            "爆風内は全て同じ色になるはず"
+        );
+        assert_eq!(
+            game.board.cell(521, 5),
+            Cell::Color(unified),
+            "爆風内は全て同じ色になるはず"
+        );
+        assert_eq!(
+            game.board.cell(520 - BOMB_BLAST_ROW_RANGE - 1, 5),
             Cell::Color(ColorKind::Yellow),
             "爆風範囲外の色ブロックは変化しないはず"
         );
@@ -3960,7 +4013,7 @@ mod tests {
 
     #[test]
     fn bomb_explosion_unify_that_forms_a_group_of_four_or_more_vanishes_immediately_like_a_landing()
-     {
+    {
         // ユーザー指摘: 「爆弾で変化した壁は落ちたときと同じ反応を発動させる。
         // つまり４マス以上結合している場合は、消える」(#140)。爆風内の隣接する
         // 4マスの色ブロック(元は別々の色)が一色に統一された結果、4連結以上に
@@ -4020,7 +4073,11 @@ mod tests {
 
         game.update(Duration::from_millis(50));
 
-        assert_eq!(game.bombs[0].pos, (521, 5), "直下が空いていれば1マス落下するはず");
+        assert_eq!(
+            game.bombs[0].pos,
+            (521, 5),
+            "直下が空いていれば1マス落下するはず"
+        );
         assert_eq!(
             game.bombs[0].remaining_ms, 1000,
             "落下中は起爆カウントダウンを進めないはず"
@@ -4052,7 +4109,11 @@ mod tests {
             (521, 5),
             "Settling中も直下が空いていれば1マス落下するはず"
         );
-        assert_eq!(game.bombs[0].phase, BombPhase::Settling, "落下してもSettling段階のままのはず");
+        assert_eq!(
+            game.bombs[0].phase,
+            BombPhase::Settling,
+            "落下してもSettling段階のままのはず"
+        );
     }
 
     #[test]
@@ -4131,15 +4192,40 @@ mod tests {
     }
 
     #[test]
-    fn bomb_blast_range_catches_the_player_at_four_cells_but_not_five() {
-        // ユーザー指摘: 「爆弾が爆発するときは縦横4マスずつ炎を展開してボンバーマン
-        // TERM参考にして」(#136)。遮るものが無い場合、爆心地から4マス以内は
-        // プレイヤーを巻き込むが、5マス目は範囲外で巻き込まないことを確認する
-        // (BOMB_BLAST_RANGE=4)。
+    fn bomb_blast_range_now_reaches_across_the_entire_field_width() {
+        // ユーザー指摘: 「爆弾の爆発範囲は、横全部...に拡大したい」(#142)。遮るものが
+        // 無ければ、フィールド幅の端から端までプレイヤーを巻き込むことを確認する
+        // (BOMB_BLAST_COL_RANGE=FIELD_WIDTH_MAX、既定フィールド幅12なら距離11でも届く)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 520;
-        game.player.col = 9; // 爆心地(520,5)から距離4
+        game.player.col = FIELD_WIDTH_DEFAULT - 1; // 爆心地(520,0)から見て反対端
+        game.bombs.push(Bomb {
+            pos: (520, 0),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[521][0] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+
+        let events = game.update(Duration::from_millis(60));
+        assert!(
+            events.contains(&GameEvent::LifeLost),
+            "フィールド幅の反対端でも爆風に巻き込まれるはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn bomb_blast_row_range_catches_the_player_within_the_screen_but_not_beyond() {
+        // ユーザー指摘: 「縦方向も全部(画面内ね)に拡大したい」(#142)。縦方向は盤面
+        // 全体の深度ではなく画面内(BOMB_BLAST_ROW_RANGE=14マス)に限定されるため、
+        // その距離ちょうどは巻き込むが、1マス超えたら巻き込まないことを確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 520 - BOMB_BLAST_ROW_RANGE;
+        game.player.col = 5;
         game.bombs.push(Bomb {
             pos: (520, 5),
             origin: (520, 0),
@@ -4153,16 +4239,16 @@ mod tests {
         let events = game.update(Duration::from_millis(60));
         assert!(
             events.contains(&GameEvent::LifeLost),
-            "距離4マスは爆風の範囲内でプレイヤーを巻き込むはず: {events:?}"
+            "画面内の距離(BOMB_BLAST_ROW_RANGE)ちょうどは爆風の範囲内で巻き込むはず: {events:?}"
         );
     }
 
     #[test]
-    fn bomb_blast_range_does_not_catch_the_player_at_five_cells() {
+    fn bomb_blast_row_range_does_not_catch_the_player_one_cell_beyond_the_screen() {
         let mut game = Game::new(1);
         clear_board(&mut game);
-        game.player.row = 520;
-        game.player.col = 10; // 爆心地(520,5)から距離5
+        game.player.row = 520 - BOMB_BLAST_ROW_RANGE - 1;
+        game.player.col = 5;
         game.bombs.push(Bomb {
             pos: (520, 5),
             origin: (520, 0),
@@ -4176,7 +4262,7 @@ mod tests {
         let events = game.update(Duration::from_millis(60));
         assert!(
             !events.contains(&GameEvent::LifeLost),
-            "距離5マスは爆風の範囲外でプレイヤーを巻き込まないはず: {events:?}"
+            "画面内(BOMB_BLAST_ROW_RANGE)を1マス超えたらプレイヤーを巻き込まないはず: {events:?}"
         );
     }
 

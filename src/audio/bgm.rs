@@ -6,8 +6,8 @@
 //! 不安定に聞こえる問題(#135)も、この方式では原理的に発生しない。
 
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -35,7 +35,8 @@ pub fn spawn_bgm_thread(mixer: Mixer, stop_flag: Arc<AtomicBool>, music_enabled:
                 break;
             }
 
-            let decoder = Decoder::new(Cursor::new(BGM_MP3)).expect("assets/bgm.mp3 must be a valid, bundled mp3");
+            let decoder = Decoder::new(Cursor::new(BGM_MP3))
+                .expect("assets/bgm.mp3 must be a valid, bundled mp3");
             player.append(decoder);
 
             while !player.empty() {
