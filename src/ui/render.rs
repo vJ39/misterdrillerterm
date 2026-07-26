@@ -1193,9 +1193,17 @@ fn draw_falling_blocks(
         } else {
             BoardCell::Empty
         };
-        if cell == BoardCell::Empty {
-            continue; // 押し潰し等で既に消滅済み
-        }
+        // 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyだが消滅フラッシュは
+        // まだ残っている(TERM独自拡張。#172。ユーザー指摘: 「崩れてきたブロックが、
+        // 接地する1コマ前でスルスルと消えてしまう」)。盤面から読めない間は消滅直前の
+        // 種類で補い、最後まで落ちきってからフラッシュへ移る見た目にする。
+        let cell = match cell {
+            BoardCell::Empty => match game.recently_vanished_kind((to_row, to_col)) {
+                Some(kind) => kind,
+                None => continue, // 押し潰し等で既に消滅済み、表示すべき内容がない
+            },
+            other => other,
+        };
 
         let interp_row = from_row as f32 + (to_row as f32 - from_row as f32) * t;
         let interp_col = from_col as f32 + (to_col as f32 - from_col as f32) * t;
@@ -2179,6 +2187,66 @@ mod tests {
         assert!(
             has_diamond_glyph,
             "落下中もダイヤの◆グリフが描画されているはず"
+        );
+    }
+
+    #[test]
+    fn falling_block_that_auto_vanishes_on_the_same_tick_it_lands_still_renders_its_fall() {
+        // ユーザー指摘(#172): 「崩れてきたブロックが、接地する1コマ前でスルスルと
+        // 消えてしまう」。着地と同一tickで4連結自動消滅すると盤面は既にEmptyになるが、
+        // それ以前は`draw_falling_blocks`が「盤面がEmpty=描画すべきものがない」と
+        // 早合点して落下描画自体を丸ごとスキップしていた(実際には最後まで落ちきる
+        // 見た目を出したい)。落下中も消滅直前の色ブロックの背景色で描画され続ける
+        // ことを確認する。
+        let mut game = Game::new(1);
+        // row2を最深行にする(=常に支持される)ことで、着地を待つ静的な赤ブロックの
+        // 支えを岩ブロックなしに単純化する(board.rsの`empty_board`系テストと同じ考え方)。
+        game.board.rows.truncate(3);
+        for row in game.board.rows.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = BoardCell::Empty;
+            }
+        }
+        game.player.row = 0;
+        game.player.col = 5;
+
+        // 列0: 落下してくる赤ブロック(row0から最深行row2まで2マス落下し、着地先
+        // (2,0)で(2,1)(2,2)(2,3)と4連結して消滅する)。
+        game.board.rows[0][0] = BoardCell::Color(ColorKind::Red);
+        // 列1〜3: 着地を待つ静的な赤ブロック(最深行=row2に置くことで常に支持され
+        // 自身は落下しない)。
+        for col in 1..=3 {
+            game.board.rows[2][col] = BoardCell::Color(ColorKind::Red);
+        }
+
+        // 揺れ(SHAKE_TICKS)を経て、row0→row1→row2と2マス連続で落下しきる分の
+        // 時間を与える(#31: 落下開始後は毎マス揺れ直さず連続で落ち続ける)。
+        let tick = (crate::constants::SHAKE_TICKS as u64 + 2) * crate::constants::FALL_TICK_MS + 10;
+        game.update(std::time::Duration::from_millis(tick));
+
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+        assert!(
+            !moved_map.is_empty(),
+            "赤ブロックが(0,0)から落下しているはず"
+        );
+        assert_eq!(
+            game.board.cell(2, 0),
+            BoardCell::Empty,
+            "着地と同一tickで4連結消滅し、盤面は既にEmptyになっているはず"
+        );
+
+        let inner = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(inner);
+        draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
+
+        let red_bg = colors::fill_color(ColorKind::Red);
+        let has_red_fill = buf
+            .content
+            .iter()
+            .any(|cell| cell.bg == red_bg && cell.symbol() != " ");
+        assert!(
+            has_red_fill,
+            "着地と同一tickで消滅していても、落下中は赤ブロックとして描画され続けるはず"
         );
     }
 

@@ -339,7 +339,7 @@ pub struct Game {
     /// 直近に消滅した(自動消滅・スター溶解)セルの座標と、消滅フラッシュ演出の残り時間
     /// (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
     /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
-    recently_vanished: Vec<(board::Pos, Duration)>,
+    recently_vanished: Vec<(board::Pos, Duration, Cell)>,
     /// ボム爆発の爆風が届いた直後のセルと、炎の演出の残り時間・爆心地からの距離
     /// (TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、ボンバーマンTERMの
     /// ように炎アニメーションほしい」)。距離(0=爆心地、遠いほど大きい)で炎の色調を
@@ -939,11 +939,11 @@ impl Game {
         // 描画側が最後まで追従できるよう、Playingガードより前に進めておく。
         self.crush_flash_remaining = self.crush_flash_remaining.saturating_sub(delta);
         self.render_anim_elapsed += delta.as_secs_f32();
-        for (_, remaining) in self.recently_vanished.iter_mut() {
+        for (_, remaining, _) in self.recently_vanished.iter_mut() {
             *remaining = remaining.saturating_sub(delta);
         }
         self.recently_vanished
-            .retain(|&(_, remaining)| remaining > Duration::ZERO);
+            .retain(|&(_, remaining, _)| remaining > Duration::ZERO);
         for (_, remaining, _) in self.recently_exploded.iter_mut() {
             *remaining = remaining.saturating_sub(delta);
         }
@@ -1489,7 +1489,7 @@ impl Game {
                 if let Some(entry) = self
                     .recently_vanished
                     .iter_mut()
-                    .find(|(p, _)| *p == neighbor)
+                    .find(|(p, _, _)| *p == neighbor)
                 {
                     entry.1 = flash;
                 }
@@ -1497,7 +1497,7 @@ impl Game {
         }
 
         self.recently_vanished
-            .extend(new_cells.into_iter().map(|(pos, _)| (pos, flash)));
+            .extend(new_cells.into_iter().map(|(pos, kind)| (pos, flash, kind)));
     }
 
     /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=消滅直後、1.0=演出完了
@@ -1508,8 +1508,20 @@ impl Game {
             .max(0.001);
         self.recently_vanished
             .iter()
-            .find(|&&(p, _)| p == pos)
-            .map(|&(_, remaining)| (1.0 - remaining.as_secs_f32() / flash).clamp(0.0, 1.0))
+            .find(|&&(p, _, _)| p == pos)
+            .map(|&(_, remaining, _)| (1.0 - remaining.as_secs_f32() / flash).clamp(0.0, 1.0))
+    }
+
+    /// 描画側が使う、指定セルで直近に消滅したブロックの種類(TERM独自拡張。#172。
+    /// ユーザー指摘: 「崩れてきたブロックが、接地する1コマ前でスルスルと消えてしまう」)。
+    /// 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyになっているため、
+    /// `recently_moved_blocks`による落下補間描画が表示すべきグリフを盤面から読めない。
+    /// フラッシュ演出が残っている間はここから消滅直前の種類を取得できる。
+    pub fn recently_vanished_kind(&self, pos: board::Pos) -> Option<Cell> {
+        self.recently_vanished
+            .iter()
+            .find(|&&(p, _, _)| p == pos)
+            .map(|&(_, _, kind)| kind)
     }
 
     /// 描画側が使う、指定セルのボム爆発・炎演出の進捗(0.0=爆発直後、1.0=演出完了
