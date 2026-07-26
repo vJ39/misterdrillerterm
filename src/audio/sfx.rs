@@ -510,10 +510,22 @@ pub fn play_item_collected(mixer: &Mixer) {
     );
 }
 
-/// ミス音(ゲームオーバー): 最後のライフを失った瞬間。矩形波(下降チャープ)
-/// 440Hz→110Hz, 500ms(spec.md 10章)。
+/// ゲームオーバー音: 最後のライフを失った瞬間(TERM独自拡張。ユーザー指摘:
+/// 「ゲームオーバーのSE作って」)。クリアファンファーレ(`play_clear_fanfare`、
+/// 上昇5音)と対になるよう、下降する4音+最後にオクターブ落ちるチャープで締める
+/// 「ガクッ」という終幕感のあるフレーズにした(以前は単純な下降チャープ1発
+/// 440Hz→110Hz・500msのみだった)。
 pub fn play_miss(mixer: &Mixer) {
-    play_tone(mixer, square_chirp(440.0, 110.0, 500, 0.5), SE_VOLUME);
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(square_tone(392.0, 130, 0.5)),         // ソ
+            Box::new(square_tone(349.0, 130, 0.5)),         // ファ
+            Box::new(square_tone(294.0, 130, 0.5)),         // レ
+            Box::new(square_chirp(262.0, 131.0, 260, 0.5)), // ドから1オクターブ下降して締める
+        ],
+        SE_VOLUME,
+    );
 }
 
 /// ライフロス音: ライフを1つ失ったが、まだライフが残っている瞬間。矩形波(短い下降チャープ)
