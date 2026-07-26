@@ -252,8 +252,8 @@ pub fn draw_title(frame: &mut Frame) {
 
     let text_style = Style::default().fg(colors::PANEL_TEXT).bg(colors::LETTERBOX_BG);
     let text_lines = vec![
-        Line::from(Span::styled("ミスタードリラーTERM", text_style)),
-        Line::from(Span::styled("MISTER DRILLER TERM", text_style)),
+        Line::from(Span::styled("ミスドリTERM", text_style)),
+        Line::from(Span::styled("MISDRI TERM", text_style)),
         Line::from(""),
         Line::from(Span::styled("Enterキーを押してスタート", text_style)),
         Line::from(Span::styled("(Qキーで終了)", text_style)),

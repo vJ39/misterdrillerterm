@@ -1,4 +1,4 @@
-# ミスタードリラーTERM
+# ミスドリTERM
 
 <img src="assets/intro.png" alt="スプラッシュ" width="280">
 
