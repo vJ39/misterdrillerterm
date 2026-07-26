@@ -245,11 +245,17 @@ fn on_off_label(enabled: bool) -> &'static str {
 /// (ユーザー指摘: 「スプラッシュとタイトル画面一緒にしよ」を受け、起動直後に
 /// 別画面としてスプラッシュを挟まず、タイトル画面へ統合した)。
 ///
-/// 当初0.5だったが、ユーザー指摘: 「スプラッシュがなんの模様か分からんから、
-/// もっと解像度上げて」を受け0.75へ引き上げた。ゲーム本編のフレームサイズ
-/// `TOTAL_SCREEN_H`(32行)に収まる範囲で、模様が判別しやすい解像度を選んでいる
-/// (art_rows(24行)+区切り(1行)+案内文(6行)=31行)。
-const TITLE_ART_SCALE: f32 = 0.75;
+/// 当初0.5→0.75と引き上げてきたが、#124(ユーザー指摘: 「スプラッシュもっと
+/// 解像度高く」)であらためて見直し、この値を1.0に固定して`intro::DISPLAY_SIZE`
+/// 側だけで最終解像度を決めるよう変更した(理由は`DISPLAY_SIZE`のコメントを参照。
+/// 二段階の粗い間引きを避けるため)。
+///
+/// なお`draw_title`はゲーム本編のフレームサイズ`TOTAL_SCREEN_H`を使わず、実際の
+/// 端末サイズ(`area`)へ直接収める設計になっている。#120でロゴ3行を追加した際に
+/// 合計行数(アート+区切り+案内文)が当時のコメントの想定(31行、`TOTAL_SCREEN_H`
+/// 基準)を既に超えていたが見落とされていた。行数の目安は
+/// `title_screen_content_fits_a_reasonably_sized_terminal`で回帰確認する。
+const TITLE_ART_SCALE: f32 = 1.0;
 
 /// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント
 /// (3行×3列、TERM独自拡張。ユーザー指摘: 「TERMMAPみたいにかっこいい題字
@@ -1717,6 +1723,38 @@ mod tests {
             assert_eq!(choice.cycle().cycle_back(), choice);
             assert_eq!(choice.cycle_back().cycle(), choice);
         }
+    }
+
+    #[test]
+    fn title_screen_content_fits_a_reasonably_sized_terminal() {
+        // ユーザー指摘: 「スプラッシュもっと解像度高く」(#124)。`draw_title`は
+        // ゲーム本編のフレームサイズ`TOTAL_SCREEN_H`を使わず、実際の端末サイズへ
+        // 直接収める設計のため、アート解像度を上げるたびに合計行数(アート+区切り+
+        // 案内文)がユーザーの端末で収まるか回帰確認する必要がある(#120でロゴ3行を
+        // 追加した際、この合計行数が当時のコメントの想定より増えていたのに
+        // 見落とされていた)。40行はごく一般的なターミナルウィンドウの高さの目安。
+        const ASSUMED_COMMON_TERMINAL_H: u16 = 40;
+
+        let canvas = intro::build_canvas();
+        let art_rows = canvas.to_lines(TITLE_ART_SCALE).len() as u16;
+
+        let mut text_lines = build_title_logo_lines().to_vec();
+        text_lines.extend([
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+        ]);
+        let text_rows = text_lines.len() as u16;
+
+        let total = art_rows + 1 + text_rows;
+        assert!(
+            total <= ASSUMED_COMMON_TERMINAL_H,
+            "タイトル画面の合計行数が一般的な端末の高さ({ASSUMED_COMMON_TERMINAL_H}行)を\
+             超えている(合計={total}、内訳: アート{art_rows}行+区切り1行+案内文{text_rows}行)。\
+             解像度を上げる際はこの行数も見直すこと"
+        );
     }
 
     #[test]
