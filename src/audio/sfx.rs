@@ -14,8 +14,10 @@ const SAMPLE_RATE: u32 = 44100;
 /// 末尾フェードアウトの長さ(ms)。クリック音(プチノイズ)防止用(spec.md 10章)。
 const FADE_MS: u64 = 3;
 
-/// SE再生音量の目安(spec.md 10章「SE用Sinkで0.6〜0.8」)。
-pub const SE_VOLUME: f32 = 0.7;
+/// SE再生音量の目安(spec.md 10章「SE用Sinkで0.6〜0.8」)。BGMとのバランス調整
+/// (TERM独自拡張。#147。ユーザー指摘: 「SEがうるさくてBGMちいさい」)で0.7→0.45へ
+/// 引き下げた(BGM側は`bgm::BGM_VOLUME`を0.35→0.55へ引き上げ)。
+pub const SE_VOLUME: f32 = 0.45;
 
 /// 指定サンプルレート・長さ(ms)から、総サンプル数とフェードサンプル数を求める。
 fn sample_counts(sample_rate: u32, duration_ms: u64) -> (u64, u64) {

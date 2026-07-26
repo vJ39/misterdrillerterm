@@ -73,10 +73,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // MUSIC/SE個別ON/OFF設定(TERM独自拡張、spec.md 10章)。前回終了時の状態を復元し、
     // BGMスレッド・SE再生の双方から参照できるよう`Arc<AtomicBool>`で共有する。
     let mut settings = Settings::load();
-    // 起動直後はタイトル画面から始まるため、MUSIC設定がONでも実際に鳴らす値は
-    // `effective_music_enabled`経由でタイトル画面ぶん無音にしておく(TERM独自拡張。
-    // ユーザー指摘: 「タイトル画面ではMUSIC無し」)。
-    let music_enabled = Arc::new(AtomicBool::new(effective_music_enabled(
+    // タイトル画面用・プレイ中用でBGMを別トラックにする(TERM独自拡張。#145/#146。
+    // ユーザー指摘: 「タイトル画面は、これで!」「プレイ中はこの２つを交互に鳴らす
+    // ことにする」)。同時に両方鳴らないよう、`effective_title_bgm_enabled`/
+    // `effective_gameplay_bgm_enabled`は排他的になるよう設計している。起動直後は
+    // タイトル画面から始まる。
+    let title_music_enabled = Arc::new(AtomicBool::new(effective_title_bgm_enabled(
+        settings.music_enabled,
+        &Screen::Title,
+    )));
+    let gameplay_music_enabled = Arc::new(AtomicBool::new(effective_gameplay_bgm_enabled(
         settings.music_enabled,
         &Screen::Title,
     )));
@@ -84,7 +90,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
     if let Some(m) = &mixer {
-        audio::bgm::spawn_bgm_thread(m.clone(), Arc::clone(&bgm_stop), Arc::clone(&music_enabled));
+        audio::bgm::spawn_title_bgm_thread(
+            m.clone(),
+            Arc::clone(&bgm_stop),
+            Arc::clone(&title_music_enabled),
+        );
+        audio::bgm::spawn_gameplay_bgm_thread(
+            m.clone(),
+            Arc::clone(&bgm_stop),
+            Arc::clone(&gameplay_music_enabled),
+        );
     }
 
     // 通常プレイはOS乱数から生成したシードを使う(spec.md 3章)。
@@ -146,7 +161,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::ToggleMusic => {
                         if game.status == GameStatus::Paused {
                             settings.music_enabled = !settings.music_enabled;
-                            music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                            // ここはScreen::Playing(かつPaused)確定なので、タイトル用
+                            // BGMは触れず(既に無音のはず)、プレイ中BGMのみ即時反映する
+                            // (TERM独自拡張。#145/#146)。
+                            gameplay_music_enabled.store(settings.music_enabled, Ordering::Relaxed);
                             settings.save();
                         }
                     }
@@ -199,7 +217,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         match settings_selection {
                             ui::render::SettingsChoice::Music => {
                                 settings.music_enabled = !settings.music_enabled;
-                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                                gameplay_music_enabled
+                                    .store(settings.music_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
                             ui::render::SettingsChoice::Se => {
@@ -238,7 +257,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         match settings_selection {
                             ui::render::SettingsChoice::Music => {
                                 settings.music_enabled = !settings.music_enabled;
-                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                                gameplay_music_enabled
+                                    .store(settings.music_enabled, Ordering::Relaxed);
                             }
                             ui::render::SettingsChoice::Se => {
                                 settings.se_enabled = !settings.se_enabled;
@@ -482,7 +502,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 let events = game.update(delta.min(Duration::from_millis(250)));
                 handle_events(&events, mixer.as_ref(), &se_enabled);
 
-                let music_on = music_enabled.load(Ordering::Relaxed);
+                let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
                 let se_on = se_enabled.load(Ordering::Relaxed);
                 terminal.draw(|frame| {
                     ui::render::draw(frame, game, music_on, se_on);
@@ -558,7 +578,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::Drill => match settings_selection {
                         ui::render::SettingsChoice::Music => {
                             settings.music_enabled = !settings.music_enabled;
-                            music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                            gameplay_music_enabled.store(settings.music_enabled, Ordering::Relaxed);
                             settings.save();
                         }
                         ui::render::SettingsChoice::Se => {
@@ -594,7 +614,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         match settings_selection {
                             ui::render::SettingsChoice::Music => {
                                 settings.music_enabled = !settings.music_enabled;
-                                music_enabled.store(settings.music_enabled, Ordering::Relaxed);
+                                gameplay_music_enabled
+                                    .store(settings.music_enabled, Ordering::Relaxed);
                             }
                             ui::render::SettingsChoice::Se => {
                                 settings.se_enabled = !settings.se_enabled;
@@ -780,9 +801,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
         // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが
         // 参照する実効MUSIC状態を毎フレーム同期する(TERM独自拡張。ユーザー指摘:
-        // 「タイトル画面ではMUSIC無し」)。
-        music_enabled.store(
-            effective_music_enabled(settings.music_enabled, &screen),
+        // 「タイトル画面ではMUSIC無し」→のちに#146で「タイトル画面は専用曲を鳴らす」
+        // へ変更)。タイトル用・プレイ中用のいずれか一方だけがtrueになる。
+        title_music_enabled.store(
+            effective_title_bgm_enabled(settings.music_enabled, &screen),
+            Ordering::Relaxed,
+        );
+        gameplay_music_enabled.store(
+            effective_gameplay_bgm_enabled(settings.music_enabled, &screen),
             Ordering::Relaxed,
         );
     }
@@ -792,12 +818,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     Ok(())
 }
 
-/// MUSIC設定・現在の画面から、実際にBGMスレッドで鳴らすべきかを判定する(TERM独自
-/// 拡張。ユーザー指摘: 「タイトル画面ではMUSIC無し」「ゲームオーバーになったら、
+/// MUSIC設定・現在の画面から、実際にタイトル画面用BGMを鳴らすべきかを判定する
+/// (TERM独自拡張。#146。ユーザー指摘: 「タイトル画面は、これで!」)。タイトル画面に
+/// いる間だけ鳴らす。
+fn effective_title_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+    settings_music_enabled && matches!(screen, Screen::Title)
+}
+
+/// MUSIC設定・現在の画面から、実際にプレイ中BGM(交代制プレイリスト、#145)を
+/// 鳴らすべきかを判定する(TERM独自拡張。ユーザー指摘: 「ゲームオーバーになったら、
 /// ゲームオーバーの短いミス音の後、MUSIC停止」「ゴールしたらMUSICとめてファンファーレ
 /// でしょう」)。タイトル画面・ゲームオーバー中・ゴールクリア後はMUSIC設定のON/OFFに
 /// 関わらず常に無音にする(クリアファンファーレはBGMと別にSEとして再生される)。
-fn effective_music_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
     if !settings_music_enabled {
         return false;
     }
@@ -937,57 +970,94 @@ mod tests {
     use super::*;
 
     #[test]
-    fn effective_music_enabled_is_always_false_on_title_regardless_of_setting() {
-        // ユーザー指摘: 「タイトル画面ではMUSIC無し」。
-        assert!(!effective_music_enabled(true, &Screen::Title));
-        assert!(!effective_music_enabled(false, &Screen::Title));
-    }
+    fn effective_title_bgm_enabled_is_true_only_on_title() {
+        // ユーザー指摘: 「タイトル画面は、これで!」(#146)。タイトル画面にいる間
+        // だけタイトル用BGMを鳴らす。
+        assert!(effective_title_bgm_enabled(true, &Screen::Title));
+        assert!(!effective_title_bgm_enabled(false, &Screen::Title));
+        assert!(!effective_title_bgm_enabled(true, &Screen::Settings));
+        assert!(!effective_title_bgm_enabled(true, &Screen::Help));
 
-    #[test]
-    fn effective_music_enabled_follows_the_setting_on_other_screens() {
-        assert!(effective_music_enabled(true, &Screen::Settings));
-        assert!(!effective_music_enabled(false, &Screen::Settings));
-        assert!(effective_music_enabled(true, &Screen::Help));
-        assert!(!effective_music_enabled(false, &Screen::Help));
-    }
-
-    #[test]
-    fn effective_music_enabled_is_true_while_playing_or_paused() {
         let game = Game::new(1);
-        assert!(effective_music_enabled(
+        assert!(!effective_title_bgm_enabled(
+            true,
+            &Screen::Playing(Box::new(game))
+        ));
+    }
+
+    #[test]
+    fn effective_gameplay_bgm_enabled_is_always_false_on_title_regardless_of_setting() {
+        // ユーザー指摘: 「タイトル画面ではMUSIC無し」(#86。タイトル画面は#146の
+        // 専用曲の担当になったため、プレイ中BGM側は常に鳴らないはず)。
+        assert!(!effective_gameplay_bgm_enabled(true, &Screen::Title));
+        assert!(!effective_gameplay_bgm_enabled(false, &Screen::Title));
+    }
+
+    #[test]
+    fn effective_gameplay_bgm_enabled_follows_the_setting_on_other_screens() {
+        assert!(effective_gameplay_bgm_enabled(true, &Screen::Settings));
+        assert!(!effective_gameplay_bgm_enabled(false, &Screen::Settings));
+        assert!(effective_gameplay_bgm_enabled(true, &Screen::Help));
+        assert!(!effective_gameplay_bgm_enabled(false, &Screen::Help));
+    }
+
+    #[test]
+    fn effective_gameplay_bgm_enabled_is_true_while_playing_or_paused() {
+        let game = Game::new(1);
+        assert!(effective_gameplay_bgm_enabled(
             true,
             &Screen::Playing(Box::new(game))
         ));
 
         let mut game = Game::new(1);
         game.status = GameStatus::Paused;
-        assert!(effective_music_enabled(
+        assert!(effective_gameplay_bgm_enabled(
             true,
             &Screen::Playing(Box::new(game))
         ));
     }
 
     #[test]
-    fn effective_music_enabled_is_false_on_game_over() {
+    fn effective_gameplay_bgm_enabled_is_false_on_game_over() {
         // ユーザー指摘: 「ゲームオーバーになったら、ゲームオーバーの短いミス音の後、
         // MUSIC停止」。
         let mut game = Game::new(1);
         game.status = GameStatus::GameOver;
-        assert!(!effective_music_enabled(
+        assert!(!effective_gameplay_bgm_enabled(
             true,
             &Screen::Playing(Box::new(game))
         ));
     }
 
     #[test]
-    fn effective_music_enabled_is_false_on_cleared() {
+    fn effective_gameplay_bgm_enabled_is_false_on_cleared() {
         // ユーザー指摘: 「ゴールしたらMUSICとめてファンファーレでしょう」。
         // クリア時はBGMを止め、ファンファーレはSEとして別途再生する。
         let mut game = Game::new(1);
         game.status = GameStatus::Cleared;
-        assert!(!effective_music_enabled(
+        assert!(!effective_gameplay_bgm_enabled(
             true,
             &Screen::Playing(Box::new(game))
         ));
+    }
+
+    #[test]
+    fn title_and_gameplay_bgm_are_never_both_enabled_at_once() {
+        // #145/#146でBGMを2系統に分けた際、同時に両方鳴ってしまうと不自然なので、
+        // どの画面状態でも排他的であることを確認する。
+        let labeled_screens: Vec<(&str, Screen)> = vec![
+            ("Title", Screen::Title),
+            ("Settings", Screen::Settings),
+            ("Help", Screen::Help),
+            ("Playing", Screen::Playing(Box::new(Game::new(1)))),
+        ];
+        for (label, screen) in &labeled_screens {
+            let title_on = effective_title_bgm_enabled(true, screen);
+            let gameplay_on = effective_gameplay_bgm_enabled(true, screen);
+            assert!(
+                !(title_on && gameplay_on),
+                "{label}でタイトル用・プレイ中用の両方が有効になっている"
+            );
+        }
     }
 }
