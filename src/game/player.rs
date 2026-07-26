@@ -1,8 +1,8 @@
 //! プレイヤー状態(位置・向き・酸素・ライフ・スコア・経過タイム)。spec.md 1章・6〜8章。
 
 use crate::constants::{
-    AIR_CAPSULE_SCORE_STEP, DIAMOND_SCORE, FIELD_WIDTH, LEVEL_STEP_M, LIVES_DEFAULT, LIVES_MAX, LIVES_MIN, OXYGEN_MAX,
-    ROCK_BREAK_OXYGEN_PENALTY, SCORE_PER_AUTO_VANISH_BLOCK, SCORE_PER_DRILLED_BLOCK,
+    AIR_CAPSULE_SCORE_STEP, DIAMOND_SCORE, FIELD_WIDTH_DEFAULT, LEVEL_STEP_M, LIVES_DEFAULT, LIVES_MAX, LIVES_MIN,
+    OXYGEN_MAX, ROCK_BREAK_OXYGEN_PENALTY, SCORE_PER_AUTO_VANISH_BLOCK, SCORE_PER_DRILLED_BLOCK,
 };
 
 /// プレイヤーが向いている方向、兼 移動入力の方向(spec.md 1章)。
@@ -66,7 +66,7 @@ impl Player {
         let lives = lives.clamp(LIVES_MIN, LIVES_MAX);
         Player {
             row: 0,
-            col: FIELD_WIDTH / 2,
+            col: FIELD_WIDTH_DEFAULT / 2,
             facing: Direction::Down,
             bumped_direction: None,
             oxygen: OXYGEN_MAX,
@@ -76,6 +76,13 @@ impl Player {
             diamonds_collected: 0,
             elapsed_seconds: 0.0,
         }
+    }
+
+    /// 開始列をフィールド中央(`width / 2`)へ合わせ直す(TERM独自拡張。ユーザー指摘:
+    /// 「設定値に列の数を変更できるようにして」)。フィールド幅設定を反映した新規
+    /// ゲーム開始直後、既定幅前提で立てた初期列を実際の幅に合わせて呼ぶ用途。
+    pub fn recenter_for_width(&mut self, width: usize) {
+        self.col = width / 2;
     }
 
     pub fn position(&self) -> (usize, usize) {

@@ -22,8 +22,9 @@ use rodio::mixer::Mixer;
 use constants::{
     COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
     DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP,
-    MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
-    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
+    MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
+    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -202,6 +203,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
                             | ui::render::SettingsChoice::ColorClusterRate
+                            | ui::render::SettingsChoice::FieldWidth
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::MoveSpeed
@@ -263,6 +265,17 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             _ => {}
                         }
+                        settings.save();
+                    }
+                    // フィールド幅(列数、TERM独自拡張)の調整。盤面の列数そのものを変えるため
+                    // 現在の盤面には反映できず、次回の新規ゲーム開始時にのみ適用される
+                    // (ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if pause_overlay == PauseOverlay::Settings
+                            && settings_selection == ui::render::SettingsChoice::FieldWidth =>
+                    {
+                        let increase = action == InputAction::MoveRight;
+                        settings.field_width = adjust_field_width(settings.field_width, increase);
                         settings.save();
                     }
                     // Xブロック/AIR/スター/ダイヤの配分率・色数調整(TERM独自拡張)。プレイ中なので、
@@ -419,6 +432,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.diamond_spawn_rate_percent,
                             settings.color_count,
                             settings.color_cluster_rate_percent,
+                            settings.field_width,
                             settings.block_fall_tick_ms,
                             settings.player_fall_tick_ms,
                             settings.move_cooldown_ms,
@@ -443,6 +457,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.diamond_spawn_rate_percent,
                     settings.color_count,
                     settings.color_cluster_rate_percent,
+                    settings.field_width,
                     settings.block_fall_tick_ms,
                     settings.player_fall_tick_ms,
                     settings.move_cooldown_ms,
@@ -481,6 +496,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::DiamondRate
                             | ui::render::SettingsChoice::ColorCount
                             | ui::render::SettingsChoice::ColorClusterRate
+                            | ui::render::SettingsChoice::FieldWidth
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::MoveSpeed
@@ -518,6 +534,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::DiamondRate
                                 | ui::render::SettingsChoice::ColorCount
                                 | ui::render::SettingsChoice::ColorClusterRate
+                                | ui::render::SettingsChoice::FieldWidth
                                 | ui::render::SettingsChoice::BlockFallSpeed
                                 | ui::render::SettingsChoice::PlayerFallSpeed
                                 | ui::render::SettingsChoice::MoveSpeed
@@ -554,6 +571,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     increase,
                                     COLOR_CLUSTER_RATE_PERCENT_MIN,
                                 );
+                            }
+                            ui::render::SettingsChoice::FieldWidth => {
+                                settings.field_width = adjust_field_width(settings.field_width, increase);
                             }
                             ui::render::SettingsChoice::BlockFallSpeed => {
                                 settings.block_fall_tick_ms = adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
@@ -594,7 +614,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     input::AnyKeyAction::OpenHelp => screen = Screen::Help,
                     input::AnyKeyAction::Advance => {
                         let seed: u64 = rng.random();
-                        let mut game = Game::new(seed);
+                        // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される(TERM独自
+                        // 拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+                        let mut game = Game::new_with_width(seed, settings.field_width);
                         // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
                         // (settings.rs)、新しいゲーム開始時にも引き継ぐ(TERM独自拡張)。
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
@@ -637,10 +659,18 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 }
 
 /// MUSIC設定・現在の画面から、実際にBGMスレッドで鳴らすべきかを判定する(TERM独自
-/// 拡張。ユーザー指摘: 「タイトル画面ではMUSIC無し」)。タイトル画面ではMUSIC設定の
-/// ON/OFFに関わらず常に無音にする。
+/// 拡張。ユーザー指摘: 「タイトル画面ではMUSIC無し」「ゲームオーバーになったら、
+/// ゲームオーバーの短いミス音の後、MUSIC停止」)。タイトル画面・ゲームオーバー中は
+/// MUSIC設定のON/OFFに関わらず常に無音にする。
 fn effective_music_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
-    settings_music_enabled && !matches!(screen, Screen::Title)
+    if !settings_music_enabled {
+        return false;
+    }
+    match screen {
+        Screen::Title => false,
+        Screen::Playing(game) => game.status != GameStatus::GameOver,
+        Screen::Settings | Screen::Help => true,
+    }
 }
 
 /// アプリ全体の画面状態。タイトル画面・設定画面・プレイ中(Gameを保持)の3値
@@ -704,6 +734,16 @@ fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
         (current + MOVE_COOLDOWN_MS_STEP).min(MOVE_COOLDOWN_MS_MAX)
     } else {
         current.saturating_sub(MOVE_COOLDOWN_MS_STEP).max(MOVE_COOLDOWN_MS_MIN)
+    }
+}
+
+/// フィールド幅(列数)を`FIELD_WIDTH_STEP`ぶん増減する(TERM独自拡張。ユーザー指摘:
+/// 「設定値に列の数を変更できるようにして」)。新規ゲーム開始時にのみ反映される。
+fn adjust_field_width(current: usize, increase: bool) -> usize {
+    if increase {
+        (current + FIELD_WIDTH_STEP).min(FIELD_WIDTH_MAX)
+    } else {
+        current.saturating_sub(FIELD_WIDTH_STEP).max(FIELD_WIDTH_MIN)
     }
 }
 

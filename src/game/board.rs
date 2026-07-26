@@ -9,7 +9,7 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    depth_fraction, COLOR_CLUSTER_DEPTH_START_PROB, FIELD_WIDTH, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
+    depth_fraction, COLOR_CLUSTER_DEPTH_START_PROB, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
     STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS,
 };
 
@@ -160,11 +160,11 @@ fn resolve_run_limits(candidate: ColorKind, left3: [Option<ColorKind>; 3], top2:
 /// 常に`None`のままにする。これにより3.2の「上隣が存在し色ブロックである」という
 /// 条件判定が、安全地帯を挟んでも自然にfalseになる(安全地帯にダミー色を置いて
 /// しまうと、実際には存在しない色ブロックから3行目以降の生成が影響を受けてしまう)。
-fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize) -> Vec<[Option<ColorKind>; FIELD_WIDTH]> {
-    let mut base: Vec<[Option<ColorKind>; FIELD_WIDTH]> = vec![[None; FIELD_WIDTH]; depth_rows];
+fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize, width: usize) -> Vec<Vec<Option<ColorKind>>> {
+    let mut base: Vec<Vec<Option<ColorKind>>> = vec![vec![None; width]; depth_rows];
 
     for row in 2..depth_rows {
-        for col in 0..FIELD_WIDTH {
+        for col in 0..width {
             let left = if col == 0 { None } else { base[row][col - 1] };
             let top = base[row - 1][col];
             let candidate = pick_base_color(rng, left, top);
@@ -184,8 +184,9 @@ fn generate_base_colors(rng: &mut ChaCha8Rng, depth_rows: usize) -> Vec<[Option<
 }
 
 /// マス`(row, col)`の上下左右のうち、盤内かつ色ブロックであるものの色一覧(spec.md 3.4)。
-fn same_color_neighbor_candidates(base: &[[Option<ColorKind>; FIELD_WIDTH]], row: usize, col: usize) -> Vec<ColorKind> {
+fn same_color_neighbor_candidates(base: &[Vec<Option<ColorKind>>], row: usize, col: usize) -> Vec<ColorKind> {
     let rows = base.len();
+    let width = base[row].len();
     let mut neighbors = Vec::with_capacity(4);
     if row > 0
         && let Some(c) = base[row - 1][col] {
@@ -199,7 +200,7 @@ fn same_color_neighbor_candidates(base: &[[Option<ColorKind>; FIELD_WIDTH]], row
         && let Some(c) = base[row][col - 1] {
             neighbors.push(c);
         }
-    if col + 1 < FIELD_WIDTH
+    if col + 1 < width
         && let Some(c) = base[row][col + 1] {
             neighbors.push(c);
         }
@@ -226,10 +227,11 @@ fn most_common_color(neighbors: &[ColorKind]) -> ColorKind {
 /// 盤面全体に対して1回だけ、行→列の順に走査しながら**その場で**書き換える
 /// (spec.mdのpseudocode通り、スナップショットを取らず逐次反映する。既に置換済みの
 /// 隣接セルの新しい色を後続の判定が参照することも許容する)。
-fn fix_isolated_cells(base: &mut [[Option<ColorKind>; FIELD_WIDTH]]) {
+fn fix_isolated_cells(base: &mut [Vec<Option<ColorKind>>]) {
     let rows = base.len();
     for row in 0..rows {
-        for col in 0..FIELD_WIDTH {
+        let width = base[row].len();
+        for col in 0..width {
             let Some(me) = base[row][col] else { continue };
             let neighbors = same_color_neighbor_candidates(base, row, col);
             let is_isolated = !neighbors.contains(&me);
@@ -309,34 +311,38 @@ fn overlay_rock_oxygen_diamond_with_rates(
 /// 差し替える(TERM独自拡張。ユーザー指摘: 「Xブロック配置のとき横一列全部埋まる
 /// 配置にはならないように」)。岩ブロックだけで完全にふさがった横一列は掘削しないと
 /// 絶対に通過できない壁になってしまうため、必ず逃げ道を1マス残す。
-fn ensure_row_is_not_fully_blocked_by_rock(row_cells: &mut [Cell; FIELD_WIDTH], rng: &mut ChaCha8Rng, color_count: usize) {
+fn ensure_row_is_not_fully_blocked_by_rock(row_cells: &mut [Cell], rng: &mut ChaCha8Rng, color_count: usize) {
     if row_cells.iter().all(|c| matches!(c, Cell::Rock { .. })) {
-        let escape_col = rng.random_range(0..FIELD_WIDTH);
+        let escape_col = rng.random_range(0..row_cells.len());
         let escape_color = ColorKind::ALL[rng.random_range(0..color_count)];
         row_cells[escape_col] = Cell::Color(escape_color);
     }
 }
 
-/// ゲームフィールド全体(1000行×12列)。
+/// ゲームフィールド全体(1000行×`width`列)。`width`(列数)はTERM独自拡張で設定
+/// 可能(ユーザー指摘: 「設定値に列の数を変更できるようにして」)。新規ゲーム開始時に
+/// 決まり、以後そのゲームの間は固定(既存の`rows`各要素の長さと必ず一致する)。
 #[derive(Debug, Clone)]
 pub struct Board {
-    pub rows: Vec<[Cell; FIELD_WIDTH]>,
+    pub rows: Vec<Vec<Cell>>,
+    pub width: usize,
 }
 
 impl Board {
-    /// 乱数シードから深さ depth_rows 行ぶんのフィールドを事前生成する(spec.md 3.6)。
+    /// 乱数シードから深さ depth_rows 行×width列ぶんのフィールドを事前生成する
+    /// (spec.md 3.6)。
     ///
     /// 手順: 3.2〜3.3の下地生成を全行分行い、3.4の孤立セル解消を盤面全体に1回、
     /// 最後に3.5の上書きを全マスに適用する。この順序で1回だけ行い、生成し直しはしない。
-    pub fn generate(seed: u64, depth_rows: usize) -> Self {
+    pub fn generate(seed: u64, depth_rows: usize, width: usize) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
-        let mut base = generate_base_colors(&mut rng, depth_rows);
+        let mut base = generate_base_colors(&mut rng, depth_rows, width);
         fix_isolated_cells(&mut base);
 
         let rows = (0..depth_rows)
             .map(|row| {
-                let mut cells = [Cell::Empty; FIELD_WIDTH];
+                let mut cells = vec![Cell::Empty; width];
                 for (col, cell) in cells.iter_mut().enumerate() {
                     *cell = match base[row][col] {
                         None => Cell::Empty, // 安全地帯(深度0〜1m)
@@ -348,11 +354,17 @@ impl Board {
             })
             .collect();
 
-        Board { rows }
+        Board { rows, width }
     }
 
     pub fn depth_rows(&self) -> usize {
         self.rows.len()
+    }
+
+    /// フィールド幅(列数)。新規ゲーム開始時に決まり、以後そのゲームの間は固定
+    /// (TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+    pub fn width(&self) -> usize {
+        self.width
     }
 
     pub fn cell(&self, row: usize, col: usize) -> Cell {
@@ -418,7 +430,7 @@ impl Board {
                 .clamp(0.0, 1.0);
             let rock_cluster_bonus_if_adjacent = ROCK_CLUSTER_DEPTH_MAX_BONUS * fraction;
 
-            for col in 0..FIELD_WIDTH {
+            for col in 0..self.width {
                 let current = self.rows[row][col];
                 if current == Cell::Empty {
                     continue;
@@ -476,7 +488,7 @@ fn connected_group(board: &Board, start: (usize, usize), same_kind: impl Fn(Cell
 
         let neighbors = [(r.wrapping_sub(1), c), (r + 1, c), (r, c.wrapping_sub(1)), (r, c + 1)];
         for (nr, nc) in neighbors {
-            if nr >= depth_rows || nc >= FIELD_WIDTH {
+            if nr >= depth_rows || nc >= board.width() {
                 continue;
             }
             if visited.contains(&(nr, nc)) {
@@ -681,8 +693,9 @@ fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
     let mut visited: HashSet<(usize, usize)> = HashSet::new();
     let mut groups = Vec::new();
 
+    let width = board.width();
     for row in 0..depth_rows {
-        for col in 0..FIELD_WIDTH {
+        for col in 0..width {
             let pos = (row, col);
             if visited.contains(&pos) {
                 continue;
@@ -1001,8 +1014,9 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
     let mut melted = Vec::new();
     let vanish_at_ms = STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS;
 
+    let width = board.width();
     for r in row_start..=row_end {
-        for c in 0..FIELD_WIDTH {
+        for c in 0..width {
             if let Cell::Star { visible_ms } = board.cell(r, c) {
                 let updated = visible_ms.saturating_add(delta_ms);
                 if updated >= vanish_at_ms {
@@ -1021,11 +1035,13 @@ pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
     use crate::constants::SHAKE_TICKS;
 
     fn empty_board(rows: usize) -> Board {
         Board {
-            rows: vec![[Cell::Empty; FIELD_WIDTH]; rows],
+            rows: vec![vec![Cell::Empty; FIELD_WIDTH]; rows],
+            width: FIELD_WIDTH,
         }
     }
 
@@ -1033,7 +1049,7 @@ mod tests {
 
     #[test]
     fn generate_keeps_first_two_rows_empty() {
-        let board = Board::generate(1, 50);
+        let board = Board::generate(1, 50, FIELD_WIDTH);
         for col in 0..FIELD_WIDTH {
             assert_eq!(board.cell(0, col), Cell::Empty);
             assert_eq!(board.cell(1, col), Cell::Empty);
@@ -1503,8 +1519,8 @@ mod tests {
 
     #[test]
     fn generate_produces_deterministic_output_for_same_seed() {
-        let a = Board::generate(42, 100);
-        let b = Board::generate(42, 100);
+        let a = Board::generate(42, 100, FIELD_WIDTH);
+        let b = Board::generate(42, 100, FIELD_WIDTH);
         for row in 0..100 {
             assert_eq!(a.rows[row], b.rows[row]);
         }
@@ -1514,7 +1530,7 @@ mod tests {
     // 3.4の孤立セル解消は上限を再チェックしない仕様(spec.md 3.4末尾)のため、
     // その後処理を経た最終盤面ではごく稀に上限を超える可能性を許容する
     // (`resolve_run_limits_*`の単体テストで境界条件自体は個別に検証する)。
-    fn assert_run_limits_hold(base: &[[Option<ColorKind>; FIELD_WIDTH]], seed: u64) {
+    fn assert_run_limits_hold(base: &[Vec<Option<ColorKind>>], seed: u64) {
         for (row, cells) in base.iter().enumerate() {
             let mut run_color = None;
             let mut run_len = 0usize;
@@ -1547,7 +1563,7 @@ mod tests {
     #[test]
     fn base_color_generation_respects_run_limits_before_isolated_cell_fix() {
         let mut rng = ChaCha8Rng::seed_from_u64(7);
-        let base = generate_base_colors(&mut rng, 500);
+        let base = generate_base_colors(&mut rng, 500, FIELD_WIDTH);
         assert_run_limits_hold(&base, 7);
     }
 
@@ -1557,7 +1573,7 @@ mod tests {
     fn base_color_generation_respects_run_limits_across_many_seeds() {
         for seed in 0..20u64 {
             let mut rng = ChaCha8Rng::seed_from_u64(seed);
-            let base = generate_base_colors(&mut rng, 300);
+            let base = generate_base_colors(&mut rng, 300, FIELD_WIDTH);
             assert_run_limits_hold(&base, seed);
         }
     }
@@ -1582,7 +1598,7 @@ mod tests {
         let mut vertical_violations = 0usize;
 
         for seed in 0..10u64 {
-            let board = Board::generate(seed, 300);
+            let board = Board::generate(seed, 300, FIELD_WIDTH);
 
             for row in 0..board.depth_rows() {
                 let mut run_color = None;
@@ -1640,7 +1656,7 @@ mod tests {
         // target=(2,2)より前に処理される上(1,2)・左(2,1)は、それ自身が孤立と判定されず
         // 安定してRed/Blueのまま残るよう(0,0)や(2,0)で「支え」を用意しておく。
         // targetより後に処理される下(3,2)・右(2,3)は素の値のまま参照されるため、そのまま置く。
-        let mut base: Vec<[Option<ColorKind>; FIELD_WIDTH]> = vec![[None; FIELD_WIDTH]; 4];
+        let mut base: Vec<Vec<Option<ColorKind>>> = vec![vec![None; FIELD_WIDTH]; 4];
         base[1][1] = Some(ColorKind::Red); // (1,2)の左隣、先に処理されRedのまま安定する支え
         base[1][2] = Some(ColorKind::Red); // 上隣。(1,1)がRedで支えられ孤立判定されない
         base[2][0] = Some(ColorKind::Blue); // (2,1)の左隣、先に処理されBlueのまま安定する支え
@@ -1661,7 +1677,7 @@ mod tests {
         // target=(1,1)の隣接はRed(上、既に処理済みで安定)とBlue(右、targetより後に処理
         // されるため素の値)の1個ずつでタイ。ColorKind::ALLの順(Red,Blue,Green,Yellow)で
         // 先に来るRedが採用される。
-        let mut base: Vec<[Option<ColorKind>; FIELD_WIDTH]> = vec![[None; FIELD_WIDTH]; 3];
+        let mut base: Vec<Vec<Option<ColorKind>>> = vec![vec![None; FIELD_WIDTH]; 3];
         base[0][0] = Some(ColorKind::Red); // (0,1)の左隣、先に処理されRedのまま安定する支え
         base[0][1] = Some(ColorKind::Red); // 上隣。(0,0)がRedで支えられ孤立判定されない
         base[1][1] = Some(ColorKind::Green); // target: 孤立セル自身
@@ -1675,7 +1691,7 @@ mod tests {
     #[test]
     fn fix_isolated_cells_leaves_cell_untouched_when_no_color_neighbors_exist() {
         // 四方全てNone(安全地帯/盤外相当)の場合は置換しない(spec.md 3.4)。
-        let mut base: Vec<[Option<ColorKind>; FIELD_WIDTH]> = vec![[None; FIELD_WIDTH]; 3];
+        let mut base: Vec<Vec<Option<ColorKind>>> = vec![vec![None; FIELD_WIDTH]; 3];
         base[1][1] = Some(ColorKind::Red);
 
         fix_isolated_cells(&mut base);
@@ -2490,7 +2506,7 @@ mod tests {
         let mut total_len = 0u64;
         let mut total_runs = 0u64;
         for seed in seeds {
-            let board = Board::generate(seed, depth_rows);
+            let board = Board::generate(seed, depth_rows, FIELD_WIDTH);
             for row in 0..board.depth_rows() {
                 let mut run_color: Option<ColorKind> = None;
                 let mut run_len = 0u64;
@@ -2562,7 +2578,7 @@ mod tests {
         // 確認する。収束せず未支持のまま残る塊があれば、揺れ/連鎖判定のどこかで
         // 永続的に浮いたままになるバグがあることを意味する。
         for seed in 0..20u64 {
-            let mut board = Board::generate(seed, 60);
+            let mut board = Board::generate(seed, 60, FIELD_WIDTH);
             let mut gravity = GravityState::new();
             let player_pos = (usize::MAX, usize::MAX); // 影響しない盤外位置
 
@@ -2588,7 +2604,7 @@ mod tests {
         // かつ深度が進むほど岩ブロックの塊化ボーナスが強く効く(ROCK_CLUSTER_DEPTH_MAX_BONUS)
         // ため、そのギャップを埋めて深い深度(400〜600m帯)でも同じ不変条件を確認する。
         for seed in 0..2u64 {
-            let mut board = Board::generate(seed, 70);
+            let mut board = Board::generate(seed, 70, FIELD_WIDTH);
             let gravity_for_reroll = GravityState::new();
             board.reroll_overlays_from_row(2, 100, 100, 100, 100, 4, 100, &gravity_for_reroll);
 

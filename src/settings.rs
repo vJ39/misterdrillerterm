@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::constants::{
-    COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, MOVE_COOLDOWN_MS_DEFAULT, SHAKE_DURATION_MS,
-    SPAWN_RATE_PERCENT_DEFAULT,
+    COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT,
+    SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
 };
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
@@ -53,6 +53,10 @@ pub struct Settings {
     /// 横移動のクールダウン間隔(ms、小さいほど速い。TERM独自拡張)。ユーザー指摘:
     /// 「横移動のスピードを設定で変えられるように」。設定画面から調整する。
     pub move_cooldown_ms: u64,
+    /// フィールド幅(列数、TERM独自拡張)。ユーザー指摘: 「設定値に列の数を変更
+    /// できるようにして」。設定画面から調整する。新規ゲーム開始時にのみ反映され、
+    /// プレイ中に変更しても次回開始まで見た目には反映しない。
+    pub field_width: usize,
 }
 
 impl Default for Settings {
@@ -71,6 +75,7 @@ impl Default for Settings {
             color_cluster_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             dodge_recovery_ms: DODGE_RECOVERY_MS_DEFAULT,
             move_cooldown_ms: MOVE_COOLDOWN_MS_DEFAULT,
+            field_width: FIELD_WIDTH_DEFAULT,
         }
     }
 }
@@ -123,6 +128,9 @@ impl Settings {
                 .unwrap_or(default.color_cluster_rate_percent),
             dodge_recovery_ms: parse_u64_field(&text, "dodge_recovery_ms").unwrap_or(default.dodge_recovery_ms),
             move_cooldown_ms: parse_u64_field(&text, "move_cooldown_ms").unwrap_or(default.move_cooldown_ms),
+            field_width: parse_u64_field(&text, "field_width")
+                .map(|v| v as usize)
+                .unwrap_or(default.field_width),
         }
     }
 
@@ -144,7 +152,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
@@ -157,7 +165,8 @@ impl Settings {
             self.color_count,
             self.color_cluster_rate_percent,
             self.dodge_recovery_ms,
-            self.move_cooldown_ms
+            self.move_cooldown_ms,
+            self.field_width
         );
         if let Ok(mut file) = std::fs::File::create(path) {
             let _ = file.write_all(json.as_bytes());
@@ -213,6 +222,7 @@ mod tests {
         assert_eq!(settings.color_cluster_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
         assert_eq!(settings.dodge_recovery_ms, DODGE_RECOVERY_MS_DEFAULT);
         assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_DEFAULT);
+        assert_eq!(settings.field_width, FIELD_WIDTH_DEFAULT);
     }
 
     #[test]
@@ -272,6 +282,7 @@ mod tests {
             color_cluster_rate_percent: 0,
             dodge_recovery_ms: 500,
             move_cooldown_ms: 40,
+            field_width: 8,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -290,6 +301,7 @@ mod tests {
             color_cluster_rate_percent: 300,
             dodge_recovery_ms: 2000,
             move_cooldown_ms: 300,
+            field_width: 20,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

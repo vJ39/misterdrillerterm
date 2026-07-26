@@ -130,7 +130,7 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
 
     let (_, dc) = dir.delta();
     let nc = player.col as isize + dc;
-    if nc < 0 || nc as usize >= crate::constants::FIELD_WIDTH {
+    if nc < 0 || nc as usize >= board.width() {
         return LateralOutcome::OutOfBounds;
     }
     let nc = nc as usize;
@@ -240,7 +240,7 @@ pub fn drill_facing(board: &mut Board, player: &mut Player, gravity: &GravitySta
     let (dr, dc) = player.facing.delta();
     let nr = player.row as isize + dr;
     let nc = player.col as isize + dc;
-    if nr < 0 || nc < 0 || nr as usize >= board.depth_rows() || nc as usize >= crate::constants::FIELD_WIDTH {
+    if nr < 0 || nc < 0 || nr as usize >= board.depth_rows() || nc as usize >= board.width() {
         return DrillOutcome::OutOfBounds;
     }
 
@@ -362,12 +362,14 @@ pub fn apply_player_free_fall(board: &mut Board, player: &mut Player) -> FreeFal
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, ROCK_HITS_TO_BREAK, SHAKE_TICKS};
+    use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
+    use crate::constants::{OXYGEN_MAX, ROCK_HITS_TO_BREAK, SHAKE_TICKS};
     use crate::game::board::ColorKind;
 
     fn empty_board(rows: usize) -> Board {
         Board {
-            rows: vec![[Cell::Empty; FIELD_WIDTH]; rows],
+            rows: vec![vec![Cell::Empty; FIELD_WIDTH]; rows],
+            width: FIELD_WIDTH,
         }
     }
 

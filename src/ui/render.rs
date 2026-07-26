@@ -12,7 +12,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::constants::{FIELD_WIDTH, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS};
+use crate::constants::{OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS};
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, Pos};
 use crate::game::player::Direction;
 use crate::game::{Game, GameOverChoice, GameStatus};
@@ -28,8 +28,6 @@ use super::intro;
 const TOTAL_SCREEN_W: u16 = 74;
 const TOTAL_SCREEN_H: u16 = 32;
 
-/// フィールドペイン幅 = 12列×4文字+左右ボーダー2文字(9.2)。
-const FIELD_PANE_W: u16 = 50;
 /// ステータスパネル幅(9.1・9.7)。
 const HUD_PANE_W: u16 = 24;
 /// 縮退表示時のHUDペイン最小幅(9.8)。
@@ -67,13 +65,27 @@ struct LayoutPlan {
     game_frame: Rect,
 }
 
-fn compute_layout(area: Rect) -> LayoutPlan {
-    if area.width >= TOTAL_SCREEN_W && area.height >= TOTAL_SCREEN_H {
-        let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+/// フィールドペイン幅(列数×4文字+左右ボーダー2文字、9.2)。列数(TERM独自拡張。
+/// ユーザー指摘: 「設定値に列の数を変更できるようにして」)に応じて可変になる。
+fn field_pane_w(field_width: usize) -> u16 {
+    field_width as u16 * CELL_W + 2
+}
+
+/// フレーム全体の幅(フィールドペイン+HUDペイン)。列数によって可変になる。
+fn total_screen_w(field_width: usize) -> u16 {
+    field_pane_w(field_width) + HUD_PANE_W
+}
+
+fn compute_layout(area: Rect, field_width: usize) -> LayoutPlan {
+    let total_w = total_screen_w(field_width);
+    let field_pane_w = field_pane_w(field_width);
+
+    if area.width >= total_w && area.height >= TOTAL_SCREEN_H {
+        let frame_rect = centered_fixed_rect(total_w, TOTAL_SCREEN_H, area);
 
         let cols = Layout::default()
             .direction(LayoutDirection::Horizontal)
-            .constraints([Constraint::Length(FIELD_PANE_W), Constraint::Length(HUD_PANE_W)])
+            .constraints([Constraint::Length(field_pane_w), Constraint::Length(HUD_PANE_W)])
             .split(frame_rect);
         let field_col = cols[0];
         let hud_rect = cols[1];
@@ -97,16 +109,16 @@ fn compute_layout(area: Rect) -> LayoutPlan {
         }
     } else {
         // 縮退表示(9.8): セルサイズ(4×2)は変えず、可視行数とHUD幅だけを縮める。
-        let field_width = FIELD_PANE_W.min(area.width);
+        let field_width_px = field_pane_w.min(area.width);
         let field_rect = Rect {
             x: area.x,
             y: area.y,
-            width: field_width,
+            width: field_width_px,
             height: area.height,
         };
-        let hud_width = area.width.saturating_sub(field_width).max(HUD_PANE_W_MIN);
+        let hud_width = area.width.saturating_sub(field_width_px).max(HUD_PANE_W_MIN);
         let hud_rect = Rect {
-            x: area.x + field_width,
+            x: area.x + field_width_px,
             y: area.y,
             width: hud_width,
             height: area.height,
@@ -174,7 +186,7 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
         return;
     }
 
-    let plan = compute_layout(area);
+    let plan = compute_layout(area, game.board.width());
     draw_field(frame, plan.field_rect, plan.visible_rows, game);
     draw_status(frame, plan.hud_rect, game);
 
@@ -349,6 +361,9 @@ pub enum SettingsChoice {
     /// 色ブロックの結合しやすさ(%、0まで下げられる)。TERM独自拡張。
     /// ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」
     ColorClusterRate,
+    /// フィールド幅(列数)。TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更
+    /// できるようにして」。新規ゲーム開始時にのみ反映される。
+    FieldWidth,
     /// ブロック落下速度(tick間隔, ms)。TERM独自拡張。従来はデバッグショートカット
     /// ([ ])でのみ調整可能だったが、ユーザー指摘: 「ブロックが落ちるスピードの
     /// 設定値がないよね」を受け、設定画面からも調整できるようにした。
@@ -377,7 +392,8 @@ impl SettingsChoice {
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
             SettingsChoice::DiamondRate => SettingsChoice::ColorCount,
             SettingsChoice::ColorCount => SettingsChoice::ColorClusterRate,
-            SettingsChoice::ColorClusterRate => SettingsChoice::BlockFallSpeed,
+            SettingsChoice::ColorClusterRate => SettingsChoice::FieldWidth,
+            SettingsChoice::FieldWidth => SettingsChoice::BlockFallSpeed,
             SettingsChoice::BlockFallSpeed => SettingsChoice::PlayerFallSpeed,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::MoveSpeed,
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
@@ -398,7 +414,8 @@ impl SettingsChoice {
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
             SettingsChoice::ColorCount => SettingsChoice::DiamondRate,
             SettingsChoice::ColorClusterRate => SettingsChoice::ColorCount,
-            SettingsChoice::BlockFallSpeed => SettingsChoice::ColorClusterRate,
+            SettingsChoice::FieldWidth => SettingsChoice::ColorClusterRate,
+            SettingsChoice::BlockFallSpeed => SettingsChoice::FieldWidth,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::BlockFallSpeed,
             SettingsChoice::MoveSpeed => SettingsChoice::PlayerFallSpeed,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::MoveSpeed,
@@ -420,6 +437,7 @@ pub fn draw_settings(
     diamond_rate_percent: u32,
     color_count: u8,
     color_cluster_rate_percent: u32,
+    field_width: usize,
     block_fall_tick_ms: u64,
     player_fall_tick_ms: u64,
     move_cooldown_ms: u64,
@@ -457,6 +475,11 @@ pub fn draw_settings(
         let style = if is_selected { selected_style } else { text_style };
         Line::from(Span::styled(format!("{prefix}{label}: {count}"), style))
     };
+    let width_line = |label: &str, width: usize, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected_style } else { text_style };
+        Line::from(Span::styled(format!("{prefix}{label}: {width}"), style))
+    };
     let ms_line = |label: &str, ms: u64, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
         let style = if is_selected { selected_style } else { text_style };
@@ -478,6 +501,7 @@ pub fn draw_settings(
             color_cluster_rate_percent,
             selection == SettingsChoice::ColorClusterRate,
         ),
+        width_line("列数(次回開始時に反映)", field_width, selection == SettingsChoice::FieldWidth),
         ms_line(
             "ブロック落下速度(小さいほど速い)",
             block_fall_tick_ms,
@@ -557,7 +581,7 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
         }
 
         let board_row = top_row + screen_row;
-        for col in 0..FIELD_WIDTH {
+        for col in 0..game.board.width() {
             let x = inner.x + col as u16 * CELL_W;
             if x + CELL_W > inner.x + inner.width {
                 break;
@@ -794,7 +818,7 @@ struct ConnMask {
 /// 色ブロック(同色判定)・岩ブロック(hitsを問わずRockかどうかの判定)の両方で使う。
 fn conn_mask_by(board: &Board, row: usize, col: usize, same: impl Fn(BoardCell) -> bool) -> ConnMask {
     let check = |r: isize, c: isize| -> bool {
-        r >= 0 && (r as usize) < board.depth_rows() && c >= 0 && (c as usize) < FIELD_WIDTH && same(board.cell(r as usize, c as usize))
+        r >= 0 && (r as usize) < board.depth_rows() && c >= 0 && (c as usize) < board.width() && same(board.cell(r as usize, c as usize))
     };
     ConnMask {
         up: check(row as isize - 1, col as isize),
@@ -1115,6 +1139,7 @@ fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
 
     #[test]
     fn star_glyph_toggles_every_sparkle_period_starting_from_visible() {
@@ -1130,7 +1155,8 @@ mod tests {
 
     fn board_with(rows: usize) -> Board {
         Board {
-            rows: vec![[BoardCell::Empty; FIELD_WIDTH]; rows],
+            rows: vec![vec![BoardCell::Empty; FIELD_WIDTH]; rows],
+            width: FIELD_WIDTH,
         }
     }
 
@@ -1178,6 +1204,7 @@ mod tests {
             SettingsChoice::DiamondRate,
             SettingsChoice::ColorCount,
             SettingsChoice::ColorClusterRate,
+            SettingsChoice::FieldWidth,
             SettingsChoice::BlockFallSpeed,
             SettingsChoice::PlayerFallSpeed,
             SettingsChoice::MoveSpeed,
@@ -1187,6 +1214,25 @@ mod tests {
             assert_eq!(choice.cycle().cycle_back(), choice);
             assert_eq!(choice.cycle_back().cycle(), choice);
         }
+    }
+
+    // --- フィールド幅(列数)可変レイアウト(TERM独自拡張) ---
+
+    #[test]
+    fn field_pane_w_and_total_screen_w_scale_with_field_width() {
+        // ユーザー指摘: 「設定値に列の数を変更できるようにして」。列数が増えれば
+        // フィールドペイン・フレーム全体の幅も広くなることを確認する。
+        assert!(field_pane_w(20) > field_pane_w(12));
+        assert!(field_pane_w(12) > field_pane_w(6));
+        assert!(total_screen_w(20) > total_screen_w(12));
+    }
+
+    #[test]
+    fn compute_layout_field_rect_widens_for_a_wider_field() {
+        let area = Rect::new(0, 0, 200, 100);
+        let narrow = compute_layout(area, 6);
+        let wide = compute_layout(area, 20);
+        assert!(wide.field_rect.width > narrow.field_rect.width);
     }
 
     // --- 揺れ(ぐらぐら)アニメーションのジッター(TERM独自拡張) ---

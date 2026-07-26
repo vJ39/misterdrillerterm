@@ -16,8 +16,8 @@ use crate::constants::{
     DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
     BLOCK_VANISH_FLASH_MS, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
     FALL_SPEED_DEPTH_MAX_SPEEDUP,
-    FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS,
-    LIVES_DEFAULT, LIVES_MAX,
+    FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS,
+    INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX,
     MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
 };
@@ -258,18 +258,34 @@ pub struct Game {
 }
 
 impl Game {
-    /// 指定シードで、既定ライフ数の新しいゲームを開始する。
+    /// 指定シードで、既定ライフ数・既定フィールド幅の新しいゲームを開始する。
     pub fn new(seed: u64) -> Self {
         Self::new_with_lives(seed, LIVES_DEFAULT)
     }
 
-    /// 指定シード・ライフ数で新しいゲームを開始する(spec.md 8章「1〜5機から選べる」)。
+    /// 指定シード・ライフ数で、既定フィールド幅の新しいゲームを開始する
+    /// (spec.md 8章「1〜5機から選べる」)。
     pub fn new_with_lives(seed: u64, lives: u8) -> Self {
-        let player = Player::with_lives(lives);
+        Self::new_with_lives_and_width(seed, lives, FIELD_WIDTH_DEFAULT)
+    }
+
+    /// 指定シード・フィールド幅で、既定ライフ数の新しいゲームを開始する(TERM独自拡張。
+    /// ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+    pub fn new_with_width(seed: u64, width: usize) -> Self {
+        Self::new_with_lives_and_width(seed, LIVES_DEFAULT, width)
+    }
+
+    /// 指定シード・ライフ数・フィールド幅で新しいゲームを開始する(TERM独自拡張。
+    /// ユーザー指摘: 「設定値に列の数を変更できるようにして」)。範囲外の値は
+    /// `FIELD_WIDTH_MIN`〜`MAX`にクランプする。
+    pub fn new_with_lives_and_width(seed: u64, lives: u8, width: usize) -> Self {
+        let width = width.clamp(FIELD_WIDTH_MIN, FIELD_WIDTH_MAX);
+        let mut player = Player::with_lives(lives);
+        player.recenter_for_width(width);
         let last_level_reported = player.level();
         let start_position = player.position();
         Game {
-            board: Board::generate(seed, FIELD_DEPTH_M),
+            board: Board::generate(seed, FIELD_DEPTH_M, width),
             player,
             status: GameStatus::Playing,
             gravity_state: GravityState::new(),
@@ -593,7 +609,7 @@ impl Game {
     fn clear_three_columns_above_player(&mut self) {
         let col = self.player.col;
         let col_start = col.saturating_sub(1);
-        let col_end = (col + 1).min(FIELD_WIDTH - 1);
+        let col_end = (col + 1).min(self.board.width() - 1);
         for row in 0..self.player.row {
             for c in col_start..=col_end {
                 if !matches!(self.board.cell(row, c), Cell::Oxygen) {
@@ -1122,7 +1138,7 @@ impl Game {
             return;
         }
         for row in 0..self.player.row {
-            for col in 0..FIELD_WIDTH {
+            for col in 0..self.board.width() {
                 if !matches!(self.board.cell(row, col), Cell::Oxygen) {
                     self.board.set(row, col, Cell::Empty);
                 }
@@ -1147,7 +1163,7 @@ impl Game {
         let start_row = self.player.row.saturating_sub(DEBUG_UNIFY_COLORS_RANGE_ROWS);
         let end_row = (self.player.row + DEBUG_UNIFY_COLORS_RANGE_ROWS).min(self.board.depth_rows().saturating_sub(1));
         for row in start_row..=end_row {
-            for col in 0..FIELD_WIDTH {
+            for col in 0..self.board.width() {
                 if matches!(self.board.cell(row, col), Cell::Color(_)) {
                     let chosen = if rng.random_bool(0.5) { first } else { second };
                     self.board.set(row, col, Cell::Color(chosen));
@@ -1194,6 +1210,7 @@ fn move_anim_duration_secs() -> f32 {
 mod tests {
     use super::*;
     use board::{Cell, ColorKind};
+    use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
     use crate::constants::{ROCK_HITS_TO_BREAK, SHAKE_TICKS};
 
     /// テスト用ヘルパー: 盤面全体を`Cell::Empty`にクリアする。`Game::new`はランダム
@@ -1908,7 +1925,7 @@ mod tests {
         // プレイヤーの通り道を広めにEmptyでクリアしてから検証する。
         let mut game = Game::new(20);
         for row in 5..16 {
-            for col in 0..crate::constants::FIELD_WIDTH {
+            for col in 0..FIELD_WIDTH {
                 game.board.rows[row][col] = Cell::Empty;
             }
         }
@@ -1970,7 +1987,7 @@ mod tests {
     fn player_does_not_fall_when_supported() {
         let mut game = Game::new(21);
         for row in 2..6 {
-            for col in 0..crate::constants::FIELD_WIDTH {
+            for col in 0..FIELD_WIDTH {
                 game.board.rows[row][col] = Cell::Empty;
             }
         }
@@ -2434,6 +2451,27 @@ mod tests {
         let game = Game::new(32);
         assert_eq!(game.move_anim_progress(), 1.0);
         assert_eq!(game.render_prev_position(), game.player.position());
+    }
+
+    #[test]
+    fn new_with_width_generates_a_board_of_the_requested_width_and_centers_the_player() {
+        // ユーザー指摘: 「設定値に列の数を変更できるようにして」。指定した列数で
+        // 盤面が生成され、プレイヤーの開始列もその幅の中央に合わせ直されることを確認する。
+        let game = Game::new_with_width(33, 8);
+        assert_eq!(game.board.width(), 8);
+        for row in &game.board.rows {
+            assert_eq!(row.len(), 8, "各行の長さも指定した列数と一致するはず");
+        }
+        assert_eq!(game.player.col, 4);
+    }
+
+    #[test]
+    fn new_with_width_clamps_out_of_range_values() {
+        let too_narrow = Game::new_with_width(34, 1);
+        assert_eq!(too_narrow.board.width(), crate::constants::FIELD_WIDTH_MIN);
+
+        let too_wide = Game::new_with_width(34, 999);
+        assert_eq!(too_wide.board.width(), crate::constants::FIELD_WIDTH_MAX);
     }
 
     #[test]

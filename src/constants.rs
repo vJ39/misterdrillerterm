@@ -3,8 +3,14 @@
 //! タイムアタック/ネットワーク対戦向けの定数(TIME_ATTACK_SEED, DISCOVERY_UDP_PORT 等)は
 //! それらのモードを実装するフェーズで追加する。
 
-/// フィールド幅(列数)
-pub const FIELD_WIDTH: usize = 12;
+/// フィールド幅(列数)の既定値(TERM独自拡張。ユーザー指摘: 「設定値に列の数を
+/// 変更できるようにして」)。設定画面から調整でき、settings.jsonに永続化する。
+/// プレイ中の盤面は`Board.width`(生成時に決まる実際の列数)を都度参照するため、
+/// この定数は「新規ゲーム開始時に使う既定値」としてのみ使う。
+pub const FIELD_WIDTH_DEFAULT: usize = 12;
+pub const FIELD_WIDTH_MIN: usize = 6;
+pub const FIELD_WIDTH_MAX: usize = 20;
+pub const FIELD_WIDTH_STEP: usize = 1;
 
 /// フィールド深さ(行数、m)。現在の実装対象はノーマルコース(1000m)。
 pub const FIELD_DEPTH_M: usize = 1000;
