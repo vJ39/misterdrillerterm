@@ -17,8 +17,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::constants::{
     BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
-    CHECKPOINT_ZONE_GAP_M, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS,
-    STAR_VISIBLE_GRACE_MS, TITLE_PROMPT_BLINK_MS,
+    OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -280,156 +279,104 @@ fn title_art_lines(cols: u16, rows: u16) -> Vec<Line<'static>> {
     })
 }
 
+/// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント
+/// (3行×3列、TERM独自拡張。ユーザー指摘: 「TERMMAPみたいにかっこいい題字
+/// つくってくれ」)。T/E/R/Mは`vJ39/termmap`のワードマーク(`keymap.rs`の`LOGO`)と
+/// 同じ字形をそのまま流用し、I/S/Dは同じ作法(角・ヒゲの罫線文字)で新規に起こした。
+/// 半角スペースは2列ぶんの空白で単語の区切りに使う。
+fn title_logo_glyph(c: char) -> &'static [&'static str; 3] {
+    match c {
+        'M' => &["┏┳┓", "┃┃┃", "╹╹╹"],
+        'I' => &["╺┳╸", " ┃ ", "╺┻╸"],
+        'S' => &["┏━╸", "┗━┓", "╺━┛"],
+        // 単純な箱形("┏━┓"/"┃ ┃"/"┗━┛")だとOと見分けがつかなかった(ユーザー指摘の
+        // スクショで実際に「MISORI TERM」に見えていた)ため、右側だけ丸角(細線)にして
+        // 左の角ばった縦棒(太線)とのコントラストでDの丸みを出す。
+        'D' => &["┏━╮", "┃ │", "┗━╯"],
+        'R' => &["┏━┓", "┣┳┛", "╹┗╸"],
+        'T' => &["╺┳╸", " ┃ ", " ╹ "],
+        'E' => &["┏━╸", "┣╸ ", "┗━╸"],
+        _ => &["  ", "  ", "  "],
+    }
+}
+
+/// "MISDRI TERM"のワードマーク3行を、上ほど明るい金〜赤銅色のグラデーションで組む
+/// (termmapの緑グラデーションと同じ発想。ゲーム内のダイヤブロック配色(黄土色系、#62)
+/// に寄せた色にした)。
+fn build_title_logo_lines() -> [Line<'static>; 3] {
+    const GRADIENT: [Color; 3] = [
+        Color::Rgb(255, 210, 90),
+        Color::Rgb(225, 145, 55),
+        Color::Rgb(165, 85, 35),
+    ];
+    let mut rows = [String::new(), String::new(), String::new()];
+    for c in "MISDRI TERM".chars() {
+        let glyph = title_logo_glyph(c);
+        for (row, text) in rows.iter_mut().zip(glyph.iter()) {
+            row.push_str(text);
+        }
+    }
+    let [row0, row1, row2] = rows;
+    [
+        Line::from(Span::styled(
+            row0,
+            Style::default().fg(GRADIENT[0]).bg(colors::LETTERBOX_BG),
+        )),
+        Line::from(Span::styled(
+            row1,
+            Style::default().fg(GRADIENT[1]).bg(colors::LETTERBOX_BG),
+        )),
+        Line::from(Span::styled(
+            row2,
+            Style::default().fg(GRADIENT[2]).bg(colors::LETTERBOX_BG),
+        )),
+    ]
+}
+
 /// タイトル画面を描画する(起動時スプラッシュ画像+ゲーム名+スタート案内を
 /// 1画面にまとめる)。このタイトル画面上でのみ、Qキーがアプリ終了として扱われる
 /// (main.rsの画面遷移)。
 pub fn draw_title(frame: &mut Frame) {
     let area = frame.area();
 
-    // タイトル画面は白背景にしている(TERM独自拡張。#191。ユーザー指摘: 「タイトル
-    // 画面の背景白色って可能？」)。他の画面(設定・ヘルプ・一時停止オーバーレイ等)は
-    // 引き続きLETTERBOX_BG(ダーク)のままで、この画面専用の配色。
     frame.buffer_mut().set_style(
         area,
-        Style::default().fg(colors::TITLE_BG).bg(colors::TITLE_BG),
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
     );
 
-    // アートと文字は上下に分割し、重ねない(TERM独自拡張。#191フォローアップ)。
-    // #148ではアートを画面いっぱいに表示し文字を上に重ね描きしていたが、文字パネル
-    // がキャラクターの上に重なって隠してしまっていた(ユーザー指摘: 「スプラッシュ
-    // があまりに隠れすぎるのはよくない」)。アート専用ゾーンを黄金比で確保し、文字と
-    // 重ならないようにした(#129と同じ考え方。ユーザー指摘: 「それでいて黄金比で」)。
-    let art_height = ((area.height as u32 * 618) / 1000).max(1) as u16;
-    let art_zone = Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: art_height.min(area.height),
-    };
-    let text_zone = Rect {
-        x: area.x,
-        y: area.y + art_zone.height,
-        width: area.width,
-        height: area.height.saturating_sub(art_zone.height),
-    };
-
-    // 元画像(assets/intro.png、1024x1536の縦長)は`title_art_lines`が
-    // `background-size: cover`と同じ考え方で塗りつぶすため、art_zoneの幅を
-    // そのまま渡すと横幅に対して縦が足りず、頭や足がクロップされて見切れて
-    // しまう(TERM独自拡張。#191フォローアップ。ユーザー指摘: 「見切れちゃってる」)。
-    // art_zoneの高さから元画像と同じアスペクト比になる幅を逆算し、その幅だけを
-    // 中央に取ることでキャラクター全身が収まるようにした(左右は白背景のまま)。
-    const INTRO_ART_ASPECT_W_OVER_H: f32 = 1024.0 / 1536.0;
-    let art_height_px = art_zone.height as f32 * 2.0; // 1セル=縦2論理ピクセル分。
-    let art_width =
-        ((art_height_px * INTRO_ART_ASPECT_W_OVER_H).round() as u16).clamp(1, art_zone.width);
-    let art_area = Rect {
-        x: art_zone.x + (art_zone.width - art_width) / 2,
-        y: art_zone.y,
-        width: art_width,
-        height: art_zone.height,
-    };
-
-    let art_lines = title_art_lines(art_area.width, art_area.height);
+    // アートを画面いっぱいに表示する(TERM独自拡張。#148)。
+    let art_lines = title_art_lines(area.width, area.height);
     frame.render_widget(
         Paragraph::new(Text::from(art_lines)).alignment(Alignment::Center),
-        art_area,
+        area,
     );
 
-    draw_title_text(frame, text_zone);
-}
-
-/// ロゴ画像の縦幅は、text_zoneの高さに対してこの割合を上限とする(残りは
-/// スタート案内・キーヒントに残す)。
-const LOGO_HEIGHT_PERCENT_OF_TEXT_ZONE: u32 = 40;
-/// ロゴ画像の縦幅の下限・上限(端末セル行数)。極端に小さい/大きい端末でも
-/// ワードマークが潰れたり画面を占領しすぎたりしないようにする。
-const LOGO_MIN_ROWS: u16 = 4;
-const LOGO_MAX_ROWS: u16 = 12;
-
-/// タイトル画面下部(アートと重ならない黄金比の残り領域)にロゴ・案内文を描く。
-fn draw_title_text(frame: &mut Frame, text_zone: Rect) {
-    // ワードマークはユーザー自作のドット絵ロゴ画像(TERM独自拡張。#192。ユーザー
-    // 指摘:「これスプライト処理してつけられる?」)。横幅text_zone全体・縦は
-    // 控えめな行数を上限に、アスペクト比を保ったまま「contain」で収める。画像は
-    // 既に自前の黒縁取りを持つため、以前のASCIIロゴ(#191フォローアップ)のような
-    // 専用の黒地は不要でそのまま白背景の上に乗せられる。
-    let logo_row_budget = ((text_zone.height as u32 * LOGO_HEIGHT_PERCENT_OF_TEXT_ZONE) / 100)
-        .clamp(LOGO_MIN_ROWS as u32, LOGO_MAX_ROWS as u32) as u16;
-    let logo_canvas = intro::build_logo_canvas(text_zone.width, logo_row_budget);
-    let logo_lines = logo_canvas.to_lines(1.0);
-    let logo_rows = logo_lines.len() as u16;
-    let logo_width = logo_lines.first().map(|line| line.spans.len()).unwrap_or(0) as u16;
-
-    // ロゴ・(明滅する)スタート案内・キーヒントをまとめて1ブロックとしてtext_zoneの
-    // 中央に配置する(TERM独自拡張。#191フォローアップ)。
-    const GAP_ABOVE_PROMPT: u16 = 1;
-    const PROMPT_ROWS: u16 = 1;
-    const GAP_ABOVE_HINTS: u16 = 2;
-    const HINT_ROWS: u16 = 2;
-    let content_height = logo_rows + GAP_ABOVE_PROMPT + PROMPT_ROWS + GAP_ABOVE_HINTS + HINT_ROWS;
-    let content_area = centered_fixed_rect(text_zone.width, content_height, text_zone);
-
-    let logo_area = Rect {
-        x: content_area.x + (content_area.width.saturating_sub(logo_width)) / 2,
-        y: content_area.y,
-        width: logo_width.min(content_area.width),
-        height: logo_rows,
-    };
-    frame.render_widget(
-        Paragraph::new(logo_lines).alignment(Alignment::Center),
-        logo_area,
-    );
-
-    // 案内文は常時表示の大きな枠でごちゃっと出すのではなく、「Enterキーを押して
-    // スタート」だけを明滅させるシンプルな構成にした(TERM独自拡張。#191フォロー
-    // アップ。ユーザー指摘: 「わりとごちゃっとしてるから、PRESS ENTER KEY START的
-    // な文言をチカチカ点滅させとけばよさげ」)。明滅中でもレイアウトが動かないよう、
-    // 非表示の間も行の位置自体は固定しておく。
-    let text_style = Style::default().fg(colors::TITLE_TEXT).bg(colors::TITLE_BG);
-    let prompt_y = content_area.y + logo_rows + GAP_ABOVE_PROMPT;
-    if title_prompt_blink_on() {
-        let prompt_area = Rect {
-            x: content_area.x,
-            y: prompt_y,
-            width: content_area.width,
-            height: PROMPT_ROWS,
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "Enterキーを押してスタート",
-                text_style,
-            )))
-            .alignment(Alignment::Center),
-            prompt_area,
-        );
-    }
-
-    let hint_lines = vec![
+    // ロゴ・案内文はアートの上に重ね描きする(TERM独自拡張。#148。ユーザー提案:
+    // 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。パネルの
+    // 地色(LETTERBOX_BG)がその部分のアートを覆い隠す形で表示されるため、
+    // 背景の絵柄によらず文字が読める。
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let mut text_lines = build_title_logo_lines().to_vec();
+    text_lines.extend([
+        Line::from(Span::styled("ミスドリTERM", text_style)),
+        Line::from(""),
+        Line::from(Span::styled("Enterキーを押してスタート", text_style)),
         Line::from(Span::styled("(Qキーで終了)", text_style)),
         Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
-    ];
-    let hints_area = Rect {
-        x: content_area.x,
-        y: prompt_y + PROMPT_ROWS + GAP_ABOVE_HINTS,
-        width: content_area.width,
-        height: HINT_ROWS,
-    };
-    frame.render_widget(
-        Paragraph::new(hint_lines).alignment(Alignment::Center),
-        hints_area,
-    );
-}
+    ]);
+    let text_rows = text_lines.len() as u16;
 
-/// タイトル画面の「Enterキーを押してスタート」を明滅させるon/off判定。`draw_title`
-/// はゲーム開始前(ゲーム内時刻がまだ存在しない)に毎フレーム呼ばれるため、壁時計
-/// (`SystemTime`)を直接使う(TERM独自拡張。#191フォローアップ)。
-fn title_prompt_blink_on() -> bool {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    (millis / TITLE_PROMPT_BLINK_MS as u128).is_multiple_of(2)
+    let text_area = centered_fixed_rect(area.width, text_rows, area);
+    frame.render_widget(
+        Paragraph::new(text_lines)
+            .style(Style::default().bg(colors::LETTERBOX_BG))
+            .alignment(Alignment::Center),
+        text_area,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -986,33 +933,8 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
                 && let Some(t) = game.vanish_flash_progress((board_row, col))
             {
                 fill_block(buf, draw_x, y, colors::vanish_flash_bg(t));
-            } else if is_checkpoint_safe_zone_row(board_row) {
-                // チェックポイント地面はセルの中身(掘削済みEmptyか、未掘削の岩か、
-                // 何かの拍子に紛れ込んだダイヤ/アイテム等か)によらず、常にこの
-                // 地面テクスチャ一枚で見せる(TERM独自拡張。#194/#195フォローアップ。
-                // ユーザー指摘:「地面だけどXブロックじゃなくて」「この蜂の巣みたいな
-                // やつが地面でいいのよ」)。個々のXブロックのアイコンを並べて見せると
-                // 「地面」ではなく積み木の集合に見えてしまう上、重力ですり抜けてきた
-                // ものが下からのぞいて見える問題も、この一枚のテクスチャの下に隠れる
-                // ことで解消する。
+            } else if cell == BoardCell::Empty && is_checkpoint_safe_zone_row(board_row) {
                 fill_bedrock_ground(buf, draw_x, y);
-            } else if is_unrevealed_future_zone(board_row, game.last_checkpoint_reported()) {
-                // まだ掘り抜いていないチェックポイントのギャップより先(次の100m
-                // ゾーン)は、そこに何が生成されていても見せない(TERM独自拡張。#197。
-                // ユーザー指摘: 「この地面の上を掘ったら次の100mゾーンに進める
-                // ようにしたい。それまで次の100mゾーンはブロック配置しない。
-                // 進んだら配置する」)。生成タイミングは変えず(盤面全体は従来通り
-                // ゲーム開始時に事前生成済み)、描画側だけで未到達ゾーンをEmpty
-                // 扱いにして隠す。
-                draw_logical_cell(
-                    buf,
-                    draw_x,
-                    y,
-                    &game.board,
-                    board_row,
-                    col,
-                    BoardCell::Empty,
-                );
             } else {
                 draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
             }
@@ -1626,11 +1548,10 @@ fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
 
 /// `board_row`が、100mごとのチェックポイント通過後の安全地帯(TERM独自拡張。
 /// #181/#185)に含まれるかどうか(TERM独自拡張。#186。ユーザー指摘: 「100mごとの
-/// 先はどうせクリアするのでいったん何もなし(地面みたいにしてほしい)」)。この帯は
-/// セルの中身(掘削済みEmptyか、未掘削の岩か、何かの拍子に紛れ込んだ他のブロックか)
-/// によらず、最終ゴールと同じ地底の地面ビジュアル一枚で表示する(#194/#195
-/// フォローアップ。ユーザー指摘: 「この蜂の巣みたいなやつが地面でいいのよ」)。
-/// 500mはボーナスフロア(アイテム/AIR配置。#179)であり対象外にする。
+/// 先はどうせクリアするのでいったん何もなし(地面みたいにしてほしい)」)。安全地帯は
+/// 通過すると必ず`Cell::Empty`になる区間なので、素の空背景ではなく最終ゴールと
+/// 同じ地底の地面ビジュアルで表示する。500mはボーナスフロア(アイテム/AIR配置。
+/// #179)であり空にはならないため対象外にする。
 fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
     if board_row < CHECKPOINT_STEP_M {
         return false;
@@ -1640,25 +1561,6 @@ fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
         return false;
     }
     board_row < checkpoint_start + CHECKPOINT_SAFE_ZONE_M
-}
-
-/// `board_row`が、まだ掘り抜いていないチェックポイントのギャップより先(次の
-/// 100mゾーン)に含まれるかどうか(TERM独自拡張。#197。ユーザー指摘: 「この地面の
-/// 上を掘ったら次の100mゾーンに進めるようにしたい。それまで次の100mゾーンは
-/// ブロック配置しない。進んだら配置する」)。盤面自体はゲーム開始時に事前生成
-/// 済みのままだが、描画側でこの判定がtrueの行は中身によらずEmpty扱いにして隠す。
-/// チェックポイントの地面・ギャップ帯自体(`is_checkpoint_safe_zone_row`が担当)は
-/// 掘る対象として見えている必要があるため対象外(ギャップの先だけを隠す)。
-fn is_unrevealed_future_zone(board_row: usize, last_checkpoint_reported: usize) -> bool {
-    if board_row < CHECKPOINT_STEP_M {
-        return false;
-    }
-    let checkpoint = board_row / CHECKPOINT_STEP_M;
-    if checkpoint <= last_checkpoint_reported {
-        return false;
-    }
-    let gap_end = checkpoint * CHECKPOINT_STEP_M + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M;
-    board_row >= gap_end
 }
 
 // --- 9.3 色ブロックの塊表現(接続マスク・丸み縁取り・ハイライト/陰影) ---
@@ -2526,41 +2428,6 @@ mod tests {
     }
 
     #[test]
-    fn is_unrevealed_future_zone_hides_only_the_gap_and_beyond_of_a_not_yet_reached_checkpoint() {
-        // #197: ユーザー指摘: 「この地面の上を掘ったら次の100mゾーンに進める
-        // ようにしたい。それまで次の100mゾーンはブロック配置しない」。まだ到達
-        // していない(last_checkpoint_reported未満の)チェックポイントについて、
-        // 地面・ギャップ帯自体(掘る対象として見える必要がある)は隠さず、
-        // ギャップの先(次の100mゾーン)だけを隠す。
-        let gap_end = 100 + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M;
-        assert!(
-            !is_unrevealed_future_zone(100, 0),
-            "地面帯自体は隠さないはず"
-        );
-        assert!(
-            !is_unrevealed_future_zone(gap_end - 1, 0),
-            "ギャップの最後の行までは隠さないはず"
-        );
-        assert!(
-            is_unrevealed_future_zone(gap_end, 0),
-            "ギャップの直後(次の100mゾーン)は隠すはず"
-        );
-        assert!(
-            is_unrevealed_future_zone(199, 0),
-            "次の100mゾーンの奥まで隠すはず"
-        );
-        // 既にそのチェックポイントに到達済み(last_checkpoint_reported>=1)なら
-        // 隠さない。
-        assert!(
-            !is_unrevealed_future_zone(gap_end, 1),
-            "到達済みチェックポイントの先は隠さないはず"
-        );
-        // 最初のチェックポイント(100m)より手前は常に表示。
-        assert!(!is_unrevealed_future_zone(0, 0));
-        assert!(!is_unrevealed_future_zone(99, 0));
-    }
-
-    #[test]
     fn falling_diamond_still_shows_its_glyph_not_just_a_flat_fill() {
         // ユーザー指摘: 「落下アニメーションで模様が消えて、色味だけでしか認識できない」
         // 「あいまいな物体が落ちているように見える」。落下中も静止時と同じグリフ
@@ -2766,29 +2633,26 @@ mod tests {
 
     #[test]
     fn title_screen_text_overlay_fits_within_a_reasonably_sized_terminal() {
-        // #191フォローアップ: アートと文字を黄金比で上下分割するようにしたため、
-        // 文字(ロゴ+スタート案内+キーヒント)は画面全体でなく残り38.2%の
-        // text_zoneに収まる必要がある。55行はごく一般的なターミナルウィンドウの
-        // 高さの目安(#127)。
+        // #148でアートは画面いっぱいに表示する方式に変えたため、合計行数の
+        // 心配は「ロゴ+案内文パネルが画面の縦幅に収まるか」だけになった
+        // (以前はここにアートの行数も加算していたが、アートはもう別途行数を
+        // 消費しない)。55行はごく一般的なターミナルウィンドウの高さの目安(#127)。
         const ASSUMED_COMMON_TERMINAL_H: u16 = 55;
-        const GAP_ABOVE_PROMPT: u16 = 1;
-        const PROMPT_ROWS: u16 = 1;
-        const GAP_ABOVE_HINTS: u16 = 2;
-        const HINT_ROWS: u16 = 2;
 
-        let art_height = ((ASSUMED_COMMON_TERMINAL_H as u32 * 618) / 1000).max(1) as u16;
-        let text_zone_height = ASSUMED_COMMON_TERMINAL_H.saturating_sub(art_height);
-
-        // ロゴ画像の実際の行数は元画像のアスペクト比・端末幅で変わるが、
-        // LOGO_MAX_ROWS(行数上限)を超えることはない(#192)。
-        let logo_rows = LOGO_MAX_ROWS;
-        let content_height =
-            logo_rows + GAP_ABOVE_PROMPT + PROMPT_ROWS + GAP_ABOVE_HINTS + HINT_ROWS;
+        let mut text_lines = build_title_logo_lines().to_vec();
+        text_lines.extend([
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+            Line::from(""),
+        ]);
+        let text_rows = text_lines.len() as u16;
 
         assert!(
-            content_height <= text_zone_height,
-            "ロゴ+案内文がtext_zoneの高さ({text_zone_height}行)を超えている\
-             (content_height={content_height})"
+            text_rows <= ASSUMED_COMMON_TERMINAL_H,
+            "ロゴ+案内文パネルの行数が一般的な端末の高さ({ASSUMED_COMMON_TERMINAL_H}行)を\
+             超えている(text_rows={text_rows})"
         );
     }
 

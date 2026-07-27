@@ -223,14 +223,6 @@ pub const PANEL_BORDER: Color = Color::Rgb(90, 90, 100);
 /// パネル文字色。
 pub const PANEL_TEXT: Color = Color::Rgb(230, 230, 230);
 
-/// タイトル画面専用の白背景色(TERM独自拡張。#191。ユーザー指摘: 「タイトル画面の
-/// 背景白色って可能？」)。他の画面(設定・ヘルプ・一時停止オーバーレイ等)の地色
-/// (`LETTERBOX_BG`)には影響しない、タイトル画面だけの専用色。
-pub const TITLE_BG: Color = Color::Rgb(255, 255, 255);
-/// タイトル画面(白背景)用の文字色。`PANEL_TEXT`(ほぼ白)は白背景では読めなく
-/// なるため、タイトル画面専用の濃い色を別に用意した。
-pub const TITLE_TEXT: Color = Color::Rgb(30, 30, 34);
-
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t)
         .round()

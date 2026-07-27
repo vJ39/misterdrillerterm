@@ -50,15 +50,8 @@ use crate::debug_log::DebugLog;
 /// じゃなくて」)。以前は地面の手前の境界(depth_m = checkpoint*CHECKPOINT_STEP_M)
 /// に触れた瞬間に到達扱いにしていたが、地面区間そのものは実際にドリルで掘り
 /// 抜く対象になったため、掘り抜き終えた地点まで判定を後ろにずらした。
-///
-/// 地面(CHECKPOINT_SAFE_ZONE_M行、例: 100〜104)を掘り終えて次の行(例:105、
-/// スキマの先頭)へ進んだ瞬間を「掘り抜いた」とみなす(#198フォローアップ。
-/// ユーザー指摘: 「ぜんぜん地面の上の方を掘ったらゴールになってないし、その間を
-/// ブロックが貫通しとる」)。以前は`+ 1`していたため、実際には地面を掘り終えて
-/// スキマに1マス踏み込むまで通過扱いにならず、その1行分だけスキマの旧地形が
-/// クリアされずに残って見えていた。
 fn checkpoint_index_for_depth(depth_m: usize) -> usize {
-    depth_m.saturating_sub(CHECKPOINT_SAFE_ZONE_M) / CHECKPOINT_STEP_M
+    depth_m.saturating_sub(CHECKPOINT_SAFE_ZONE_M + 1) / CHECKPOINT_STEP_M
 }
 
 /// ボムの演出段階(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
@@ -1681,14 +1674,6 @@ impl Game {
         }
     }
 
-    /// 直近で到達済みのチェックポイント区切り番号(TERM独自拡張。#178/#190)。
-    /// 描画側(render.rs)が、まだ掘り抜いていないチェックポイントより先のゾーンを
-    /// 隠す判定に使う(#197。ユーザー指摘: 「この地面の上を掘ったら次の100mゾーンに
-    /// 進めるようにしたい。それまで次の100mゾーンはブロック配置しない」)。
-    pub fn last_checkpoint_reported(&self) -> usize {
-        self.last_checkpoint_reported
-    }
-
     /// 掘削アニメーション中の描画フレーム(TERM独自拡張、9章)。掘削演出中でなければ
     /// `None`、演出中は`DRILL_ANIM_FRAME_MS`ごとに`true`/`false`を切り替えて返す
     /// (方向別のアニメーション用に描画側が2フレームを交互に選ぶ)。
@@ -2430,27 +2415,6 @@ mod tests {
                 *cell = Cell::Empty;
             }
         }
-    }
-
-    #[test]
-    fn checkpoint_index_for_depth_crosses_the_instant_the_ground_is_dug_through_not_one_row_later()
-    {
-        // #198: ユーザー指摘: 「ぜんぜん地面の上の方を掘ったらゴールになってないし、
-        // その間をブロックが貫通しとる」。以前は`+ 1`のズレにより、地面(5行、
-        // 100-104)を掘り終えて次の行(105、スキマの先頭)に進んだだけではまだ
-        // 「通過」とみなされず、106まで進む必要があった。そのせいでスキマの
-        // クリア・次ゾーンの表示切替が1行分遅れ、古い地形が見えてしまっていた。
-        // 地面を掘り終えた瞬間(depth_m=105)に通過とみなすはず。
-        assert_eq!(
-            checkpoint_index_for_depth(104),
-            0,
-            "地面の最終行(104)はまだチェックポイント未通過のはず"
-        );
-        assert_eq!(
-            checkpoint_index_for_depth(105),
-            1,
-            "地面を掘り終えて105に進んだ瞬間に通過扱いになるはず"
-        );
     }
 
     #[test]

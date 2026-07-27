@@ -38,10 +38,7 @@ const ALPHA_THRESHOLD: u8 = 128;
 /// 縦横どちらかがぴったり収まるまで拡大してから、はみ出した分を中央基準で
 /// 切り出す(引き伸ばして歪めることはしない)。
 pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
-    // タイトル画面専用の白背景(TERM独自拡張。#191。ユーザー指摘: 「タイトル画面の
-    // 背景白色って可能？」)。元画像は透過(アルファ)背景なので、この色をそのまま
-    // 透過部分の下地として使うだけで白背景化できる。
-    let background = colors::TITLE_BG;
+    let background = colors::LETTERBOX_BG;
 
     let decoded = image::load_from_memory(INTRO_IMAGE_BYTES)
         .expect("assets/intro.png must be a valid, bundled PNG");
@@ -67,45 +64,6 @@ pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
 
     let mut canvas = PixelCanvas::new(target_w as usize, target_h as usize, background);
     for (x, y, Rgba([r, g, b, a])) in cropped.enumerate_pixels() {
-        if *a < ALPHA_THRESHOLD {
-            continue; // 透過(背景)はキャンバスの下地色のまま残す。
-        }
-        canvas.set(x as usize, y as usize, Color::Rgb(*r, *g, *b));
-    }
-
-    canvas
-}
-
-/// タイトルロゴ(`assets/title_logo.png`、ユーザー自作のドット絵ワードマーク)。
-/// 透過部分は元画像ではチェッカー柄で書き出されていたため、`-transparent`で
-/// キーイング後にトリムして同梱している(TERM独自拡張。#192)。
-const TITLE_LOGO_BYTES: &[u8] = include_bytes!("../../assets/title_logo.png");
-
-/// タイトルロゴ用のピクセルキャンバスを、端末セル`max_cols`×`max_rows`に収まる
-/// サイズで組み立てる(TERM独自拡張。#192。ユーザーが自作したロゴ画像を組み込む)。
-///
-/// `build_canvas`(起動スプラッシュ)は画面いっぱいに覆う「cover」だが、ロゴは
-/// 欠けずに全体を見せたいため、アスペクト比を保ったまま`max_cols`×`max_rows`に
-/// 収まる(はみ出さない)よう縮小する「contain」で配置する。実際の出力サイズは
-/// 元画像のアスペクト比によって`max_cols`×`max_rows`より小さくなりうる。
-pub fn build_logo_canvas(max_cols: u16, max_rows: u16) -> PixelCanvas {
-    let decoded = image::load_from_memory(TITLE_LOGO_BYTES)
-        .expect("assets/title_logo.png must be a valid, bundled PNG");
-    let (src_w, src_h) = decoded.dimensions();
-
-    let max_w = (max_cols as u32).max(1);
-    let max_h = (max_rows as u32).max(1) * 2;
-
-    let scale = (max_w as f32 / src_w.max(1) as f32).min(max_h as f32 / src_h.max(1) as f32);
-    let resized_w = ((src_w as f32) * scale).round().max(1.0) as u32;
-    let resized_h = ((src_h as f32) * scale).round().max(1.0) as u32;
-
-    let resized = decoded
-        .resize_exact(resized_w, resized_h, FilterType::Lanczos3)
-        .to_rgba8();
-
-    let mut canvas = PixelCanvas::new(resized_w as usize, resized_h as usize, colors::TITLE_BG);
-    for (x, y, Rgba([r, g, b, a])) in resized.enumerate_pixels() {
         if *a < ALPHA_THRESHOLD {
             continue; // 透過(背景)はキャンバスの下地色のまま残す。
         }
@@ -142,38 +100,6 @@ mod tests {
     #[test]
     fn build_canvas_handles_a_tiny_terminal_without_panicking() {
         let canvas = build_canvas(1, 1);
-        let lines = canvas.to_lines(1.0);
-        assert!(!lines.is_empty());
-    }
-
-    #[test]
-    fn build_logo_canvas_produces_non_empty_output() {
-        let canvas = build_logo_canvas(80, 10);
-        let lines = canvas.to_lines(1.0);
-        assert!(!lines.is_empty());
-    }
-
-    #[test]
-    fn build_logo_canvas_never_exceeds_the_requested_bounds() {
-        // #192: `build_canvas`(cover)と違い、こちらは「contain」なので
-        // 出力サイズは要求したmax_cols×max_rows以下になるはず(はみ出さない)。
-        let canvas = build_logo_canvas(80, 10);
-        let lines = canvas.to_lines(1.0);
-        assert!(
-            lines.len() <= 10,
-            "行数がmax_rowsを超えている(lines={})",
-            lines.len()
-        );
-        assert!(
-            lines[0].spans.len() <= 80,
-            "幅がmax_colsを超えている(spans={})",
-            lines[0].spans.len()
-        );
-    }
-
-    #[test]
-    fn build_logo_canvas_handles_tiny_bounds_without_panicking() {
-        let canvas = build_logo_canvas(1, 1);
         let lines = canvas.to_lines(1.0);
         assert!(!lines.is_empty());
     }
