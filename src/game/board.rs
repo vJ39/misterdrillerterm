@@ -600,6 +600,43 @@ impl Board {
         color_cluster_rate_percent: u32,
         gravity: &GravityState,
     ) {
+        let to_row = self.rows.len();
+        self.reroll_overlays_in_row_range(
+            from_row,
+            to_row,
+            rock_rate_percent,
+            air_rate_percent,
+            star_rate_percent,
+            diamond_rate_percent,
+            item_clear_above_rate_percent,
+            item_unify_colors_rate_percent,
+            item_starify_screen_rate_percent,
+            color_count,
+            color_cluster_rate_percent,
+            gravity,
+        );
+    }
+
+    /// `reroll_overlays_from_row`と同じ再抽選を、`from_row..to_row`(to_row自体は含まない)
+    /// の範囲だけに限定して行う(TERM独自拡張。#179/#181。ユーザー指摘: 「500mフロアは
+    /// C/K/Rアイテム/AIRそれぞれ500%固定フロアとする」)。特定の深度帯だけに特別な
+    /// 配分率を適用したい場合(ボーナスフロア等)に使う。
+    #[allow(clippy::too_many_arguments)]
+    pub fn reroll_overlays_in_row_range(
+        &mut self,
+        from_row: usize,
+        to_row: usize,
+        rock_rate_percent: u32,
+        air_rate_percent: u32,
+        star_rate_percent: u32,
+        diamond_rate_percent: u32,
+        item_clear_above_rate_percent: u32,
+        item_unify_colors_rate_percent: u32,
+        item_starify_screen_rate_percent: u32,
+        color_count: u8,
+        color_cluster_rate_percent: u32,
+        gravity: &GravityState,
+    ) {
         use rand::RngExt;
         let seed: u64 = rand::rng().random();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -609,7 +646,7 @@ impl Board {
         // 位置には最大それぞれ10個までとする」)。
         let mut item_caps = ItemSpawnCaps::from_existing_counts(self);
 
-        for row in from_row..self.rows.len() {
+        for row in from_row..to_row.min(self.rows.len()) {
             let fraction = depth_fraction(row);
             let color_cluster_prob = (COLOR_CLUSTER_DEPTH_START_PROB
                 * (1.0 - fraction)
@@ -4050,8 +4087,8 @@ mod tests {
     }
 
     #[test]
-    fn a_group_that_already_finished_shaking_does_not_overwrite_a_neighbor_still_within_its_own_shake_grace_period(
-    ) {
+    fn a_group_that_already_finished_shaking_does_not_overwrite_a_neighbor_still_within_its_own_shake_grace_period()
+     {
         // #85根本原因の再現(2026/07/27): 実プレイのデバッグログを`board_snapshot`と
         // `block_events`の全件突合で解析した結果、静止していたダイヤ(col1,row33)が
         // 一度もmove/vanishログに現れないまま、その真上を落ちてきた岩の着地ログ
@@ -4076,7 +4113,12 @@ mod tests {
         // 揺れ明けしていた)。
         gravity.unsupported_ticks.insert((0, 0), SHAKE_TICKS);
 
-        let outcome = apply_gravity_tick(&mut board, (usize::MAX, usize::MAX), &mut gravity, SHAKE_TICKS);
+        let outcome = apply_gravity_tick(
+            &mut board,
+            (usize::MAX, usize::MAX),
+            &mut gravity,
+            SHAKE_TICKS,
+        );
 
         assert_eq!(
             board.cell(1, 0),
@@ -4098,7 +4140,12 @@ mod tests {
         // その後、ダイヤ自身の揺れ猶予が明けて実際に落下を始めれば、岩も連動して
         // 正しく後を追って落下し続けられる(=恒久的にフリーズしたままにはならない)。
         for _ in 0..(SHAKE_TICKS as usize + 4) {
-            apply_gravity_tick(&mut board, (usize::MAX, usize::MAX), &mut gravity, SHAKE_TICKS);
+            apply_gravity_tick(
+                &mut board,
+                (usize::MAX, usize::MAX),
+                &mut gravity,
+                SHAKE_TICKS,
+            );
         }
         assert_eq!(
             board.cell(5, 0),

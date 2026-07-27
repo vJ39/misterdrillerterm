@@ -92,6 +92,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 起動直後の初回表示は「戻ってきた」わけではないので、ここではまだ立てない。
     let title_bgm_restart = Arc::new(AtomicBool::new(false));
     let mut was_title_bgm_enabled = title_music_enabled.load(Ordering::Relaxed);
+    // タイトル画面へ戻るたびにプレイ中BGMも先頭の曲・先頭位置からリセットする
+    // フラグ(TERM独自拡張。#177)。タイトルBGMの`title_bgm_restart`と役割は同じだが、
+    // トリガー条件が異なる(タイトルBGMは「無効→有効」の切り替わりで判定するが、
+    // こちらは単に「タイトル画面へ戻った瞬間」でよい)ため、別フラグとして扱う。
+    let gameplay_bgm_restart = Arc::new(AtomicBool::new(false));
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
     if let Some(m) = &mixer {
@@ -105,6 +110,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             m.clone(),
             Arc::clone(&bgm_stop),
             Arc::clone(&gameplay_music_enabled),
+            Arc::clone(&gameplay_bgm_restart),
         );
     }
 
@@ -894,6 +900,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         if back_to_title {
             screen = Screen::Title;
             pause_overlay = PauseOverlay::None;
+            // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする(TERM独自拡張。
+            // #177)。次にプレイを始めたとき、前回の再生位置・曲順を引きずらず
+            // 必ず1曲目の先頭から鳴るようにする。
+            gameplay_bgm_restart.store(true, Ordering::Relaxed);
         }
 
         // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが
@@ -1103,6 +1113,11 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
             GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer),
             GameEvent::BombFuseWarning => audio::sfx::play_bomb_fuse_warning(mixer),
+            GameEvent::BombFuseTick => audio::sfx::play_bomb_fuse_tick(mixer),
+            // 100mごとのチェックポイント到達(TERM独自拡張。#178)。「ゴールSEと演出」
+            // というユーザー指摘の通り、最終ゴール(Cleared)と同じファンファーレを
+            // 使い回す。
+            GameEvent::Checkpoint100m { .. } => audio::sfx::play_clear_fanfare(mixer),
         }
     }
 }

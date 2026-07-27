@@ -74,6 +74,12 @@ pub const ROCK_X_FG: Color = Color::Rgb(240, 225, 200);
 pub const OXYGEN_BG: Color = Color::Rgb(20, 190, 200);
 pub const OXYGEN_FG: Color = Color::Rgb(255, 255, 255);
 
+/// 最終ゴール(深度1000m)到達時、盤面の底に見える地底の地面(TERM独自拡張。
+/// #182。ユーザー指摘: 「最終ゴールは地底の地面を表示してクリアした感じにして
+/// ほしい」)。岩ブロックよりさらに濃い、掘り進めない「本当の底」を思わせる色味。
+pub const BEDROCK_GROUND_BG: Color = Color::Rgb(60, 38, 22);
+pub const BEDROCK_GROUND_FG: Color = Color::Rgb(150, 110, 70);
+
 /// ダイヤブロックはXブロック(岩ブロック)系統の代物という位置づけ(TERM独自拡張。
 /// ユーザー指摘: 「ダイヤブロックはXブロック系の代物なので、色味は白じゃなくて
 /// 黄土色がいい」)のため、白系ではなく黄土色系にする。

@@ -130,13 +130,24 @@ pub fn spawn_title_bgm_thread(
     );
 }
 
-/// プレイ中BGMスレッドを立てる(TERM独自拡張。#145)。
+/// プレイ中BGMスレッドを立てる(TERM独自拡張。#145)。`restart_requested`は
+/// タイトル画面へ戻るたびに次の再生を先頭の曲・先頭位置から始め直すためのフラグ
+/// (TERM独自拡張。#177。ユーザー指摘: 「タイトル画面に戻ったらMUSICはリセット」。
+/// 単純なpause/playだけでは前回の再生位置・曲順(3曲ローテーションの何曲目か)が
+/// そのまま残ってしまうため、タイトルBGMと同じ仕組みでリセットする)。
 pub fn spawn_gameplay_bgm_thread(
     mixer: Mixer,
     stop_flag: Arc<AtomicBool>,
     music_enabled: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
 ) {
-    spawn_playlist_thread(mixer, stop_flag, music_enabled, &GAMEPLAY_TRACKS, None);
+    spawn_playlist_thread(
+        mixer,
+        stop_flag,
+        music_enabled,
+        &GAMEPLAY_TRACKS,
+        Some(restart_requested),
+    );
 }
 
 /// ヘルプ画面のジュークボックスで選んで試聴できる曲の一覧(TERM独自拡張。#151。

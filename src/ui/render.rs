@@ -4,7 +4,7 @@
 //! 旧版のhalf-block方式(1論理セルを1文字に圧縮)は完全に廃止した。
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -204,6 +204,12 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
     let plan = compute_layout(area, game.board.width());
     draw_field(frame, plan.field_rect, plan.visible_rows, game);
     draw_status(frame, plan.hud_rect, game);
+
+    // チェックポイント(100mごと)到達演出(TERM独自拡張。#178)。短時間のバナー表示
+    // だけで、盤面(draw_field)自体は裏で通常通り動き続けている。
+    if let Some(depth_m) = game.checkpoint_flash_depth_m() {
+        draw_checkpoint_banner(frame, plan.game_frame, depth_m);
+    }
 
     match game.status {
         GameStatus::Paused => draw_overlay(
@@ -898,7 +904,13 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             // ボム爆発の爆風が届いた直後のセルは、スター変換後の見た目を炎の色で
             // 一瞬覆う(TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、
             // ボンバーマンTERMのように炎アニメーションほしい」)。
-            if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
+            // 最終ゴール(深度1000m)到達時、盤面の底(実際のフィールドより深い、
+            // 本来は描画対象の無い行)に地底の地面を表示し、クリアした実感を出す
+            // (TERM独自拡張。#182。ユーザー指摘: 「最終ゴールは地底の地面を表示して
+            // クリアした感じにしてほしい」)。
+            if game.status == GameStatus::Cleared && board_row >= game.board.depth_rows() {
+                fill_bedrock_ground(buf, draw_x, y);
+            } else if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
                 fill_block(
                     buf,
                     draw_x,
@@ -918,6 +930,47 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     draw_falling_blocks(buf, inner, top_row, visible_rows, game, &moved_map);
     draw_bombs(buf, inner, top_row, visible_rows, game);
     draw_player(buf, inner, top_row, game);
+    draw_off_screen_bomb_warnings(buf, inner, top_row, visible_rows, game);
+}
+
+/// 画面外(まだスクロールインしていない、`top_row`より浅い行)にボムがある場合、
+/// そのボムがある列全体を赤く点滅させて警告する(TERM独自拡張。#175。ユーザー指摘:
+/// 「知らない間に画面外に爆弾がいるので縦列を赤くピカピカさせること」)。
+fn draw_off_screen_bomb_warnings(
+    buf: &mut Buffer,
+    inner: Rect,
+    top_row: usize,
+    visible_rows: usize,
+    game: &Game,
+) {
+    let warning_cols: HashSet<usize> = game
+        .bombs()
+        .iter()
+        .filter(|b| b.pos.0 < top_row)
+        .map(|b| b.pos.1)
+        .collect();
+    if warning_cols.is_empty() {
+        return;
+    }
+    let blink_on = ((game.player.elapsed_seconds * 1000.0) as u32
+        / OFF_SCREEN_BOMB_WARNING_BLINK_MS)
+        .is_multiple_of(2);
+    if !blink_on {
+        return;
+    }
+    for col in warning_cols {
+        let x = inner.x + col as u16 * CELL_W;
+        if x + CELL_W > inner.x + inner.width {
+            continue;
+        }
+        for screen_row in 0..visible_rows {
+            let y = inner.y + screen_row as u16 * CELL_H;
+            if y + CELL_H > inner.y + inner.height {
+                break;
+            }
+            fill_block(buf, x, y, colors::BOMB_BODY_DANGER_FG);
+        }
+    }
 }
 
 /// ボム(TERM独自拡張。#96/#123/#125/#133)を盤面の上に重ねて描画する。ブロックとは
@@ -1162,6 +1215,9 @@ fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
 /// と共有する定数に切り出した)を切ったら、`BOMB_BODY_FLASH_PERIOD_MS`ごとに
 /// 通常の本体色と警告色(赤)を切り替える。
 const BOMB_BODY_FLASH_PERIOD_MS: u32 = 100;
+
+/// 画面外のボム警告(縦列の赤ピカピカ)の点滅周期(ms、TERM独自拡張。#175)。
+const OFF_SCREEN_BOMB_WARNING_BLINK_MS: u32 = 400;
 
 fn bomb_body_color(remaining_ms: u32) -> Color {
     if remaining_ms > BOMB_DANGER_MS {
@@ -1451,6 +1507,27 @@ fn fill_block(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
     for dy in 0..CELL_H {
         for dx in 0..CELL_W {
             put(buf, x + dx, y + dy, ' ', bg, bg);
+        }
+    }
+}
+
+/// 最終ゴール(深度1000m)到達時、盤面の底に見える地底の地面(TERM独自拡張。#182。
+/// ユーザー指摘: 「最終ゴールは地底の地面を表示してクリアした感じにしてほしい」)。
+/// 単色の塗りつぶしではなく、岩肌のようなハッチング模様にして「掘り進めない本当の
+/// 底に到達した」ことを見た目でも伝える。
+const BEDROCK_GROUND_GLYPHS: [[char; 4]; 2] = [['▓', '▒', '▓', '▒'], ['▒', '▓', '▒', '▓']];
+
+fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
+    for (dy, row) in BEDROCK_GROUND_GLYPHS.iter().enumerate() {
+        for (dx, &ch) in row.iter().enumerate() {
+            put(
+                buf,
+                x + dx as u16,
+                y + dy as u16,
+                ch,
+                colors::BEDROCK_GROUND_FG,
+                colors::BEDROCK_GROUND_BG,
+            );
         }
     }
 }
@@ -1893,6 +1970,37 @@ fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hints: &[&str]) {
     frame.render_widget(paragraph, overlay_area);
 }
 
+/// チェックポイント(100mごと)到達演出のバナー(TERM独自拡張。#178。ユーザー指摘:
+/// 「100mごとのゴールSEと演出、アニメーションする」)。`draw_overlay`より一回り小さい
+/// 箱を短時間(`checkpoint_flash_depth_m`がSomeの間)だけ中央に重ねるだけで、盤面
+/// 自体(`draw_field`)は裏で通常通り動き続ける(押し潰し演出等と同じく、周囲の
+/// 落下アニメーションを止めない設計方針)。
+fn draw_checkpoint_banner(frame: &mut Frame, area: Rect, depth_m: usize) {
+    let banner_area = centered_rect(30, 12, area);
+    frame.render_widget(Clear, banner_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let paragraph = Paragraph::new(Line::from(Span::styled(
+        format!("- {depth_m}m -"),
+        text_style,
+    )))
+    .block(block)
+    .style(Style::default().bg(colors::LETTERBOX_BG))
+    .alignment(Alignment::Center);
+    frame.render_widget(paragraph, banner_area);
+}
+
 /// GameOverダイアログ(TERM独自拡張)。「タイトルへ戻る」「その場から復活」の2択を
 /// 表示し、現在選択中の項目を反転表示(カーソル代わり)する。
 fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoice) {
@@ -2111,6 +2219,88 @@ mod tests {
         );
     }
 
+    /// テスト用: プレイヤー周辺(±`STAR_VISIBLE_RANGE_ROWS`)を`fill_col`以外は全て
+    /// 岩で埋め、指定の1マスだけをEmptyにしたうえで`debug_place_bomb`を呼び、
+    /// その1マスへ確実にボムを設置する(`debug_place_bomb_spawns_at_the_only_empty_cell_within_visible_range`
+    /// と同じ考え方)。
+    fn place_bomb_at(game: &mut Game, row: usize, fill_col: usize) {
+        let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
+        for r in (game.player.row - range)..=(game.player.row + range) {
+            for c in 0..game.board.width() {
+                game.board.rows[r][c] = BoardCell::Rock { hits: 0 };
+            }
+        }
+        game.board.rows[row][fill_col] = BoardCell::Empty;
+        game.debug_place_bomb();
+    }
+
+    #[test]
+    fn off_screen_bomb_column_flashes_red_only_while_blink_is_on() {
+        // ユーザー指摘(#175): 「知らない間に画面外に爆弾がいるので縦列を赤く
+        // ピカピカさせること」。top_rowより浅い(=まだスクロールインしていない
+        // 画面外)位置にあるボムの列は、点滅周期に応じて赤く塗られる。
+        let mut game = Game::new(1);
+        game.player.row = 500;
+        place_bomb_at(&mut game, 490, 3); // top_row(495)より浅い = 画面外
+        assert_eq!(
+            game.bombs().len(),
+            1,
+            "テスト前提: ボムが1個設置されていること"
+        );
+
+        let inner = Rect::new(0, 0, 20, 20);
+        let top_row = 495;
+        let visible_rows = 10;
+
+        game.player.elapsed_seconds = 0.0;
+        let mut buf_on = Buffer::empty(inner);
+        draw_off_screen_bomb_warnings(&mut buf_on, inner, top_row, visible_rows, &game);
+        assert!(
+            buf_on
+                .content
+                .iter()
+                .any(|c| c.bg == colors::BOMB_BODY_DANGER_FG),
+            "点滅ON中は画面外ボムの列が赤く塗られるはず"
+        );
+
+        game.player.elapsed_seconds = OFF_SCREEN_BOMB_WARNING_BLINK_MS as f32 / 1000.0;
+        let mut buf_off = Buffer::empty(inner);
+        draw_off_screen_bomb_warnings(&mut buf_off, inner, top_row, visible_rows, &game);
+        assert!(
+            !buf_off
+                .content
+                .iter()
+                .any(|c| c.bg == colors::BOMB_BODY_DANGER_FG),
+            "点滅OFF中は赤く塗られないはず(点滅していることの確認)"
+        );
+    }
+
+    #[test]
+    fn on_screen_bomb_does_not_trigger_the_off_screen_column_warning() {
+        // 画面内(top_row以降)にあるボムは、この警告表示の対象にならないはず
+        // (画面内は既に見えているので警告の意味が無いため)。
+        let mut game = Game::new(1);
+        game.player.row = 500;
+        game.player.elapsed_seconds = 0.0;
+        place_bomb_at(&mut game, 500, 3); // top_row(495)以降 = 画面内
+        assert_eq!(
+            game.bombs().len(),
+            1,
+            "テスト前提: ボムが1個設置されていること"
+        );
+
+        let inner = Rect::new(0, 0, 20, 20);
+        let mut buf = Buffer::empty(inner);
+        draw_off_screen_bomb_warnings(&mut buf, inner, 495, 10, &game);
+
+        assert!(
+            !buf.content
+                .iter()
+                .any(|c| c.bg == colors::BOMB_BODY_DANGER_FG),
+            "画面内のボムでは警告表示しないはず"
+        );
+    }
+
     #[test]
     fn draw_bomb_sprite_crackle_alternates_the_spark_glyph_and_position_over_time() {
         // ユーザー指摘: 「火花ちりちりアニメーションさせて」。異なる`crackle_ms`を
@@ -2163,6 +2353,23 @@ mod tests {
         Board {
             rows: vec![vec![BoardCell::Empty; FIELD_WIDTH]; rows],
             width: FIELD_WIDTH,
+        }
+    }
+
+    #[test]
+    fn fill_bedrock_ground_paints_the_whole_cell_with_the_ground_texture_colors() {
+        // ユーザー指摘(#182): 「最終ゴールは地底の地面を表示してクリアした感じにして
+        // ほしい」。地底の地面セルは単色の空白ではなく、専用の色(BEDROCK_GROUND_BG/FG)
+        // でハッチング模様に塗りつぶされることを確認する。
+        let inner = Rect::new(0, 0, CELL_W, CELL_H);
+        let mut buf = Buffer::empty(inner);
+
+        fill_bedrock_ground(&mut buf, 0, 0);
+
+        for cell in buf.content.iter() {
+            assert_eq!(cell.bg, colors::BEDROCK_GROUND_BG);
+            assert_eq!(cell.fg, colors::BEDROCK_GROUND_FG);
+            assert_ne!(cell.symbol(), " ", "単色の空白ではなく地面らしい模様のはず");
         }
     }
 

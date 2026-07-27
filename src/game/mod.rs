@@ -16,19 +16,21 @@ use rand_chacha::ChaCha8Rng;
 use crate::constants::{
     BLOCK_VANISH_FLASH_MS, BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER, BOARD_SNAPSHOT_ROWS_BELOW_PLAYER,
     BOARD_SNAPSHOT_TICK_INTERVAL, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_DANGER_MS,
-    BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS,
-    BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
-    BOMB_SPAWN_DEPTH_MAX_BONUS, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
-    DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
-    DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
-    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
-    FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
+    BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_FUSE_TICK_INTERVAL_MS,
+    BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS,
+    BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
+    BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHECKPOINT_FLASH_MS,
+    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CRUSH_ASCEND_MS, CRUSH_FLASH_MS,
+    DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
+    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
+    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
     FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
     INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
     MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, SHAKE_DURATION_MS,
-    STAR_VISIBLE_RANGE_ROWS, depth_fraction,
+    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, PLAYER_SCREEN_ROWS_ABOVE,
+    SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
 use board::{
     BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
@@ -240,6 +242,16 @@ pub enum GameEvent {
     /// (TERM独自拡張。#168。ユーザー指摘: 「爆弾が爆発しそうな赤くチカチカする
     /// とき爆弾の爆発しそうな導火線の音させろ」)。1個のボムにつき1回だけ発生する。
     BombFuseWarning,
+    /// 危険域(残り`BOMB_DANGER_MS`以下)に入っている間、`BOMB_FUSE_TICK_INTERVAL_MS`
+    /// おきに繰り返し発生する導火線の「チッ」(TERM独自拡張。#183。ユーザー指摘:
+    /// 「爆弾爆発するまえに「ちちちちち」って乾いた音鳴らしてくれよ」)。
+    /// `BombFuseWarning`(危険域に入った瞬間の1回だけの駆け上がり4音)とは別に、
+    /// 爆発が近いことを連続音で煽る。
+    BombFuseTick,
+    /// チェックポイント(100mごと)に到達した瞬間(TERM独自拡張。#178。ユーザー指摘:
+    /// 「100mすすむごとにそれより上部のオブジェクトを全クリア、100mごとのゴールSEと
+    /// 演出、アニメーションする」)。到達した深度(m、100の倍数)を伴う。
+    Checkpoint100m { at_m: usize },
 }
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
@@ -291,9 +303,17 @@ pub struct Game {
     invulnerability_ticks_remaining: u32,
     /// 直近でGameEvent::LevelUpを通知した時点のレベル番号(重複通知防止)。
     last_level_reported: usize,
+    /// 直近でGameEvent::Checkpoint100mを通知した時点の区切り番号(重複通知防止。
+    /// TERM独自拡張。#178。`depth_m / CHECKPOINT_STEP_M`の値をそのまま持つ)。
+    last_checkpoint_reported: usize,
     /// 押し潰しミス発生時、残りこれだけの間「潰れた」見た目を表示し続ける
     /// (0になったらGameOverオーバーレイの表示を許す。TERM独自拡張、9章)。
     crush_flash_remaining: Duration,
+    /// チェックポイント(100mごと)到達演出の残り時間(TERM独自拡張。#178)。
+    /// `0`より大きい間、描画側が到達演出(バナー等)を表示する。
+    checkpoint_flash_remaining: Duration,
+    /// 直近のチェックポイント到達演出が表示している到達深度(m、TERM独自拡張。#178)。
+    checkpoint_flash_depth_m: usize,
     /// 押し潰されてもライフが残っている場合、「天に召される」演出の残り時間
     /// (TERM独自拡張)。`Some`の間はゲームプレイ全体(重力・自由落下・酸素減少・入力)
     /// を凍結し、0になった時点で死亡地点の3列クリア・ライフ減算・酸素回復をまとめて
@@ -395,12 +415,15 @@ impl Game {
         let mut player = Player::with_lives(lives);
         player.recenter_for_width(width);
         let last_level_reported = player.level();
+        let last_checkpoint_reported = player.depth_m() / CHECKPOINT_STEP_M;
         let start_position = player.position();
+        let gravity_state = GravityState::new();
+        let board = Board::generate(seed, FIELD_DEPTH_M, width);
         Game {
-            board: Board::generate(seed, FIELD_DEPTH_M, width),
+            board,
             player,
             status: GameStatus::Playing,
-            gravity_state: GravityState::new(),
+            gravity_state,
             fall_tick_accum: Duration::ZERO,
             player_fall_tick_accum: Duration::ZERO,
             block_fall_tick_ms: FALL_TICK_MS,
@@ -414,7 +437,10 @@ impl Game {
             oxygen_warning_accum: Duration::ZERO,
             invulnerability_ticks_remaining: 0,
             last_level_reported,
+            last_checkpoint_reported,
             crush_flash_remaining: Duration::ZERO,
+            checkpoint_flash_remaining: Duration::ZERO,
+            checkpoint_flash_depth_m: 0,
             ascending_remaining: None,
             drill_flash_remaining: Duration::ZERO,
             dodge_stage: DodgeStage::None,
@@ -796,7 +822,7 @@ impl Game {
         self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
 
         if self.player.lives <= 1 {
-            self.clear_three_columns_above_player();
+            self.resolve_death_board_effects(events);
             let game_over = self.player.lose_life();
             debug_assert!(game_over, "lives<=1のはずなのでlose_lifeは必ずtrueを返す");
             self.status = GameStatus::GameOver;
@@ -826,12 +852,13 @@ impl Game {
         let remaining = remaining.saturating_sub(delta);
         if remaining == Duration::ZERO {
             self.ascending_remaining = None;
-            self.clear_three_columns_above_player();
             // 押し潰したブロック自体は演出中ずっと見えるようにその場に残していた
             // (ユーザー指摘: 「潰れる直前で消えてしまう」「潰した様子が認識できる
-            // ように」)。復活するのでここで消す。
+            // ように」)。復活するのでここで消す(死亡時の盤面処理より先に行い、
+            // この演出用の残骸をブロック/キャラ重なり解消(#176)の対象にしない)。
             self.board
                 .set(self.player.row, self.player.col, Cell::Empty);
+            self.resolve_death_board_effects(events);
             let game_over = self.player.lose_life();
             debug_assert!(
                 !game_over,
@@ -875,25 +902,6 @@ impl Game {
         }
     }
 
-    /// プレイヤーの現在列を中心に左右1列ずつ(=3列分)、プレイヤーより浅い
-    /// (画面上で上にある)行を全てEmptyにする(TERM独自拡張)。ただしAIR(酸素
-    /// カプセル)は消滅させずその場に残す(ユーザー指摘: 「キャラが死んだとき
-    /// (AIR不足/つぶされたとき)...AIRは消えずに上から落下してくるように」)。
-    /// 周囲がEmptyになれば通常の重力tickが未支持と判定して自然に落下させるため、
-    /// ここでは単に上書きを避けるだけでよい。
-    fn clear_three_columns_above_player(&mut self) {
-        let col = self.player.col;
-        let col_start = col.saturating_sub(1);
-        let col_end = (col + 1).min(self.board.width() - 1);
-        for row in 0..self.player.row {
-            for c in col_start..=col_end {
-                if !matches!(self.board.cell(row, c), Cell::Oxygen) {
-                    self.board.set(row, c, Cell::Empty);
-                }
-            }
-        }
-    }
-
     /// レベルアップ・ゲームクリアを判定する(spec.md 7.1・8章)。深度(=row)が変化した
     /// 場合にのみ呼ぶ。
     fn check_level_and_clear(&mut self, events: &mut Vec<GameEvent>) {
@@ -906,6 +914,30 @@ impl Game {
             if level.is_multiple_of(10) {
                 self.player.lives = (self.player.lives + 1).min(LIVES_MAX);
                 events.push(GameEvent::ExtraLifeAtLevel { level });
+            }
+        }
+
+        // チェックポイント(100mごと、TERM独自拡張。#178)。7章のレベル進行(30m刻み、
+        // 表示のみ)とは別に、100m到達ごとに頭上を全クリアしゴールSE・演出を出す。
+        // 最終ゴール(FIELD_DEPTH_M)ちょうどは、Clearedイベント自体が同じ役割の演出を
+        // 持つため、ここでは二重に発火させない。
+        //
+        // 通常のプレイでは`check_level_and_clear`は行が1つ変化するたびに呼ばれるため、
+        // ここでのチェックポイント区切りの増分は常に高々1のはず。2つ以上一気に
+        // 進む場合があるとすれば、それはテスト等が`player.row`を直接遠くへ書き換えた
+        // ような非正規経路であり、そのタイミングで頭上を破壊的に全クリアするのは
+        // 意図と異なる。そうしたジャンプは区切り番号の追従だけ行い、演出は出さない。
+        let checkpoint = self.player.depth_m() / CHECKPOINT_STEP_M;
+        if checkpoint > self.last_checkpoint_reported {
+            let skipped_ahead = checkpoint > self.last_checkpoint_reported + 1;
+            self.last_checkpoint_reported = checkpoint;
+            let at_m = checkpoint * CHECKPOINT_STEP_M;
+            if !skipped_ahead && self.status == GameStatus::Playing && at_m < FIELD_DEPTH_M {
+                self.debug_clear_above_player();
+                self.apply_checkpoint_safe_zone(at_m);
+                self.checkpoint_flash_remaining = Duration::from_millis(CHECKPOINT_FLASH_MS);
+                self.checkpoint_flash_depth_m = at_m;
+                events.push(GameEvent::Checkpoint100m { at_m });
             }
         }
 
@@ -939,6 +971,7 @@ impl Game {
         // 押し潰し演出・移動補間の経過時間は、GameOverでPlaying状態を抜けた後も
         // 描画側が最後まで追従できるよう、Playingガードより前に進めておく。
         self.crush_flash_remaining = self.crush_flash_remaining.saturating_sub(delta);
+        self.checkpoint_flash_remaining = self.checkpoint_flash_remaining.saturating_sub(delta);
         self.render_anim_elapsed += delta.as_secs_f32();
         for (_, remaining, _) in self.recently_vanished.iter_mut() {
             *remaining = remaining.saturating_sub(delta);
@@ -1232,6 +1265,17 @@ impl Game {
                             {
                                 events.push(GameEvent::BombFuseWarning);
                             }
+                            // 危険域に入っている間、`BOMB_FUSE_TICK_INTERVAL_MS`ごとの
+                            // 境界を跨いだ瞬間に繰り返し「チッ」を鳴らす(TERM独自拡張。
+                            // #183)。爆発する瞬間(remaining_ms==0)は爆発音と重ならない
+                            // よう対象外にする。
+                            if bomb.remaining_ms > 0
+                                && bomb.remaining_ms <= BOMB_DANGER_MS
+                                && remaining_before / BOMB_FUSE_TICK_INTERVAL_MS
+                                    != bomb.remaining_ms / BOMB_FUSE_TICK_INTERVAL_MS
+                            {
+                                events.push(GameEvent::BombFuseTick);
+                            }
                             if bomb.remaining_ms == 0 {
                                 exploded.push(i);
                             }
@@ -1239,87 +1283,19 @@ impl Game {
                     }
                 }
             }
-            for &i in exploded.iter().rev() {
-                let bomb = self.bombs.remove(i);
-                let blast_cells = bomb_blast_cells(
-                    &self.board,
-                    bomb.pos,
-                    BOMB_BLAST_ROW_RANGE,
-                    BOMB_BLAST_COL_RANGE,
-                );
-                let mut hit_player = false;
-                let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS);
-                // 爆風が届いた色ブロックは一色に統一する(TERM独自拡張。#137。ユーザー
-                // 指摘: 「色ブロックは爆弾の炎によって一色に統一される」)。爆発ごとに
-                // 1色をランダムに選び、その爆発の範囲内にある色ブロック全てを同じ色に
-                // 揃える。ショートカットC/UnifyColorsアイテムは「4連結以上でも即座には
-                // 自動消滅させない」方針(#49)だが、ボム爆発については「爆弾で変化した
-                // 壁は落ちたときと同じ反応を発動させる。4マス以上結合している場合は
-                // 消える」というユーザーの明示的な指摘(#140)により、着地時の自動消滅と
-                // 同じ判定をこの場で発火させる。
-                use rand::RngExt;
-                let all_colors = ColorKind::ALL;
-                let unify_color = all_colors[self.rng.random_range(0..all_colors.len())];
-                let mut unified_positions = Vec::new();
-                for &(row, col) in &blast_cells {
-                    if (row, col) == self.player.position() {
-                        hit_player = true;
-                    }
-                    // 爆心地(ボム設置マス)からの距離が遠いほど炎の色調を外側寄りに
-                    // する(TERM独自拡張。#126。bombermantermの爆風スプライトが
-                    // 中心ほど白熱・外側ほど赤黒くなるのに倣う)。爆風は上下左右の
-                    // 直線上にしか届かないため、マンハッタン距離がそのまま
-                    // 「軸方向に何マス離れているか」と一致する。
-                    let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
-                    let tier = tier.min(u8::MAX as usize) as u8;
-                    // 炎フラッシュは着弾したセルの中身を問わず、爆風が通過した
-                    // 全マスに表示する(TERM独自拡張。#166)。以前はRock/Diamond/
-                    // Colorを変化させた場合にのみ発火しており、#159で爆風が
-                    // Empty(既に掘削済みの空間)も遠くまで貫通するようになった
-                    // ことで、炎が全く見えないマスが大半を占めてしまっていた。
-                    self.recently_exploded.push(((row, col), flash, tier));
-                    if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
-                        self.board.set(row, col, Cell::Star { visible_ms: 0 });
-                    } else if matches!(self.board.cell(row, col), Cell::Color(_)) {
-                        self.board.set(row, col, Cell::Color(unify_color));
-                        unified_positions.push((row, col));
-                    }
-                }
-
-                // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅
-                // させる(TERM独自拡張。#140)。同じグループに属する複数の位置を
-                // 二重に処理しないよう、既に判定した位置は`checked`で除外する。
-                let mut checked: Vec<board::Pos> = Vec::new();
-                for &pos in &unified_positions {
-                    if checked.contains(&pos) {
-                        continue;
-                    }
-                    let group = connected_same_color(&self.board, pos, unify_color);
-                    checked.extend(group.iter().copied());
-                    if group.len() >= 4 {
-                        let vanished: Vec<(board::Pos, Cell)> = group
-                            .iter()
-                            .map(|&g| (g, self.board.cell(g.0, g.1)))
-                            .collect();
-                        for &(r, c) in &group {
-                            self.board.set(r, c, Cell::Empty);
-                        }
-                        events.push(GameEvent::BlockDestroyed {
-                            blocks: group.len(),
-                        });
-                        self.note_vanished_cells(vanished);
-                    }
-                }
-
-                events.push(GameEvent::BombExploded);
-                // 同一フレームで複数のボムが爆発し、どちらもプレイヤーを巻き込んだ
-                // 場合に二重でミス処理しないよう、既にミス処理済み(is_dying/GameOver
-                // へ遷移済み)でないことを確認してから適用する。
-                if hit_player && !self.is_dying() && self.status == GameStatus::Playing {
-                    self.apply_miss(&mut events);
-                    if self.status != GameStatus::Playing {
-                        return events;
-                    }
+            if !exploded.is_empty() {
+                // 先に起爆確定分を全てまとめて取り出してから渡す(TERM独自拡張。#180。
+                // 同じtickでたまたま複数のボムが同時に起爆カウントダウン完了した場合、
+                // 1個ずつ`self.bombs.remove(i)`していくと、後続の誘爆(chain detonation)
+                // が既に取り出したインデックスとぶつかって壊れるため)。
+                let caught: Vec<Bomb> = exploded
+                    .iter()
+                    .rev()
+                    .map(|&i| self.bombs.remove(i))
+                    .collect();
+                self.detonate_bombs(caught, &mut events, true);
+                if self.status != GameStatus::Playing {
+                    return events;
                 }
             }
 
@@ -1638,6 +1614,16 @@ impl Game {
         self.crush_flash_remaining > Duration::ZERO || self.ascending_remaining.is_some()
     }
 
+    /// チェックポイント(100mごと)到達演出が表示中なら、到達した深度(m)を返す
+    /// (TERM独自拡張。#178)。描画側(render.rs)がバナー表示に使う。
+    pub fn checkpoint_flash_depth_m(&self) -> Option<usize> {
+        if self.checkpoint_flash_remaining > Duration::ZERO {
+            Some(self.checkpoint_flash_depth_m)
+        } else {
+            None
+        }
+    }
+
     /// 掘削アニメーション中の描画フレーム(TERM独自拡張、9章)。掘削演出中でなければ
     /// `None`、演出中は`DRILL_ANIM_FRAME_MS`ごとに`true`/`false`を切り替えて返す
     /// (方向別のアニメーション用に描画側が2フレームを交互に選ぶ)。
@@ -1839,7 +1825,10 @@ impl Game {
 
     /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中
     /// のみ有効。AIR(酸素カプセル)は消滅させずその場に残す(ユーザー指摘: 「Xで
-    /// ブロック消したときAIRは消えずに上から落下してくるように」)。
+    /// ブロック消したときAIRは消えずに上から落下してくるように」)。死亡時の頭上クリア
+    /// (TERM独自拡張。#176。ユーザー指摘: 「死んだときのキャラの上位の消し方はRアイテム
+    /// と同じとする」)・100mごとのチェックポイント到達時(TERM独自拡張。#178)も、
+    /// この同じ関数を呼び出して統一する。
     pub fn debug_clear_above_player(&mut self) {
         if self.status != GameStatus::Playing {
             return;
@@ -1849,19 +1838,95 @@ impl Game {
         // アニメーションして」)。AIR・アイテムブロック(C/R/Kアイテム)は消さずに残す
         // (TERM独自拡張。ユーザー指摘: 「ショートカットRは、Cアイテム、Rアイテム、
         // Kアイテムを削除しない(AIRと同じ扱い)」)。
+        //
+        // 画面外(`entry_row`より浅い)に残っていたAIR/アイテムブロックは、その場に
+        // 残すのではなく画面のすぐ外側まで移動させ、以後の重力ティックで自然に画面内へ
+        // 落ちてくるようにする(TERM独自拡張。#176/追加指摘。ユーザー指摘: 「Rアイテム
+        // の処理実行時は、上位の画面外アイテム等のオブジェクトを画面内に入る座標まで
+        // ただちに移動し落下させるものとする」→「オブジェクトがいったん一番至近の
+        // 画面外から上に配置してほしい。いきなり現れるのなし」)。画面内(entry_row)へ
+        // 直接テレポートさせると「いきなり現れる」ように見えてしまうため、画面の外
+        // (entry_rowの1つ浅い行=`just_off_screen_row`)を起点に、そこからさらに浅い側へ
+        // 積み上げる。既に画面内(entry_row以降)にあった分はそのまま動かさない。
+        let width = self.board.width();
+        let entry_row = self.player.row.saturating_sub(PLAYER_SCREEN_ROWS_ABOVE);
+        let just_off_screen_row = entry_row.saturating_sub(1);
+        let mut off_screen_by_col: Vec<Vec<Cell>> = vec![Vec::new(); width];
         let mut cleared = Vec::new();
         for row in 0..self.player.row {
-            for col in 0..self.board.width() {
+            for (col, bucket) in off_screen_by_col.iter_mut().enumerate() {
                 let cell = self.board.cell(row, col);
-                if !matches!(cell, Cell::Oxygen | Cell::Item(_)) {
-                    if cell != Cell::Empty {
-                        cleared.push(((row, col), cell));
+                if matches!(cell, Cell::Oxygen | Cell::Item(_)) {
+                    if row < entry_row {
+                        bucket.push(cell);
+                        self.board.set(row, col, Cell::Empty);
                     }
+                } else if cell != Cell::Empty {
+                    cleared.push(((row, col), cell));
                     self.board.set(row, col, Cell::Empty);
                 }
             }
         }
         self.note_vanished_cells(cleared);
+
+        // 列ごとに、画面のすぐ外側(just_off_screen_row)を起点に、元の深さ順(浅い方が先)
+        // を保ったまま浅い側(まだ画面に入らない側)へ空いているマスを探して詰め直す。
+        for (col, cells) in off_screen_by_col.into_iter().enumerate() {
+            let mut row = just_off_screen_row;
+            for cell in cells {
+                while self.board.cell(row, col) != Cell::Empty && row > 0 {
+                    row -= 1;
+                }
+                if self.board.cell(row, col) != Cell::Empty {
+                    break; // 置き場所が無ければそれ以上は諦める(起こりにくい極端なケース)
+                }
+                self.board.set(row, col, cell);
+                if row == 0 {
+                    break;
+                }
+                row -= 1;
+            }
+        }
+    }
+
+    /// チェックポイント(100mごと)到達時、その直後の`CHECKPOINT_SAFE_ZONE_M`ぶんを
+    /// 特別な区間にする(TERM独自拡張。#179/#181/#184。ユーザー指摘: 「100mごとゴール
+    /// したら何もオブジェクトのない20mすすむものとする」「500mフロアはC/K/Rアイテム/AIR
+    /// それぞれ500%固定フロアとする」)。通常はこの区間を完全に空にする安全地帯にし、
+    /// `BONUS_FLOOR_DEPTH_M`(500m)だけは例外としてC/K/Rアイテム・AIRが豊富なボーナス
+    /// フロアにする。
+    ///
+    /// このチェックポイントを実際に踏んだ瞬間(`debug_clear_above_player`と同じ
+    /// タイミング)にだけ、そのチェックポイント1つ分の区間だけをくり抜く(#184。
+    /// 以前はゲーム生成直後に全チェックポイント分を一括でくり抜いていたため、
+    /// プレイヤーがまだ到達していない深い場所も含めて盤面全体で同時に大穴が空き、
+    /// 開始直後から広範囲の支持崩壊・自動消滅が連鎖する不具合があった)。
+    fn apply_checkpoint_safe_zone(&mut self, at_m: usize) {
+        let depth_rows = self.board.depth_rows();
+        let zone_start_row = at_m;
+        let zone_end_row = (zone_start_row + CHECKPOINT_SAFE_ZONE_M).min(depth_rows);
+        if at_m == BONUS_FLOOR_DEPTH_M {
+            self.board.reroll_overlays_in_row_range(
+                zone_start_row,
+                zone_end_row,
+                100,
+                BONUS_FLOOR_ITEM_AIR_RATE_PERCENT,
+                100,
+                100,
+                BONUS_FLOOR_ITEM_AIR_RATE_PERCENT,
+                BONUS_FLOOR_ITEM_AIR_RATE_PERCENT,
+                BONUS_FLOOR_ITEM_AIR_RATE_PERCENT,
+                ColorKind::ALL.len() as u8,
+                100,
+                &self.gravity_state,
+            );
+        } else {
+            for row in zone_start_row..zone_end_row {
+                for col in 0..self.board.width() {
+                    self.board.set(row, col, Cell::Empty);
+                }
+            }
+        }
     }
 
     /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
@@ -1941,6 +2006,178 @@ impl Game {
                 }
             }
         }
+    }
+
+    /// 1個のボムの爆風を盤面へ適用する(炎フラッシュ・岩/ダイヤのスター化・色ブロック
+    /// の一色統一・新たに4連結以上になったグループの自動消滅)。プレイヤーが爆風に
+    /// 巻き込まれたかどうかを返すのみで、ミス処理自体は呼び出し側の責務とする
+    /// (TERM独自拡張。通常の起爆カウントダウン完了時`detonate_bomb`と、死亡時の
+    /// 即時全爆発`detonate_all_bombs_immediately`(#176)の両方から共通で使う)。
+    fn apply_bomb_blast(&mut self, bomb: &Bomb, events: &mut Vec<GameEvent>) -> bool {
+        let blast_cells = bomb_blast_cells(
+            &self.board,
+            bomb.pos,
+            BOMB_BLAST_ROW_RANGE,
+            BOMB_BLAST_COL_RANGE,
+        );
+        let mut hit_player = false;
+        let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS);
+        // 爆風が届いた色ブロックは一色に統一する(TERM独自拡張。#137。ユーザー
+        // 指摘: 「色ブロックは爆弾の炎によって一色に統一される」)。爆発ごとに
+        // 1色をランダムに選び、その爆発の範囲内にある色ブロック全てを同じ色に
+        // 揃える。ショートカットC/UnifyColorsアイテムは「4連結以上でも即座には
+        // 自動消滅させない」方針(#49)だが、ボム爆発については「爆弾で変化した
+        // 壁は落ちたときと同じ反応を発動させる。4マス以上結合している場合は
+        // 消える」というユーザーの明示的な指摘(#140)により、着地時の自動消滅と
+        // 同じ判定をこの場で発火させる。
+        use rand::RngExt;
+        let all_colors = ColorKind::ALL;
+        let unify_color = all_colors[self.rng.random_range(0..all_colors.len())];
+        let mut unified_positions = Vec::new();
+        for &(row, col) in &blast_cells {
+            if (row, col) == self.player.position() {
+                hit_player = true;
+            }
+            // 爆心地(ボム設置マス)からの距離が遠いほど炎の色調を外側寄りに
+            // する(TERM独自拡張。#126。bombermantermの爆風スプライトが
+            // 中心ほど白熱・外側ほど赤黒くなるのに倣う)。爆風は上下左右の
+            // 直線上にしか届かないため、マンハッタン距離がそのまま
+            // 「軸方向に何マス離れているか」と一致する。
+            let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
+            let tier = tier.min(u8::MAX as usize) as u8;
+            // 炎フラッシュは着弾したセルの中身を問わず、爆風が通過した
+            // 全マスに表示する(TERM独自拡張。#166)。以前はRock/Diamond/
+            // Colorを変化させた場合にのみ発火しており、#159で爆風が
+            // Empty(既に掘削済みの空間)も遠くまで貫通するようになった
+            // ことで、炎が全く見えないマスが大半を占めてしまっていた。
+            self.recently_exploded.push(((row, col), flash, tier));
+            if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
+                self.board.set(row, col, Cell::Star { visible_ms: 0 });
+            } else if matches!(self.board.cell(row, col), Cell::Color(_)) {
+                self.board.set(row, col, Cell::Color(unify_color));
+                unified_positions.push((row, col));
+            }
+        }
+
+        // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅
+        // させる(TERM独自拡張。#140)。同じグループに属する複数の位置を
+        // 二重に処理しないよう、既に判定した位置は`checked`で除外する。
+        let mut checked: Vec<board::Pos> = Vec::new();
+        for &pos in &unified_positions {
+            if checked.contains(&pos) {
+                continue;
+            }
+            let group = connected_same_color(&self.board, pos, unify_color);
+            checked.extend(group.iter().copied());
+            if group.len() >= 4 {
+                let vanished: Vec<(board::Pos, Cell)> = group
+                    .iter()
+                    .map(|&g| (g, self.board.cell(g.0, g.1)))
+                    .collect();
+                for &(r, c) in &group {
+                    self.board.set(r, c, Cell::Empty);
+                }
+                events.push(GameEvent::BlockDestroyed {
+                    blocks: group.len(),
+                });
+                self.note_vanished_cells(vanished);
+            }
+        }
+
+        events.push(GameEvent::BombExploded);
+        hit_player
+    }
+
+    /// `initial`のボムをまとめて爆発させる。爆風が他の(まだ`self.bombs`に残っている)
+    /// ボムを巻き込んだら、そのボムも連鎖してこの場で爆発させる(誘爆、TERM独自拡張。
+    /// #180。ユーザー指摘: 「爆弾は誘爆する」)。1個でも爆発が終わるまで(連鎖も含めて)
+    /// ミス処理は行わず、`trigger_miss_on_hit`がtrueの場合のみ、連鎖全体でプレイヤーが
+    /// 一度でも巻き込まれていればその場でミス処理する(死亡処理の途中
+    /// `resolve_death_board_effects`から呼ぶ場合はfalseにし、これ以上のミス処理の
+    /// 連鎖はしない。既に死亡処理の最中であるため)。
+    fn detonate_bombs(
+        &mut self,
+        initial: Vec<Bomb>,
+        events: &mut Vec<GameEvent>,
+        trigger_miss_on_hit: bool,
+    ) {
+        let mut queue = initial;
+        let mut any_hit_player = false;
+        while let Some(bomb) = queue.pop() {
+            any_hit_player |= self.apply_bomb_blast(&bomb, events);
+
+            let blast_cells = bomb_blast_cells(
+                &self.board,
+                bomb.pos,
+                BOMB_BLAST_ROW_RANGE,
+                BOMB_BLAST_COL_RANGE,
+            );
+            let mut caught_indices: Vec<usize> = self
+                .bombs
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| blast_cells.contains(&b.pos))
+                .map(|(i, _)| i)
+                .collect();
+            caught_indices.sort_unstable_by(|a, b| b.cmp(a)); // 後ろから取り出す
+            for i in caught_indices {
+                queue.push(self.bombs.remove(i));
+            }
+        }
+        // 同一フレームで複数のボムが爆発し、どちらもプレイヤーを巻き込んだ場合に
+        // 二重でミス処理しないよう、既にミス処理済み(is_dying/GameOverへ遷移済み)
+        // でないことを確認してから適用する。
+        if trigger_miss_on_hit
+            && any_hit_player
+            && !self.is_dying()
+            && self.status == GameStatus::Playing
+        {
+            self.apply_miss(events);
+        }
+    }
+
+    /// 盤面上の全てのボムを、画面内外を問わずこの場で即座に爆発させる(誘爆の連鎖込み。
+    /// TERM独自拡張。#176。ユーザー指摘: 「死んだら...画面内外の爆弾は即時爆発」)。
+    /// 死亡処理の途中(`resolve_death_board_effects`)から呼ぶため、爆風がプレイヤーを
+    /// 巻き込んでもこれ以上のミス処理の連鎖はしない(既に死亡処理の最中であるため)。
+    fn detonate_all_bombs_immediately(&mut self, events: &mut Vec<GameEvent>) {
+        let bombs = std::mem::take(&mut self.bombs);
+        self.detonate_bombs(bombs, events, false);
+    }
+
+    /// プレイヤーのマスにブロックが重なってしまっていたら、空いているマスが
+    /// 見つかるまで1マスずつ上へ押し上げる(TERM独自拡張。#176。ユーザー指摘:
+    /// 「ブロックとキャラが重ならないように重なったときは必ずその一つうえへ、
+    /// それでも重なったらさらにうえへを繰り返し演算する」)。見つからなければ
+    /// (起こりにくい極端なケース)そのブロックは諦めて消す。
+    fn resolve_block_player_overlap(&mut self) {
+        let (row, col) = self.player.position();
+        let cell = self.board.cell(row, col);
+        if cell == Cell::Empty {
+            return;
+        }
+        let target = (0..row)
+            .rev()
+            .find(|&r| self.board.cell(r, col) == Cell::Empty);
+        self.board.set(row, col, Cell::Empty);
+        if let Some(r) = target {
+            self.board.set(r, col, cell);
+        }
+    }
+
+    /// 死亡時(押し潰し/酸素切れ)の盤面への影響をまとめて処理する(TERM独自拡張。
+    /// #176。ユーザー指摘: 「死んだらキャラより上部のアイテムはただちに画面内に
+    /// 移動させ、落下開始。画面内外の爆弾は即時爆発。ブロックとキャラが重ならない
+    /// ように...」)。
+    /// - 頭上のクリアはRアイテムと全く同じ処理(`debug_clear_above_player`)を使う
+    ///   (ユーザー指摘: 「死んだときのキャラの上位の消し方はRアイテムと同じとする」)。
+    ///   画面外に残っていたAIR/アイテムも同じ処理内で画面内へ詰め直される。
+    /// - 画面内外を問わず、盤面上の全てのボムをこの場で即座に爆発させる。
+    /// - 上記の結果、プレイヤーのマスにブロックが重なってしまっていたら押し上げる。
+    fn resolve_death_board_effects(&mut self, events: &mut Vec<GameEvent>) {
+        self.debug_clear_above_player();
+        self.detonate_all_bombs_immediately(events);
+        self.resolve_block_player_overlap();
     }
 
     /// ボム出現を1回判定する(TERM独自拡張。#96)。盤面全体のボム数が上限未満で、
@@ -2241,6 +2478,10 @@ mod tests {
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 11;
+        // ボムの自然発生を無効化する(TERM独自拡張。この長時間シミュレーションの
+        // 途中でたまたま自然発生したボムがプレイヤーに命中すると、その死亡処理が
+        // このテストの本題と無関係な列のダイヤまで巻き込んでしまい得るため)。
+        game.set_bomb_spawn_rate_percent(0);
 
         game.board.rows[500][0] = Cell::Diamond;
         game.board.rows[501][0] = Cell::Item(ItemEffect::ClearAbove);
@@ -2248,6 +2489,13 @@ mod tests {
         let total_ms_needed = (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 500 * FALL_TICK_MS;
         let mut elapsed_ms = 0u64;
         while elapsed_ms < total_ms_needed {
+            // このテストは酸素カプセルを一切置かないまま数分相当の時間を進めるため、
+            // 何もしないと道中で酸素切れ→死亡→復活のサイクルが発生し、死亡時の頭上
+            // クリア(#176、Rアイテムと同じ盤面幅全体)がこのテストの本題と無関係な
+            // 列のダイヤまで巻き込んで消してしまう。このテストの検証対象(ダイヤと
+            // アイテムが一緒に落下する際の重力エンジンの挙動)とは無関係なため、
+            // 酸素は毎フレーム全回復させて死亡サイクル自体を起こさせない。
+            game.player.oxygen = crate::constants::OXYGEN_MAX;
             game.update(Duration::from_millis(FRAME_MS));
             elapsed_ms += FRAME_MS;
         }
@@ -2562,6 +2810,165 @@ mod tests {
             game.player.lives, LIVES_MAX,
             "既に上限ならそれ以上増えないはず"
         );
+    }
+
+    #[test]
+    fn reaching_a_100m_checkpoint_clears_above_and_emits_the_event_and_flash() {
+        // ユーザー指摘(#178): 「100mすすむごとにそれより上部のオブジェクトを全クリア、
+        // 100mごとのゴールSEと演出、アニメーションする」。7章のレベル進行(30m刻み)とは
+        // 別の、100m刻みの独立した節目。
+        let mut game = Game::new(90);
+        game.player.row = crate::constants::CHECKPOINT_STEP_M - 2; // depth=99、まだcheckpoint到達前
+        game.player.facing = Direction::Down;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty; // 自由落下させる
+        game.board.rows[10][game.player.col] = Cell::Rock { hits: 0 }; // 頭上、クリア対象になるはず
+
+        game.try_drill(); // 掘るだけでは移動しない
+        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // depth=100 -> checkpoint到達
+
+        assert!(
+            events.contains(&GameEvent::Checkpoint100m { at_m: 100 }),
+            "チェックポイント到達イベントが発生するはず: {events:?}"
+        );
+        assert_eq!(
+            game.board.cell(10, game.player.col),
+            Cell::Empty,
+            "頭上のブロックはチェックポイント到達で全クリアされるはず"
+        );
+        assert_eq!(
+            game.checkpoint_flash_depth_m(),
+            Some(100),
+            "到達演出が表示中のはず"
+        );
+    }
+
+    #[test]
+    fn checkpoint_safe_zones_are_not_carved_out_until_the_checkpoint_is_actually_reached() {
+        // #184で発見: 以前は`Game::new`直後に全チェックポイント(100〜900m)分の安全
+        // 地帯を一括でくり抜いていたため、プレイヤーがまだ全く到達していない深い場所
+        // も含めて盤面全体で同時に大穴が空き、開始直後から広範囲の支持崩壊・自動消滅
+        // が連鎖する不具合(ユーザー指摘:「ゲーム開始直後なんかおかしい、20mのバグか」)
+        // があった。新規生成直後は、まだどのチェックポイントの安全地帯もくり抜かれて
+        // おらず、生の生成結果(row>=2は常にSome色が入るため実質Emptyにならない)の
+        // ままであることを確認する。
+        let game = Game::new(300);
+        let start = crate::constants::CHECKPOINT_STEP_M;
+        let end = start + crate::constants::CHECKPOINT_SAFE_ZONE_M;
+        let all_empty = (start..end)
+            .flat_map(|row| (0..game.board.width()).map(move |col| (row, col)))
+            .all(|(row, col)| game.board.cell(row, col) == Cell::Empty);
+        assert!(
+            !all_empty,
+            "生成直後は100mチェックポイントの安全地帯がまだくり抜かれていないはず"
+        );
+    }
+
+    #[test]
+    fn reaching_a_checkpoint_carves_out_only_that_checkpoints_safe_zone_ahead_of_the_player() {
+        // #184: チェックポイント到達時にくり抜かれるのは、そのチェックポイント1つ分の
+        // 区間だけであり、まだ到達していない他のチェックポイント(200m等)の安全地帯には
+        // 影響しないはず。
+        let mut game = Game::new(301);
+        game.player.row = crate::constants::CHECKPOINT_STEP_M - 2; // depth=99
+        game.player.facing = Direction::Down;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        game.try_drill();
+        game.update(Duration::from_millis(FALL_TICK_MS)); // depth=100 -> checkpoint到達
+
+        let width = game.board.width();
+        for col in 0..width {
+            for row in 100..120 {
+                assert_eq!(
+                    game.board.cell(row, col),
+                    Cell::Empty,
+                    "到達した100mチェックポイントの安全地帯(row={row}, col={col})は空のはず"
+                );
+            }
+        }
+        let far_start = 200;
+        let far_end = far_start + crate::constants::CHECKPOINT_SAFE_ZONE_M;
+        let far_all_empty = (far_start..far_end)
+            .flat_map(|row| (0..width).map(move |col| (row, col)))
+            .all(|(row, col)| game.board.cell(row, col) == Cell::Empty);
+        assert!(
+            !far_all_empty,
+            "まだ到達していない200mチェックポイントの安全地帯は、くり抜かれていないはず"
+        );
+    }
+
+    #[test]
+    fn checkpoint_flash_clears_after_checkpoint_flash_ms_elapses() {
+        let mut game = Game::new(91);
+        game.player.row = crate::constants::CHECKPOINT_STEP_M - 2;
+        game.player.facing = Direction::Down;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        game.try_drill();
+        game.update(Duration::from_millis(FALL_TICK_MS));
+        assert_eq!(game.checkpoint_flash_depth_m(), Some(100));
+
+        game.update(Duration::from_millis(
+            crate::constants::CHECKPOINT_FLASH_MS + 10,
+        ));
+        assert_eq!(
+            game.checkpoint_flash_depth_m(),
+            None,
+            "表示時間が過ぎたら演出は終わっているはず"
+        );
+    }
+
+    #[test]
+    fn a_jump_that_skips_multiple_checkpoints_at_once_does_not_destructively_clear_or_fire_the_event()
+     {
+        // #178実装時に発見: テストコード等が`player.row`を直接遠くへ書き換えると、
+        // 通常のプレイ(1行ずつしか進まない)では起こらない「一気に複数チェックポイント分
+        // 進む」ケースが生じうる。このとき区切り番号の追従はするが、頭上の破壊的な
+        // 全クリア・演出・イベント発火は行わない(無関係なテストの前提を壊さないため。
+        // 実際に一度、揺れ中セルを扱う別のテストがこれで壊れた)。
+        let mut game = Game::new(92);
+        clear_board(&mut game);
+        game.player.row = 500; // 一気にcheckpoint=5相当まで飛ぶ(非正規経路)
+        game.board.rows[10][game.player.col] = Cell::Rock { hits: 0 };
+
+        let mut events = Vec::new();
+        game.check_level_and_clear(&mut events);
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Checkpoint100m { .. })),
+            "一気に複数チェックポイント分飛ぶジャンプではイベントを発火しないはず: {events:?}"
+        );
+        assert_eq!(
+            game.board.cell(10, game.player.col),
+            Cell::Rock { hits: 0 },
+            "一気に複数チェックポイント分飛ぶジャンプでは頭上を破壊的にクリアしないはず"
+        );
+        assert_eq!(game.checkpoint_flash_depth_m(), None);
+    }
+
+    #[test]
+    fn reaching_the_final_goal_depth_does_not_also_fire_a_checkpoint_event() {
+        // 最終ゴール(FIELD_DEPTH_M)はGameEvent::Clearedが同じ役割の演出を持つため、
+        // Checkpoint100mを二重発火させない。
+        let mut game = Game::new(93);
+        clear_board(&mut game);
+        game.player.row = crate::constants::FIELD_DEPTH_M - 2; // depth=FIELD_DEPTH_M-1
+        let mut events = Vec::new();
+        game.check_level_and_clear(&mut events); // 区切り番号を追従させるだけ
+
+        game.player.row = crate::constants::FIELD_DEPTH_M - 1; // depth=FIELD_DEPTH_M(ゴール)
+        let mut events2 = Vec::new();
+        game.check_level_and_clear(&mut events2);
+
+        assert!(
+            !events2
+                .iter()
+                .any(|e| matches!(e, GameEvent::Checkpoint100m { .. })),
+            "最終ゴールではCheckpoint100mを二重発火させないはず: {events2:?}"
+        );
+        assert!(events2.contains(&GameEvent::Cleared));
     }
 
     #[test]
@@ -3243,11 +3650,12 @@ mod tests {
     }
 
     #[test]
-    fn crush_death_clears_three_columns_above_the_player() {
-        // 押し潰しミス発生時、死亡地点の左右列を含めて3列分、プレイヤーより上の
-        // ブロックが全てクリアされる(TERM独自拡張。ユーザー指摘: 「キャラがブロック
-        // つぶされて死んだら、死んだ場所の左右列を含めて3列分の、キャラから上部
-        // ブロックすべてクリアすること」。再開直後の連続死亡を防ぐ安全対策)。
+    fn crush_death_clears_the_full_width_above_the_player_like_the_clear_above_item() {
+        // 押し潰しミス発生時、プレイヤーより上のブロックが盤面幅全体でクリアされる
+        // (TERM独自拡張。#176。ユーザー指摘: 「死んだときのキャラの上位の消し方は
+        // Rアイテムと同じとする」)。以前は死亡地点の左右列を含めて3列分だけが対象
+        // だったが、Rアイテム(`debug_clear_above_player`)と全く同じ処理へ統一した
+        // ため、離れた列も含めて全てクリアされる。
         let mut game = Game::new_with_lives(34, 2); // ライフ2、押し潰されても即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -3257,17 +3665,15 @@ mod tests {
             game.board.rows[row][5] = Cell::Color(ColorKind::Blue);
             game.board.rows[row][6] = Cell::Color(ColorKind::Blue);
         }
-        // 対象外の列(3, 7)は影響を受けないことを確認するために配置しておく。
-        // 最深行に置いて確実に支持された状態にする(そうしないと重力落下で
-        // 位置がズレてテストの前提が崩れる)。
-        game.board.rows[999][3] = Cell::Color(ColorKind::Green);
-        game.board.rows[999][7] = Cell::Color(ColorKind::Green);
+        // 離れた列(3, 7)も同じくクリア対象になることを確認するために配置しておく。
+        game.board.rows[990][3] = Cell::Color(ColorKind::Green);
+        game.board.rows[990][7] = Cell::Color(ColorKind::Green);
         game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
 
         game.update(Duration::from_millis(
             (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
         ));
-        // 押し潰し直後は「天に召される」演出中で、ライフ減算・3列クリアは演出が
+        // 押し潰し直後は「天に召される」演出中で、ライフ減算・頭上クリアは演出が
         // 終わるまで遅延される(TERM独自拡張)。演出の完了を待つ。
         game.update(Duration::from_millis(
             crate::constants::CRUSH_ASCEND_MS + 10,
@@ -3278,39 +3684,21 @@ mod tests {
             "押し潰されてライフを1つ失っているはず"
         );
         for row in 0..999 {
-            assert_eq!(
-                game.board.cell(row, 4),
-                Cell::Empty,
-                "row={row} col=4はクリアされているはず"
-            );
-            assert_eq!(
-                game.board.cell(row, 5),
-                Cell::Empty,
-                "row={row} col=5はクリアされているはず"
-            );
-            assert_eq!(
-                game.board.cell(row, 6),
-                Cell::Empty,
-                "row={row} col=6はクリアされているはず"
-            );
+            for col in 0..game.board.width() {
+                assert_eq!(
+                    game.board.cell(row, col),
+                    Cell::Empty,
+                    "row={row} col={col}はクリアされているはず(盤面幅全体が対象)"
+                );
+            }
         }
-        assert_eq!(
-            game.board.cell(999, 3),
-            Cell::Color(ColorKind::Green),
-            "対象外の列はクリアされない"
-        );
-        assert_eq!(
-            game.board.cell(999, 7),
-            Cell::Color(ColorKind::Green),
-            "対象外の列はクリアされない"
-        );
     }
 
     #[test]
-    fn oxygen_death_goes_through_the_same_ascend_and_three_column_clear_as_crush_death() {
+    fn oxygen_death_goes_through_the_same_ascend_and_full_width_clear_as_crush_death() {
         // ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」。
         // 酸素切れ死亡でも押し潰し死亡と全く同じ処理(「天に召される」演出→演出完了後に
-        // 3列クリア・ライフ減算)が行われることを確認する。
+        // 盤面幅全体をクリア・ライフ減算)が行われることを確認する。
         let mut game = Game::new_with_lives(34, 2); // ライフ2、酸素切れでも即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -3320,8 +3708,8 @@ mod tests {
             game.board.rows[row][5] = Cell::Color(ColorKind::Blue);
             game.board.rows[row][6] = Cell::Color(ColorKind::Blue);
         }
-        game.board.rows[999][3] = Cell::Color(ColorKind::Green);
-        game.board.rows[999][7] = Cell::Color(ColorKind::Green);
+        game.board.rows[990][3] = Cell::Color(ColorKind::Green);
+        game.board.rows[990][7] = Cell::Color(ColorKind::Green);
         game.player.oxygen = 1.0;
 
         game.update(Duration::from_secs(1)); // 酸素切れでミス(押し潰しではない)
@@ -3341,31 +3729,79 @@ mod tests {
 
         assert_eq!(game.player.lives, 1, "酸素切れでライフを1つ失っているはず");
         for row in 0..999 {
-            assert_eq!(
-                game.board.cell(row, 4),
-                Cell::Empty,
-                "row={row} col=4はクリアされているはず"
-            );
-            assert_eq!(
-                game.board.cell(row, 5),
-                Cell::Empty,
-                "row={row} col=5はクリアされているはず"
-            );
-            assert_eq!(
-                game.board.cell(row, 6),
-                Cell::Empty,
-                "row={row} col=6はクリアされているはず"
-            );
+            for col in 0..game.board.width() {
+                assert_eq!(
+                    game.board.cell(row, col),
+                    Cell::Empty,
+                    "row={row} col={col}はクリアされているはず(盤面幅全体が対象)"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn death_detonates_every_bomb_on_the_board_immediately_regardless_of_its_own_fuse() {
+        // ユーザー指摘(#176): 「画面内外の爆弾は即時爆発」。死亡(押し潰し)処理の際、
+        // 起爆までまだ全く余裕があるボムも含めて、盤面上の全てのボムがその場で
+        // 即座に爆発することを確認する。
+        let mut game = Game::new_with_lives(74, 2); // ライフ2、押し潰されても即GameOverにならない
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし(押し潰す)
+        game.board.rows[521][7] = Cell::Rock { hits: 0 }; // ボムの支え
+        game.bombs.push(Bomb {
+            pos: (520, 7),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 60_000, // まだ全く起爆する気配が無い残り時間
+            settle_bounce_dir: 1,
+        });
+
+        let mut events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+        assert!(
+            !game.bombs.is_empty(),
+            "「天に召される」演出が終わるまではまだ爆発しないはず"
+        );
+        events.extend(game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        )));
+
+        assert!(
+            game.bombs.is_empty(),
+            "死亡処理の完了時点で残り時間に関わらずボムは爆発しているはず"
+        );
+        assert!(
+            events.contains(&GameEvent::BombExploded),
+            "死亡による即時爆発でもBombExplodedイベントが発生するはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_block_player_overlap_pushes_the_overlapping_block_up_to_the_nearest_empty_cell() {
+        // ユーザー指摘(#176): 「ブロックとキャラが重ならないように重なったときは
+        // 必ずその一つうえへ、それでも重なったらさらにうえへを繰り返し演算する」。
+        let mut game = Game::new(75);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[499][5] = Cell::Rock { hits: 0 }; // 1つ上は塞がっている
+        game.board.rows[500][5] = Cell::Color(ColorKind::Red); // プレイヤーのマスに重なったブロック
+
+        game.resolve_block_player_overlap();
+
         assert_eq!(
-            game.board.cell(999, 3),
-            Cell::Color(ColorKind::Green),
-            "対象外の列はクリアされない"
+            game.board.cell(500, 5),
+            Cell::Empty,
+            "プレイヤーのマスは空くはず"
         );
         assert_eq!(
-            game.board.cell(999, 7),
-            Cell::Color(ColorKind::Green),
-            "対象外の列はクリアされない"
+            game.board.cell(498, 5),
+            Cell::Color(ColorKind::Red),
+            "1つ上(499)も塞がっているため、さらにその上(498)まで押し上げられるはず"
         );
     }
 
@@ -3455,21 +3891,39 @@ mod tests {
     }
 
     #[test]
-    fn debug_clear_above_player_leaves_oxygen_capsules_in_place_to_fall_naturally() {
-        // ユーザー指摘: 「Xでブロック消したときAIRは消えずに上から落下してくるように」。
+    fn debug_clear_above_player_moves_off_screen_oxygen_capsules_to_just_outside_the_screen() {
+        // ユーザー指摘: 「Xでブロック消したときAIRは消えずに上から落下してくるように」
+        // +「Rアイテムの処理実行時は、上位の画面外アイテム等のオブジェクトを画面内に
+        // 入る座標までただちに移動し落下させるものとする」(#176)→「オブジェクトが
+        // いったん一番至近の画面外から上に配置してほしい。いきなり現れるのなし」
+        // (追加指摘)。画面内へ直接テレポートさせず、画面のすぐ外側
+        // (just_off_screen_row = entry_row - 1)まで移動させ、以後の重力ティックで
+        // 自然に画面内へ落ちてくるようにする。
         let mut game = Game::new(71);
         clear_board(&mut game);
         game.player.row = 50;
         game.player.col = 5;
-        game.board.rows[10][5] = Cell::Oxygen;
+        game.board.rows[10][5] = Cell::Oxygen; // 画面外(entry_row=46より浅い)
         game.board.rows[10][6] = Cell::Rock { hits: 2 }; // 比較用: AIR以外は通常通り消える
 
         game.debug_clear_above_player();
 
         assert_eq!(
             game.board.cell(10, 5),
+            Cell::Empty,
+            "画面外に残っていたAIRは元の位置には残らないはず"
+        );
+        let entry_row = game.player.row - crate::constants::PLAYER_SCREEN_ROWS_ABOVE;
+        let just_off_screen_row = entry_row - 1;
+        assert_eq!(
+            game.board.cell(just_off_screen_row, 5),
             Cell::Oxygen,
-            "AIRは消えずに残るはず"
+            "AIRは画面のすぐ外側まで移動しているはず(画面内にいきなり現れない)"
+        );
+        assert_eq!(
+            game.board.cell(entry_row, 5),
+            Cell::Empty,
+            "この時点ではまだ画面内には現れていないはず"
         );
         assert_eq!(
             game.board.cell(10, 6),
@@ -3479,9 +3933,14 @@ mod tests {
     }
 
     #[test]
-    fn debug_clear_above_player_leaves_item_blocks_in_place_to_fall_naturally() {
+    fn debug_clear_above_player_moves_off_screen_item_blocks_to_just_outside_the_screen_preserving_order()
+     {
         // ユーザー指摘: 「ショートカットRは、Cアイテム、Rアイテム、Kアイテムを削除
-        // しない(AIRと同じ扱い)」。
+        // しない(AIRと同じ扱い)」+「画面外アイテム等のオブジェクトを画面内に入る座標
+        // までただちに移動し落下させるものとする」(#176)→「オブジェクトがいったん
+        // 一番至近の画面外から上に配置してほしい。いきなり現れるのなし」(追加指摘)。
+        // 同じ列に複数ある場合、元の深さ順(浅い方が先)を保ったまま画面のすぐ外側から
+        // さらに浅い側へ詰め直す(画面内にはまだ現れない)。
         let mut game = Game::new(71);
         clear_board(&mut game);
         game.player.row = 50;
@@ -3493,20 +3952,32 @@ mod tests {
 
         game.debug_clear_above_player();
 
+        let entry_row = game.player.row - crate::constants::PLAYER_SCREEN_ROWS_ABOVE;
+        let just_off_screen_row = entry_row - 1;
+        assert_eq!(
+            game.board.cell(just_off_screen_row, 5),
+            Cell::Item(ItemEffect::ClearAbove),
+            "元々一番浅かったRアイテムが画面のすぐ外側の先頭に詰め直されるはず"
+        );
+        assert_eq!(
+            game.board.cell(just_off_screen_row - 1, 5),
+            Cell::Item(ItemEffect::UnifyColors),
+            "Cアイテムがその次(さらに浅い側)に詰め直されるはず"
+        );
+        assert_eq!(
+            game.board.cell(just_off_screen_row - 2, 5),
+            Cell::Item(ItemEffect::StarifyScreen),
+            "Kアイテムがさらにその次に詰め直されるはず"
+        );
+        assert_eq!(
+            game.board.cell(entry_row, 5),
+            Cell::Empty,
+            "この時点ではまだ画面内には現れていないはず"
+        );
         assert_eq!(
             game.board.cell(10, 5),
-            Cell::Item(ItemEffect::ClearAbove),
-            "Rアイテムは消えずに残るはず"
-        );
-        assert_eq!(
-            game.board.cell(11, 5),
-            Cell::Item(ItemEffect::UnifyColors),
-            "Cアイテムは消えずに残るはず"
-        );
-        assert_eq!(
-            game.board.cell(12, 5),
-            Cell::Item(ItemEffect::StarifyScreen),
-            "Kアイテムは消えずに残るはず"
+            Cell::Empty,
+            "アイテムは元の画面外の位置には残らないはず"
         );
         assert_eq!(
             game.board.cell(10, 6),
@@ -3632,10 +4103,14 @@ mod tests {
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 5;
-        game.board.rows[990][3] = Cell::Rock { hits: 0 };
         game.player.oxygen = 1.0;
         game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
         assert_eq!(game.status, GameStatus::GameOver);
+
+        // GameOverになった後で改めて岩を置く(死亡時の頭上クリア(#176、Rアイテムと
+        // 同じ盤面幅全体)の影響を受けないようにするため。この岩はstarify自体が
+        // GameOver中に何もしないことだけを確認する目的で置いている)。
+        game.board.rows[990][3] = Cell::Rock { hits: 0 };
 
         game.debug_starify_visible_screen();
 
@@ -4054,6 +4529,67 @@ mod tests {
 
         let too_wide = Game::new_with_width(34, 999);
         assert_eq!(too_wide.board.width(), crate::constants::FIELD_WIDTH_MAX);
+    }
+
+    #[test]
+    fn each_checkpoint_is_followed_by_an_empty_safe_zone_except_the_bonus_floor() {
+        // ユーザー指摘(#181): 「100mごとゴールしたら何もオブジェクトのない20mすすむ
+        // ものとする(20mにオブジェクト配置してはいけない」。各チェックポイント
+        // (100mごと)を実際に踏んだ直後、`CHECKPOINT_SAFE_ZONE_M`行が完全に
+        // Emptyであることを確認する(500mのボーナスフロアは例外なので対象外)。
+        // #184: くり抜きは踏んだ瞬間にその1つ分だけ行う(生成直後の一括くり抜きは
+        // 開始直後の広範囲崩落バグの原因だったため廃止した)ため、ここでは各
+        // チェックポイントを順に踏んだこととして`apply_checkpoint_safe_zone`を呼ぶ。
+        let mut game = Game::new(200);
+        for checkpoint_depth_m in (crate::constants::CHECKPOINT_STEP_M
+            ..crate::constants::FIELD_DEPTH_M)
+            .step_by(crate::constants::CHECKPOINT_STEP_M)
+        {
+            game.apply_checkpoint_safe_zone(checkpoint_depth_m);
+            if checkpoint_depth_m == crate::constants::BONUS_FLOOR_DEPTH_M {
+                continue; // ボーナスフロアは別テストで確認する
+            }
+            let start = checkpoint_depth_m;
+            let end =
+                (start + crate::constants::CHECKPOINT_SAFE_ZONE_M).min(game.board.depth_rows());
+            for row in start..end {
+                for col in 0..game.board.width() {
+                    assert_eq!(
+                        game.board.cell(row, col),
+                        Cell::Empty,
+                        "checkpoint={checkpoint_depth_m}m: row={row} col={col}は安全地帯として空のはず"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_500m_bonus_floor_has_a_noticeably_higher_oxygen_density_than_a_normal_band() {
+        // ユーザー指摘(#179): 「500mフロアはC/K/Rアイテム/AIRそれぞれ500%固定フロア
+        // とする」。500mチェックポイント直後の帯はAIR(酸素カプセル、出現数に上限が
+        // 無い)の密度が、同じ幅の通常の帯より明らかに高いはず。#184: くり抜きは
+        // チェックポイントを踏んだ瞬間に行うため、500mを踏んだこととして
+        // `apply_checkpoint_safe_zone`を呼んでからボーナスフロアを判定する。
+        let mut game = Game::new(201);
+        game.apply_checkpoint_safe_zone(crate::constants::BONUS_FLOOR_DEPTH_M);
+        let width = game.board.width();
+        let bonus_start = crate::constants::BONUS_FLOOR_DEPTH_M;
+        let bonus_end = bonus_start + crate::constants::CHECKPOINT_SAFE_ZONE_M;
+        let count_oxygen = |from: usize, to: usize| {
+            (from..to)
+                .flat_map(|row| (0..width).map(move |col| (row, col)))
+                .filter(|&(row, col)| game.board.cell(row, col) == Cell::Oxygen)
+                .count()
+        };
+        let bonus_oxygen = count_oxygen(bonus_start, bonus_end);
+        // 比較用の通常の帯(直前のチェックポイントの安全地帯明け、400m直後は
+        // 別のチェックポイントの安全地帯なので避け、300m付近の通常区間を使う)。
+        let normal_oxygen = count_oxygen(320, 320 + crate::constants::CHECKPOINT_SAFE_ZONE_M);
+        assert!(
+            bonus_oxygen > normal_oxygen,
+            "ボーナスフロアのAIR密度({bonus_oxygen})は通常区間({normal_oxygen})より明らかに高いはず"
+        );
     }
 
     #[test]
@@ -4593,6 +5129,71 @@ mod tests {
     }
 
     #[test]
+    fn bomb_fuse_tick_fires_repeatedly_at_fixed_intervals_while_in_the_danger_zone() {
+        // ユーザー指摘(#183): 「爆弾爆発するまえに「ちちちちち」って乾いた音鳴らして
+        // くれよ」。危険域(残りBOMB_DANGER_MS以下)に入っている間、
+        // BOMB_FUSE_TICK_INTERVAL_MSごとに繰り返しBombFuseTickが発生するはず。
+        let mut game = Game::new(2);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        let bomb_row = FIELD_DEPTH_M - 1;
+        game.bombs.push(Bomb {
+            pos: (bomb_row, 5),
+            origin: (bomb_row, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_DANGER_MS + 50,
+            settle_bounce_dir: 1,
+        });
+
+        // 危険域に入るまではまだ発火しないはず。
+        let events = game.update(Duration::from_millis(20));
+        assert!(!events.contains(&GameEvent::BombFuseTick));
+
+        // 危険域に入った後は、爆発するまでの間にBOMB_FUSE_TICK_INTERVAL_MSごとに
+        // 繰り返し発火するはず(単発のBombFuseWarningとは異なり複数回鳴る)。
+        let mut tick_count = 0;
+        while !game.bombs.is_empty() {
+            let events = game.update(Duration::from_millis(20));
+            tick_count += events
+                .iter()
+                .filter(|e| **e == GameEvent::BombFuseTick)
+                .count();
+        }
+        assert!(
+            tick_count >= 2,
+            "危険域の間にチッが複数回繰り返し鳴るはず: {tick_count}回"
+        );
+    }
+
+    #[test]
+    fn bomb_fuse_tick_does_not_fire_on_the_same_tick_the_bomb_explodes() {
+        // 爆発音(play_bomb_explosion)と重ならないよう、remaining_msがちょうど0になる
+        // 瞬間(=爆発する瞬間)はBombFuseTickの対象外にするはず。
+        let mut game = Game::new(3);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        let bomb_row = FIELD_DEPTH_M - 1;
+        game.bombs.push(Bomb {
+            pos: (bomb_row, 5),
+            origin: (bomb_row, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 30,
+            settle_bounce_dir: 1,
+        });
+
+        let events = game.update(Duration::from_millis(30));
+        assert!(events.contains(&GameEvent::BombExploded));
+        assert!(
+            !events.contains(&GameEvent::BombFuseTick),
+            "爆発した瞬間はBombFuseTickを鳴らさないはず: {events:?}"
+        );
+    }
+
+    #[test]
     fn debug_place_bomb_does_nothing_while_not_playing() {
         let mut game = Game::new(1);
         game.status = GameStatus::Paused;
@@ -4711,6 +5312,52 @@ mod tests {
             game.board.cell(520 - BOMB_BLAST_ROW_RANGE - 1, 5),
             Cell::Color(ColorKind::Yellow),
             "爆風範囲外の色ブロックは変化しないはず"
+        );
+    }
+
+    #[test]
+    fn bomb_explosion_chain_detonates_another_bomb_caught_in_its_blast() {
+        // ユーザー指摘(#180): 「爆弾は誘爆する」。起爆カウントダウンが完了して
+        // 爆発したボムの爆風範囲内に別のボム(まだ起爆までかなり余裕がある)が
+        // あれば、そのボムも連鎖してその場で爆発することを確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        // 各ボムの真下に支えを置く(支えが無いと「下に他のボムがあるかどうか」の
+        // 判定・自由落下と絡んでボム自身の起爆カウントダウンが進まなくなるため)。
+        game.board.rows[521][5] = Cell::Rock { hits: 0 };
+        game.board.rows[521][7] = Cell::Rock { hits: 0 };
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50, // このtickで起爆する
+            settle_bounce_dir: 1,
+        });
+        game.bombs.push(Bomb {
+            pos: (520, 7), // 1個目と同じ行、2列隣(爆風範囲内)
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 5000, // 単独ではこのtickでは起爆しないはずの残り時間
+            settle_bounce_dir: 1,
+        });
+
+        let events = game.update(Duration::from_millis(60));
+
+        assert!(
+            game.bombs.is_empty(),
+            "誘爆で2個目のボムも盤面から消えるはず"
+        );
+        let exploded_count = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::BombExploded))
+            .count();
+        assert_eq!(
+            exploded_count, 2,
+            "誘爆した分も含めて2回ぶんBombExplodedが発生するはず: {events:?}"
         );
     }
 

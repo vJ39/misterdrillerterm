@@ -597,3 +597,12 @@ pub fn play_bomb_fuse_warning(mixer: &Mixer) {
         SE_VOLUME,
     );
 }
+
+/// ボム起爆前の連続導火線音(TERM独自拡張。#183。ユーザー指摘: 「爆弾爆発するまえに
+/// 「ちちちちち」って乾いた音鳴らしてくれよ」)。`play_bomb_fuse_warning`(危険域に
+/// 入った瞬間の1回だけの駆け上がり4音)とは別に、危険域が続く間`constants::
+/// BOMB_FUSE_TICK_INTERVAL_MS`おきに繰り返し呼ばれる想定。矩形波1音・極短(20ms)・
+/// 低めのピッチにして、駆け上がる4音の警告音より控えめな「乾いた」質感にする。
+pub fn play_bomb_fuse_tick(mixer: &Mixer) {
+    play_tone(mixer, square_tone(180.0, 20, 0.45), SE_VOLUME);
+}
