@@ -2878,7 +2878,7 @@ mod tests {
 
         let width = game.board.width();
         for col in 0..width {
-            for row in 100..120 {
+            for row in 100..100 + crate::constants::CHECKPOINT_SAFE_ZONE_M {
                 assert_eq!(
                     game.board.cell(row, col),
                     Cell::Empty,

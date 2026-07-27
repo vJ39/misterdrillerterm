@@ -33,8 +33,9 @@ pub const CHECKPOINT_FLASH_MS: u64 = 1800;
 /// ない20mすすむものとする」)。通常のチェックポイントはこの区間を完全に空にする
 /// 安全地帯にし、500mチェックポイントだけは例外としてアイテム/AIRが豊富な
 /// ボーナスフロアにする(#179。ユーザー指摘: 「500mフロアはC/K/Rアイテム/AIR
-/// それぞれ500%固定フロアとする」)。
-pub const CHECKPOINT_SAFE_ZONE_M: usize = 20;
+/// それぞれ500%固定フロアとする」)。20m→5mへ短縮(TERM独自拡張。#185。ユーザー
+/// 指摘: 「20m長すぎなので5mにしよう」)。
+pub const CHECKPOINT_SAFE_ZONE_M: usize = 5;
 
 /// #179のボーナスフロアが発生する深度(m、TERM独自拡張)。
 pub const BONUS_FLOOR_DEPTH_M: usize = 500;
