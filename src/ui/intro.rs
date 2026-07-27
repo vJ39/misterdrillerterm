@@ -32,11 +32,14 @@ const ALPHA_THRESHOLD: u8 = 128;
 /// 変えたことで、アートは画面全体をそのまま使えるようになった。
 ///
 /// 1端末セル=横1論理ピクセル・縦2論理ピクセル(ハーフブロック疑似2倍解像度、
-/// `pixel_canvas.rs`参照)なので、画面いっぱいに隙間なく表示するには
-/// `target_cols`×`target_rows*2`論理ピクセル分の画像が要る。元画像のアスペクト比
-/// を保ったまま画面全体を覆う(CSSの`background-size: cover`と同じ考え方)よう、
-/// 縦横どちらかがぴったり収まるまで拡大してから、はみ出した分を中央基準で
-/// 切り出す(引き伸ばして歪めることはしない)。
+/// `pixel_canvas.rs`参照)。元画像のアスペクト比を保ったまま欠けずに収まる
+/// (CSSの`background-size: contain`と同じ考え方)よう、縦横のうち収まりが厳しい
+/// 方に合わせて拡大縮小し、余った分はキャンバスの下地色のままにする(TERM独自
+/// 拡張。#201フォローアップ。ユーザー指摘: 「ここまでアップじゃないとこまで、
+/// スプラッシュだけ戻したい」)。以前はcover方式(画面いっぱいに覆い、はみ出した
+/// 分を中央基準で切り出す)だったが、縦長の元画像を横長のターミナルでcoverすると
+/// 縦を大きく切り落とすことになり、キャラクターがアップになりすぎて頭や足が
+/// 見切れていた。
 pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
     let background = colors::LETTERBOX_BG;
 
@@ -47,9 +50,9 @@ pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
     let target_w = (target_cols as u32).max(1);
     let target_h = (target_rows as u32).max(1) * 2;
 
-    let scale = (target_w as f32 / src_w.max(1) as f32).max(target_h as f32 / src_h.max(1) as f32);
-    let resized_w = ((src_w as f32) * scale).ceil().max(target_w as f32) as u32;
-    let resized_h = ((src_h as f32) * scale).ceil().max(target_h as f32) as u32;
+    let scale = (target_w as f32 / src_w.max(1) as f32).min(target_h as f32 / src_h.max(1) as f32);
+    let resized_w = ((src_w as f32) * scale).round().max(1.0) as u32;
+    let resized_h = ((src_h as f32) * scale).round().max(1.0) as u32;
 
     // Lanczos3はTriangle(双線形)より輪郭・コントラストの保持に優れ、大きな縮小率
     // でも模様が潰れにくい(TERM独自拡張。#127)。
@@ -57,17 +60,19 @@ pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
         .resize_exact(resized_w, resized_h, FilterType::Lanczos3)
         .to_rgba8();
 
-    let crop_x = (resized_w - target_w) / 2;
-    let crop_y = (resized_h - target_h) / 2;
-    let cropped =
-        image::imageops::crop_imm(&resized, crop_x, crop_y, target_w, target_h).to_image();
+    let offset_x = (target_w.saturating_sub(resized_w)) / 2;
+    let offset_y = (target_h.saturating_sub(resized_h)) / 2;
 
     let mut canvas = PixelCanvas::new(target_w as usize, target_h as usize, background);
-    for (x, y, Rgba([r, g, b, a])) in cropped.enumerate_pixels() {
+    for (x, y, Rgba([r, g, b, a])) in resized.enumerate_pixels() {
         if *a < ALPHA_THRESHOLD {
             continue; // 透過(背景)はキャンバスの下地色のまま残す。
         }
-        canvas.set(x as usize, y as usize, Color::Rgb(*r, *g, *b));
+        canvas.set(
+            (x + offset_x) as usize,
+            (y + offset_y) as usize,
+            Color::Rgb(*r, *g, *b),
+        );
     }
 
     canvas
