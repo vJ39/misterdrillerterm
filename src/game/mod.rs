@@ -21,13 +21,12 @@ use crate::constants::{
     BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
     BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHAIN_VANISH_INTERVAL_MS_DEFAULT,
     CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_MIN, CHECKPOINT_FLASH_MS,
-    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_GAP_M,
-    CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
-    DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
-    DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
-    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
-    FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
+    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_GAP_M, CRUSH_ASCEND_MS,
+    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
+    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
+    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
     FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
     INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
     MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
@@ -42,6 +41,18 @@ use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
 use crate::debug_log::DebugLog;
+
+/// 深度(m)から、直近で到達済みのチェックポイント区切り番号を計算する(TERM独自
+/// 拡張。#178/#190)。地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点
+/// (depth_m = checkpoint*CHECKPOINT_STEP_M + CHECKPOINT_SAFE_ZONE_M + 1)を
+/// もって「そのチェックポイントに到達した」とみなす(ユーザー指摘: 「100mごとの
+/// 地面そのものを掘ったら次の100mにすすむことにする。地面についたら次、
+/// じゃなくて」)。以前は地面の手前の境界(depth_m = checkpoint*CHECKPOINT_STEP_M)
+/// に触れた瞬間に到達扱いにしていたが、地面区間そのものは実際にドリルで掘り
+/// 抜く対象になったため、掘り抜き終えた地点まで判定を後ろにずらした。
+fn checkpoint_index_for_depth(depth_m: usize) -> usize {
+    depth_m.saturating_sub(CHECKPOINT_SAFE_ZONE_M + 1) / CHECKPOINT_STEP_M
+}
 
 /// ボムの演出段階(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
 /// とことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...ってなって、
@@ -315,13 +326,12 @@ pub struct Game {
     invulnerability_ticks_remaining: u32,
     /// 直近でGameEvent::LevelUpを通知した時点のレベル番号(重複通知防止)。
     last_level_reported: usize,
-    /// 直近でGameEvent::Checkpoint100mを通知した時点の区切り番号(重複通知防止。
-    /// TERM独自拡張。#178。`depth_m / CHECKPOINT_STEP_M`の値をそのまま持つ)。
+    /// 直近でGameEvent::Checkpoint100mを通知した時点の区切り番号(重複通知防止・
+    /// スキマのくり抜き済み判定の両方を兼ねる。TERM独自拡張。#178/#190)。地面
+    /// (`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点で1増える(ユーザー指摘:
+    /// 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。地面に
+    /// ついたら次、じゃなくて」)。
     last_checkpoint_reported: usize,
-    /// 安全地帯のくり抜き(`apply_checkpoint_safe_zone`)を既に済ませた、最後の
-    /// チェックポイント区切り番号(TERM独自拡張。#188。`last_checkpoint_reported`とは
-    /// 独立して手前から先行くり抜きするため別カウンタにしてある)。
-    zone_carved_up_to_checkpoint: usize,
     /// 押し潰しミス発生時、残りこれだけの間「潰れた」見た目を表示し続ける
     /// (0になったらGameOverオーバーレイの表示を許す。TERM独自拡張、9章)。
     crush_flash_remaining: Duration,
@@ -431,7 +441,7 @@ impl Game {
         let mut player = Player::with_lives(lives);
         player.recenter_for_width(width);
         let last_level_reported = player.level();
-        let last_checkpoint_reported = player.depth_m() / CHECKPOINT_STEP_M;
+        let last_checkpoint_reported = checkpoint_index_for_depth(player.depth_m());
         let start_position = player.position();
         let gravity_state = GravityState::new();
         let board = Board::generate(seed, FIELD_DEPTH_M, width);
@@ -456,7 +466,6 @@ impl Game {
             invulnerability_ticks_remaining: 0,
             last_level_reported,
             last_checkpoint_reported,
-            zone_carved_up_to_checkpoint: 0,
             crush_flash_remaining: Duration::ZERO,
             checkpoint_flash_remaining: Duration::ZERO,
             checkpoint_flash_depth_m: 0,
@@ -936,30 +945,13 @@ impl Game {
             }
         }
 
-        // チェックポイントの安全地帯(#181)は、実際に到達するちょうどその瞬間ではなく
-        // `CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M`ぶん手前に近づいた時点で先行してくり抜く
-        // (TERM独自拡張。#188。ユーザー指摘: 「地面は100mごと到達してからではなく、
-        // 近づいてくるようにして」)。頭上クリア・バナー・ファンファーレ等の到達演出
-        // 自体は下の到達判定のタイミングのまま変えない。通常のプレイでは1行ずつしか
-        // 進まないためループは高々1回で済むが、テスト等がplayer.rowを直接遠くへ
-        // 書き換えるような非正規のジャンプでも、複数チェックポイント分を取りこぼさず
-        // 追いつけるようループにしてある。
-        loop {
-            let next_checkpoint = self.zone_carved_up_to_checkpoint + 1;
-            let next_checkpoint_depth_m = next_checkpoint * CHECKPOINT_STEP_M;
-            if next_checkpoint_depth_m >= FIELD_DEPTH_M {
-                break;
-            }
-            if self.player.depth_m() + CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M < next_checkpoint_depth_m
-            {
-                break;
-            }
-            self.apply_checkpoint_safe_zone(next_checkpoint_depth_m);
-            self.zone_carved_up_to_checkpoint = next_checkpoint;
-        }
-
-        // チェックポイント(100mごと、TERM独自拡張。#178)。7章のレベル進行(30m刻み、
-        // 表示のみ)とは別に、100m到達ごとに頭上を全クリアしゴールSE・演出を出す。
+        // チェックポイント(100mごと、TERM独自拡張。#178/#190)。7章のレベル進行
+        // (30m刻み、表示のみ)とは別に、地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に
+        // 掘り抜いた地点で頭上を全クリアしゴールSE・演出を出す(ユーザー指摘:
+        // 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。地面に
+        // ついたら次、じゃなくて」)。地面部分はもう強制的にくり抜かない(#189までは
+        // 先行くり抜きしていたが、通常のドリル移動でプレイヤー自身が掘り進む対象に
+        // した)ため、ここでのくり抜きはスキマ(`CHECKPOINT_ZONE_GAP_M`)のみが対象。
         // 最終ゴール(FIELD_DEPTH_M)ちょうどは、Clearedイベント自体が同じ役割の演出を
         // 持つため、ここでは二重に発火させない。
         //
@@ -968,13 +960,14 @@ impl Game {
         // 進む場合があるとすれば、それはテスト等が`player.row`を直接遠くへ書き換えた
         // ような非正規経路であり、そのタイミングで頭上を破壊的に全クリアするのは
         // 意図と異なる。そうしたジャンプは区切り番号の追従だけ行い、演出は出さない。
-        let checkpoint = self.player.depth_m() / CHECKPOINT_STEP_M;
+        let checkpoint = checkpoint_index_for_depth(self.player.depth_m());
         if checkpoint > self.last_checkpoint_reported {
             let skipped_ahead = checkpoint > self.last_checkpoint_reported + 1;
             self.last_checkpoint_reported = checkpoint;
             let at_m = checkpoint * CHECKPOINT_STEP_M;
             if !skipped_ahead && self.status == GameStatus::Playing && at_m < FIELD_DEPTH_M {
                 self.debug_clear_above_player();
+                self.apply_checkpoint_safe_zone(at_m);
                 self.checkpoint_flash_remaining = Duration::from_millis(CHECKPOINT_FLASH_MS);
                 self.checkpoint_flash_depth_m = at_m;
                 events.push(GameEvent::Checkpoint100m { at_m });
@@ -1954,25 +1947,26 @@ impl Game {
         }
     }
 
-    /// チェックポイント(100mごと)到達時、その直後の`CHECKPOINT_SAFE_ZONE_M`ぶんを
-    /// 特別な区間にする(TERM独自拡張。#179/#181/#184。ユーザー指摘: 「100mごとゴール
-    /// したら何もオブジェクトのない20mすすむものとする」「500mフロアはC/K/Rアイテム/AIR
-    /// それぞれ500%固定フロアとする」)。通常はこの区間を完全に空にする安全地帯にし、
-    /// `BONUS_FLOOR_DEPTH_M`(500m)だけは例外としてC/K/Rアイテム・AIRが豊富なボーナス
-    /// フロアにする。
+    /// チェックポイント(100mごと)の地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた
+    /// 時点で、その直後にスキマ(`CHECKPOINT_ZONE_GAP_M`)を空ける(TERM独自拡張。
+    /// #179/#181/#184/#189/#190)。地面部分そのものはもう強制的にくり抜かない
+    /// (ユーザー指摘: 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。
+    /// 地面についたら次、じゃなくて」)。プレイヤーが実際にドリルで掘り進む対象に
+    /// なり、掘った跡は地面ビジュアル(#186、Emptyになったマスに乗る)として見える。
+    /// `BONUS_FLOOR_DEPTH_M`(500m)だけは例外で、地面部分自体をC/K/Rアイテム・AIRが
+    /// 豊富なボーナスフロアとして生成する(#179。この生成ロジックは変更なし)。
     ///
-    /// このチェックポイントを実際に踏んだ瞬間(`debug_clear_above_player`と同じ
-    /// タイミング)にだけ、そのチェックポイント1つ分の区間だけをくり抜く(#184。
-    /// 以前はゲーム生成直後に全チェックポイント分を一括でくり抜いていたため、
-    /// プレイヤーがまだ到達していない深い場所も含めて盤面全体で同時に大穴が空き、
-    /// 開始直後から広範囲の支持崩壊・自動消滅が連鎖する不具合があった)。
+    /// スキマは、このチェックポイントの地面を実際に掘り抜いた瞬間(`debug_clear_
+    /// above_player`と同じタイミング)にだけくり抜く(#184の教訓通り、まだ到達して
+    /// いない深い場所を先回りしてくり抜くと広範囲崩落を招くため、常にそのチェック
+    /// ポイント1つ分だけを対象にする)。
     fn apply_checkpoint_safe_zone(&mut self, at_m: usize) {
         let depth_rows = self.board.depth_rows();
         let zone_start_row = at_m;
         let zone_end_row = (zone_start_row + CHECKPOINT_SAFE_ZONE_M).min(depth_rows);
-        // 地面ビジュアル区間(ground_end_row-zone_start_row)の直後、通常の地形が再開
-        // するまでのスキマ(TERM独自拡張。#189。ユーザー指摘: 「100mきざみの地面と
-        // 次のブロックがギチギチなので、5mスキマあけて」)。
+        // 地面(zone_start_row-zone_end_row)の直後、通常の地形が再開するまでのスキマ
+        // (TERM独自拡張。#189。ユーザー指摘: 「100mきざみの地面と次のブロックが
+        // ギチギチなので、5mスキマあけて」)。
         let gap_end_row = (zone_end_row + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
         if at_m == BONUS_FLOOR_DEPTH_M {
             self.board.reroll_overlays_in_row_range(
@@ -1989,39 +1983,33 @@ impl Game {
                 100,
                 &self.gravity_state,
             );
-            for row in zone_end_row..gap_end_row {
-                for col in 0..self.board.width() {
-                    self.board.set(row, col, Cell::Empty);
-                }
-            }
-        } else {
-            for row in zone_start_row..gap_end_row {
-                for col in 0..self.board.width() {
-                    self.board.set(row, col, Cell::Empty);
-                }
+        }
+        for row in zone_end_row..gap_end_row {
+            for col in 0..self.board.width() {
+                self.board.set(row, col, Cell::Empty);
             }
         }
     }
 
-    /// チェックポイントの安全地帯(ground_end_row-zone_start_row)+スキマ区間に、上から
-    /// 崩れてきたブロックやアイテムが滞留しないようにする(TERM独自拡張。#189。
-    /// ユーザー指摘: 「その地面よりも下にブロックが落ちないように(アイテムなども)」
-    /// 「100mラインを超えたら滞留してるブロック、アイテムはすべてパージで」)。
-    /// 既にくり抜いた(=到達済みまたはlookaheadで先行くり抜き済みの)チェックポイント
-    /// についてのみ、区間内に何か入り込んでいれば消滅フラッシュ演出付きでパージする。
-    /// 500mのボーナスフロアはアイテム/AIRを意図的に配置する区間のため対象外。
+    /// チェックポイントのスキマ区間に、上から崩れてきたブロックやアイテムが滞留
+    /// しないようにする(TERM独自拡張。#189。ユーザー指摘: 「その地面よりも下に
+    /// ブロックが落ちないように(アイテムなども)」「100mラインを超えたら滞留してる
+    /// ブロック、アイテムはすべてパージで」)。既に到達済みのチェックポイントに
+    /// ついてのみ、スキマ区間に何か入り込んでいれば消滅フラッシュ演出付きで
+    /// パージする(#190: 地面部分はもう強制的にくり抜かない=プレイヤーが実際に
+    /// 掘り進む対象なので対象外。パージ対象はスキマのみ)。500mのボーナスフロアは
+    /// アイテム/AIRを意図的に配置する区間のため対象外。
     fn purge_checkpoint_zone_debris(&mut self) {
         let width = self.board.width();
         let depth_rows = self.board.depth_rows();
         let mut cleared = Vec::new();
-        for checkpoint in 1..=self.zone_carved_up_to_checkpoint {
+        for checkpoint in 1..=self.last_checkpoint_reported {
             let at_m = checkpoint * CHECKPOINT_STEP_M;
             if at_m == BONUS_FLOOR_DEPTH_M {
                 continue;
             }
-            let zone_start_row = at_m;
-            let zone_end_row =
-                (zone_start_row + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
+            let zone_start_row = at_m + CHECKPOINT_SAFE_ZONE_M;
+            let zone_end_row = (zone_start_row + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
             for row in zone_start_row..zone_end_row {
                 for col in 0..width {
                     let cell = self.board.cell(row, col);
@@ -2924,15 +2912,18 @@ mod tests {
     fn reaching_a_100m_checkpoint_clears_above_and_emits_the_event_and_flash() {
         // ユーザー指摘(#178): 「100mすすむごとにそれより上部のオブジェクトを全クリア、
         // 100mごとのゴールSEと演出、アニメーションする」。7章のレベル進行(30m刻み)とは
-        // 別の、100m刻みの独立した節目。
+        // 別の、100m刻みの独立した節目。#190により、到達判定は地面(CHECKPOINT_SAFE_
+        // ZONE_M)を実際に掘り抜いた地点(row=100+CHECKPOINT_SAFE_ZONE_M)まで後ろに
+        // ずれている(ユーザー指摘: 「地面についたら次、じゃなくて」)。
         let mut game = Game::new(90);
-        game.player.row = crate::constants::CHECKPOINT_STEP_M - 2; // depth=99、まだcheckpoint到達前
+        game.player.row =
+            crate::constants::CHECKPOINT_STEP_M + crate::constants::CHECKPOINT_SAFE_ZONE_M - 1; // 地面を掘り抜く直前
         game.player.facing = Direction::Down;
         game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty; // 自由落下させる
         game.board.rows[10][game.player.col] = Cell::Rock { hits: 0 }; // 頭上、クリア対象になるはず
 
         game.try_drill(); // 掘るだけでは移動しない
-        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // depth=100 -> checkpoint到達
+        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // 地面を掘り抜く -> checkpoint到達
 
         assert!(
             events.contains(&GameEvent::Checkpoint100m { at_m: 100 }),
@@ -2951,14 +2942,12 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_safe_zones_are_not_carved_out_until_the_checkpoint_is_actually_reached() {
-        // #184で発見: 以前は`Game::new`直後に全チェックポイント(100〜900m)分の安全
-        // 地帯を一括でくり抜いていたため、プレイヤーがまだ全く到達していない深い場所
-        // も含めて盤面全体で同時に大穴が空き、開始直後から広範囲の支持崩壊・自動消滅
-        // が連鎖する不具合(ユーザー指摘:「ゲーム開始直後なんかおかしい、20mのバグか」)
-        // があった。新規生成直後は、まだどのチェックポイントの安全地帯もくり抜かれて
-        // おらず、生の生成結果(row>=2は常にSome色が入るため実質Emptyにならない)の
-        // ままであることを確認する。
+    fn checkpoint_ground_is_never_force_cleared_even_after_reaching_the_checkpoint() {
+        // #190: 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。地面に
+        // ついたら次、じゃなくて」。地面(CHECKPOINT_SAFE_ZONE_M)部分はもう強制的に
+        // くり抜かない(プレイヤーが実際にドリルで掘り進む対象になった)ため、
+        // ゲーム開始直後はもちろん、実際にチェックポイントへ到達した後も、地面区間の
+        // 生成された地形(プレイヤー自身が掘っていない列)はそのまま残るはず。
         let game = Game::new(300);
         let start = crate::constants::CHECKPOINT_STEP_M;
         let end = start + crate::constants::CHECKPOINT_SAFE_ZONE_M;
@@ -2967,88 +2956,44 @@ mod tests {
             .all(|(row, col)| game.board.cell(row, col) == Cell::Empty);
         assert!(
             !all_empty,
-            "生成直後は100mチェックポイントの安全地帯がまだくり抜かれていないはず"
+            "生成直後は100mチェックポイントの地面がまだくり抜かれていないはず"
         );
     }
 
     #[test]
-    fn reaching_a_checkpoint_carves_out_only_that_checkpoints_safe_zone_ahead_of_the_player() {
-        // #184: チェックポイント到達時にくり抜かれるのは、そのチェックポイント1つ分の
-        // 区間だけであり、まだ到達していない他のチェックポイント(200m等)の安全地帯には
-        // 影響しないはず。
+    fn applying_a_checkpoint_safe_zone_only_carves_the_gap_not_the_ground() {
+        // #190: 「100mごとの地面そのものを掘ったら次の100mにすすむことにする」。
+        // apply_checkpoint_safe_zoneが実際にくり抜くのはスキマ(CHECKPOINT_ZONE_GAP_M)
+        // だけであり、地面(CHECKPOINT_SAFE_ZONE_M)区間そのものはくり抜かれず残る
+        // ことを直接確認する(`debug_clear_above_player`のような「頭上を全クリア」の
+        // 副次効果と混同しないよう、この関数単体を直接呼んで検証する)。
         let mut game = Game::new(301);
-        game.player.row = crate::constants::CHECKPOINT_STEP_M - 2; // depth=99
-        game.player.facing = Direction::Down;
-        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+        game.board.rows[101][0] = Cell::Rock { hits: 0 };
 
-        game.try_drill();
-        game.update(Duration::from_millis(FALL_TICK_MS)); // depth=100 -> checkpoint到達
+        game.apply_checkpoint_safe_zone(100);
 
+        assert_eq!(
+            game.board.cell(101, 0),
+            Cell::Rock { hits: 0 },
+            "地面区間はくり抜かれず残るはず"
+        );
         let width = game.board.width();
         for col in 0..width {
-            for row in 100..100 + crate::constants::CHECKPOINT_SAFE_ZONE_M {
+            for row in 105..105 + crate::constants::CHECKPOINT_ZONE_GAP_M {
                 assert_eq!(
                     game.board.cell(row, col),
                     Cell::Empty,
-                    "到達した100mチェックポイントの安全地帯(row={row}, col={col})は空のはず"
+                    "地面を掘り抜いた直後のスキマ(row={row}, col={col})はくり抜かれるはず"
                 );
             }
-        }
-        let far_start = 200;
-        let far_end = far_start + crate::constants::CHECKPOINT_SAFE_ZONE_M;
-        let far_all_empty = (far_start..far_end)
-            .flat_map(|row| (0..width).map(move |col| (row, col)))
-            .all(|(row, col)| game.board.cell(row, col) == Cell::Empty);
-        assert!(
-            !far_all_empty,
-            "まだ到達していない200mチェックポイントの安全地帯は、くり抜かれていないはず"
-        );
-    }
-
-    #[test]
-    fn checkpoint_safe_zone_is_carved_out_lookahead_rows_before_the_player_actually_reaches_it() {
-        // ユーザー指摘(#188): 「地面は100mごと到達してからではなく、近づいてくるように
-        // して」。安全地帯は到達したちょうどその瞬間ではなく、
-        // CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_Mぶん手前に近づいた時点で先行してくり抜かれ、
-        // 到達演出(イベント・バナー)自体はまだ発火しないはず。
-        let lookahead = crate::constants::CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M;
-        let mut game = Game::new(302);
-        game.player.row = crate::constants::CHECKPOINT_STEP_M - lookahead - 2;
-        game.player.facing = Direction::Down;
-        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
-
-        let width = game.board.width();
-        let not_yet_carved = (0..width).all(|col| game.board.cell(100, col) != Cell::Empty);
-        assert!(
-            not_yet_carved,
-            "lookahead境界に届く前は安全地帯がまだくり抜かれていないはず"
-        );
-
-        game.try_drill();
-        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // depth = 100 - lookahead
-
-        assert!(
-            !events.contains(&GameEvent::Checkpoint100m { at_m: 100 }),
-            "まだ到達していないので到達イベントは発火しないはず: {events:?}"
-        );
-        assert_eq!(
-            game.checkpoint_flash_depth_m(),
-            None,
-            "まだ到達していないので到達演出は出ないはず"
-        );
-        for col in 0..width {
-            assert_eq!(
-                game.board.cell(100, col),
-                Cell::Empty,
-                "lookahead分近づいた時点で安全地帯は先行してくり抜かれているはず(row=100, col={col})"
-            );
         }
     }
 
     #[test]
     fn checkpoint_flash_clears_after_checkpoint_flash_ms_elapses() {
         let mut game = Game::new(91);
-        game.player.row = crate::constants::CHECKPOINT_STEP_M - 2;
+        game.player.row =
+            crate::constants::CHECKPOINT_STEP_M + crate::constants::CHECKPOINT_SAFE_ZONE_M - 1;
         game.player.facing = Direction::Down;
         game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
 
@@ -4784,32 +4729,50 @@ mod tests {
     }
 
     #[test]
-    fn each_checkpoint_is_followed_by_an_empty_safe_zone_except_the_bonus_floor() {
-        // ユーザー指摘(#181): 「100mごとゴールしたら何もオブジェクトのない20mすすむ
-        // ものとする(20mにオブジェクト配置してはいけない」。各チェックポイント
-        // (100mごと)を実際に踏んだ直後、`CHECKPOINT_SAFE_ZONE_M`行が完全に
-        // Emptyであることを確認する(500mのボーナスフロアは例外なので対象外)。
-        // #184: くり抜きは踏んだ瞬間にその1つ分だけ行う(生成直後の一括くり抜きは
-        // 開始直後の広範囲崩落バグの原因だったため廃止した)ため、ここでは各
-        // チェックポイントを順に踏んだこととして`apply_checkpoint_safe_zone`を呼ぶ。
+    fn each_checkpoint_is_followed_by_an_empty_gap_but_not_an_empty_ground() {
+        // ユーザー指摘(#190): 「100mごとの地面そのものを掘ったら次の100mにすすむ
+        // ことにする。地面についたら次、じゃなくて」。各チェックポイント(100mごと)の
+        // 地面(CHECKPOINT_SAFE_ZONE_M)を実際に掘り抜いた直後、その先のスキマ
+        // (CHECKPOINT_ZONE_GAP_M)は完全にEmptyになる一方、地面区間そのものは
+        // くり抜かれず残ることを確認する(500mのボーナスフロアは例外なので対象外)。
         let mut game = Game::new(200);
         for checkpoint_depth_m in (crate::constants::CHECKPOINT_STEP_M
             ..crate::constants::FIELD_DEPTH_M)
             .step_by(crate::constants::CHECKPOINT_STEP_M)
         {
-            game.apply_checkpoint_safe_zone(checkpoint_depth_m);
             if checkpoint_depth_m == crate::constants::BONUS_FLOOR_DEPTH_M {
                 continue; // ボーナスフロアは別テストで確認する
             }
-            let start = checkpoint_depth_m;
-            let end =
-                (start + crate::constants::CHECKPOINT_SAFE_ZONE_M).min(game.board.depth_rows());
-            for row in start..end {
+            let ground_start = checkpoint_depth_m;
+            let ground_end = (ground_start + crate::constants::CHECKPOINT_SAFE_ZONE_M)
+                .min(game.board.depth_rows());
+            let ground_all_empty_before = (ground_start..ground_end)
+                .flat_map(|row| (0..game.board.width()).map(move |col| (row, col)))
+                .all(|(row, col)| game.board.cell(row, col) == Cell::Empty);
+            assert!(
+                !ground_all_empty_before,
+                "checkpoint={checkpoint_depth_m}m: くり抜き前の地面はまだ生の地形が残っているはず"
+            );
+
+            game.apply_checkpoint_safe_zone(checkpoint_depth_m);
+
+            let ground_all_empty_after = (ground_start..ground_end)
+                .flat_map(|row| (0..game.board.width()).map(move |col| (row, col)))
+                .all(|(row, col)| game.board.cell(row, col) == Cell::Empty);
+            assert!(
+                !ground_all_empty_after,
+                "checkpoint={checkpoint_depth_m}m: 地面区間はくり抜き後も強制的には空にならないはず"
+            );
+
+            let gap_start = ground_end;
+            let gap_end =
+                (gap_start + crate::constants::CHECKPOINT_ZONE_GAP_M).min(game.board.depth_rows());
+            for row in gap_start..gap_end {
                 for col in 0..game.board.width() {
                     assert_eq!(
                         game.board.cell(row, col),
                         Cell::Empty,
-                        "checkpoint={checkpoint_depth_m}m: row={row} col={col}は安全地帯として空のはず"
+                        "checkpoint={checkpoint_depth_m}m: row={row} col={col}はスキマとして空のはず"
                     );
                 }
             }
@@ -4862,30 +4825,31 @@ mod tests {
     fn debris_that_lands_inside_an_already_carved_checkpoint_zone_is_purged_next_tick() {
         // ユーザー指摘(#189): 「その地面よりも下にブロックが落ちないように(アイテム
         // なども)」「100mラインを超えたら滞留してるブロック、アイテムはすべてパージで」。
-        // 既にくり抜き済みの安全地帯+スキマ区間に何か入り込んでも、次の重力tickで
-        // 消滅フラッシュ演出付きでパージされることを確認する。
+        // 既に到達済みのチェックポイントのスキマ区間に何か入り込んでも、次の重力
+        // tickで消滅フラッシュ演出付きでパージされることを確認する(#190: 地面部分は
+        // もう強制的にくり抜かないため、パージ対象はスキマのみ)。
         let mut game = Game::new(204);
         clear_board(&mut game);
         game.player.row = 1;
         game.player.col = 0;
-        game.zone_carved_up_to_checkpoint = 1; // checkpoint 100mまでくり抜き済み扱い
+        game.last_checkpoint_reported = 1; // checkpoint 100mまで到達済み扱い
 
-        // 本来は既にEmptyのはずの安全地帯+スキマ区間に、崩れてきた想定のブロックと
+        // 本来は既にEmptyのはずのスキマ区間(105-110)に、崩れてきた想定のブロックと
         // アイテムを直接置く。
-        game.board.rows[102][2] = Cell::Color(ColorKind::Red);
+        game.board.rows[106][2] = Cell::Color(ColorKind::Red);
         game.board.rows[107][3] = Cell::Item(ItemEffect::ClearAbove);
 
         game.update(Duration::from_millis(FALL_TICK_MS));
 
         assert_eq!(
-            game.board.cell(102, 2),
+            game.board.cell(106, 2),
             Cell::Empty,
-            "ゾーン内に滞留したブロックはパージされるはず"
+            "スキマ内に滞留したブロックはパージされるはず"
         );
         assert_eq!(
             game.board.cell(107, 3),
             Cell::Empty,
-            "ゾーン内に滞留したアイテムもパージされるはず"
+            "スキマ内に滞留したアイテムもパージされるはず"
         );
     }
 
@@ -4897,7 +4861,7 @@ mod tests {
         clear_board(&mut game);
         game.player.row = 1;
         game.player.col = 0;
-        game.zone_carved_up_to_checkpoint = 5; // 500mまでくり抜き済み扱い
+        game.last_checkpoint_reported = 5; // 500mまで到達済み扱い
 
         game.board.rows[502][2] = Cell::Oxygen;
 
