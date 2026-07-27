@@ -17,8 +17,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::constants::{
     BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
-    OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
-    TITLE_PROMPT_BLINK_MS,
+    CHECKPOINT_ZONE_GAP_M, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS,
+    STAR_VISIBLE_GRACE_MS, TITLE_PROMPT_BLINK_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -996,6 +996,23 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
                 // ものが下からのぞいて見える問題も、この一枚のテクスチャの下に隠れる
                 // ことで解消する。
                 fill_bedrock_ground(buf, draw_x, y);
+            } else if is_unrevealed_future_zone(board_row, game.last_checkpoint_reported()) {
+                // まだ掘り抜いていないチェックポイントのギャップより先(次の100m
+                // ゾーン)は、そこに何が生成されていても見せない(TERM独自拡張。#197。
+                // ユーザー指摘: 「この地面の上を掘ったら次の100mゾーンに進める
+                // ようにしたい。それまで次の100mゾーンはブロック配置しない。
+                // 進んだら配置する」)。生成タイミングは変えず(盤面全体は従来通り
+                // ゲーム開始時に事前生成済み)、描画側だけで未到達ゾーンをEmpty
+                // 扱いにして隠す。
+                draw_logical_cell(
+                    buf,
+                    draw_x,
+                    y,
+                    &game.board,
+                    board_row,
+                    col,
+                    BoardCell::Empty,
+                );
             } else {
                 draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
             }
@@ -1623,6 +1640,25 @@ fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
         return false;
     }
     board_row < checkpoint_start + CHECKPOINT_SAFE_ZONE_M
+}
+
+/// `board_row`が、まだ掘り抜いていないチェックポイントのギャップより先(次の
+/// 100mゾーン)に含まれるかどうか(TERM独自拡張。#197。ユーザー指摘: 「この地面の
+/// 上を掘ったら次の100mゾーンに進めるようにしたい。それまで次の100mゾーンは
+/// ブロック配置しない。進んだら配置する」)。盤面自体はゲーム開始時に事前生成
+/// 済みのままだが、描画側でこの判定がtrueの行は中身によらずEmpty扱いにして隠す。
+/// チェックポイントの地面・ギャップ帯自体(`is_checkpoint_safe_zone_row`が担当)は
+/// 掘る対象として見えている必要があるため対象外(ギャップの先だけを隠す)。
+fn is_unrevealed_future_zone(board_row: usize, last_checkpoint_reported: usize) -> bool {
+    if board_row < CHECKPOINT_STEP_M {
+        return false;
+    }
+    let checkpoint = board_row / CHECKPOINT_STEP_M;
+    if checkpoint <= last_checkpoint_reported {
+        return false;
+    }
+    let gap_end = checkpoint * CHECKPOINT_STEP_M + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M;
+    board_row >= gap_end
 }
 
 // --- 9.3 色ブロックの塊表現(接続マスク・丸み縁取り・ハイライト/陰影) ---
@@ -2487,6 +2523,41 @@ mod tests {
             "500mはボーナスフロアなので対象外のはず"
         );
         assert!(is_checkpoint_safe_zone_row(600));
+    }
+
+    #[test]
+    fn is_unrevealed_future_zone_hides_only_the_gap_and_beyond_of_a_not_yet_reached_checkpoint() {
+        // #197: ユーザー指摘: 「この地面の上を掘ったら次の100mゾーンに進める
+        // ようにしたい。それまで次の100mゾーンはブロック配置しない」。まだ到達
+        // していない(last_checkpoint_reported未満の)チェックポイントについて、
+        // 地面・ギャップ帯自体(掘る対象として見える必要がある)は隠さず、
+        // ギャップの先(次の100mゾーン)だけを隠す。
+        let gap_end = 100 + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M;
+        assert!(
+            !is_unrevealed_future_zone(100, 0),
+            "地面帯自体は隠さないはず"
+        );
+        assert!(
+            !is_unrevealed_future_zone(gap_end - 1, 0),
+            "ギャップの最後の行までは隠さないはず"
+        );
+        assert!(
+            is_unrevealed_future_zone(gap_end, 0),
+            "ギャップの直後(次の100mゾーン)は隠すはず"
+        );
+        assert!(
+            is_unrevealed_future_zone(199, 0),
+            "次の100mゾーンの奥まで隠すはず"
+        );
+        // 既にそのチェックポイントに到達済み(last_checkpoint_reported>=1)なら
+        // 隠さない。
+        assert!(
+            !is_unrevealed_future_zone(gap_end, 1),
+            "到達済みチェックポイントの先は隠さないはず"
+        );
+        // 最初のチェックポイント(100m)より手前は常に表示。
+        assert!(!is_unrevealed_future_zone(0, 0));
+        assert!(!is_unrevealed_future_zone(99, 0));
     }
 
     #[test]
