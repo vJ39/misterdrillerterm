@@ -16,8 +16,8 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::constants::{
-    BOMB_DANGER_MS, BOMB_ROLL_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS,
-    STAR_VISIBLE_GRACE_MS,
+    BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
+    OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -921,6 +921,8 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
                 && let Some(t) = game.vanish_flash_progress((board_row, col))
             {
                 fill_block(buf, draw_x, y, colors::vanish_flash_bg(t));
+            } else if cell == BoardCell::Empty && is_checkpoint_safe_zone_row(board_row) {
+                fill_bedrock_ground(buf, draw_x, y);
             } else {
                 draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
             }
@@ -1530,6 +1532,23 @@ fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
             );
         }
     }
+}
+
+/// `board_row`が、100mごとのチェックポイント通過後の安全地帯(TERM独自拡張。
+/// #181/#185)に含まれるかどうか(TERM独自拡張。#186。ユーザー指摘: 「100mごとの
+/// 先はどうせクリアするのでいったん何もなし(地面みたいにしてほしい)」)。安全地帯は
+/// 通過すると必ず`Cell::Empty`になる区間なので、素の空背景ではなく最終ゴールと
+/// 同じ地底の地面ビジュアルで表示する。500mはボーナスフロア(アイテム/AIR配置。
+/// #179)であり空にはならないため対象外にする。
+fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
+    if board_row < CHECKPOINT_STEP_M {
+        return false;
+    }
+    let checkpoint_start = (board_row / CHECKPOINT_STEP_M) * CHECKPOINT_STEP_M;
+    if checkpoint_start == BONUS_FLOOR_DEPTH_M {
+        return false;
+    }
+    board_row < checkpoint_start + CHECKPOINT_SAFE_ZONE_M
 }
 
 // --- 9.3 色ブロックの塊表現(接続マスク・丸み縁取り・ハイライト/陰影) ---
@@ -2371,6 +2390,29 @@ mod tests {
             assert_eq!(cell.fg, colors::BEDROCK_GROUND_FG);
             assert_ne!(cell.symbol(), " ", "単色の空白ではなく地面らしい模様のはず");
         }
+    }
+
+    #[test]
+    fn is_checkpoint_safe_zone_row_covers_only_the_checkpoint_safe_zone_band_excluding_the_bonus_floor()
+     {
+        // ユーザー指摘(#186): 「100mごとの先はどうせクリアするのでいったん何もなし
+        // (地面みたいにしてほしい)」。各チェックポイント(100mごと)通過後の安全地帯
+        // (CHECKPOINT_SAFE_ZONE_M行)だけが対象で、その手前・その先・500mの
+        // ボーナスフロアは対象外のはず。
+        assert!(!is_checkpoint_safe_zone_row(0));
+        assert!(!is_checkpoint_safe_zone_row(99));
+        assert!(is_checkpoint_safe_zone_row(100));
+        assert!(is_checkpoint_safe_zone_row(
+            100 + crate::constants::CHECKPOINT_SAFE_ZONE_M - 1
+        ));
+        assert!(!is_checkpoint_safe_zone_row(
+            100 + crate::constants::CHECKPOINT_SAFE_ZONE_M
+        ));
+        assert!(
+            !is_checkpoint_safe_zone_row(500),
+            "500mはボーナスフロアなので対象外のはず"
+        );
+        assert!(is_checkpoint_safe_zone_row(600));
     }
 
     #[test]
