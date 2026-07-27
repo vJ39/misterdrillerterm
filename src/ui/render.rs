@@ -356,7 +356,7 @@ pub fn draw_title(frame: &mut Frame) {
     // があまりに隠れすぎるのはよくない」)。アート専用ゾーンを黄金比で確保し、文字と
     // 重ならないようにした(#129と同じ考え方。ユーザー指摘: 「それでいて黄金比で」)。
     let art_height = ((area.height as u32 * 618) / 1000).max(1) as u16;
-    let art_area = Rect {
+    let art_zone = Rect {
         x: area.x,
         y: area.y,
         width: area.width,
@@ -364,9 +364,26 @@ pub fn draw_title(frame: &mut Frame) {
     };
     let text_zone = Rect {
         x: area.x,
-        y: area.y + art_area.height,
+        y: area.y + art_zone.height,
         width: area.width,
-        height: area.height.saturating_sub(art_area.height),
+        height: area.height.saturating_sub(art_zone.height),
+    };
+
+    // 元画像(assets/intro.png、1024x1536の縦長)は`title_art_lines`が
+    // `background-size: cover`と同じ考え方で塗りつぶすため、art_zoneの幅を
+    // そのまま渡すと横幅に対して縦が足りず、頭や足がクロップされて見切れて
+    // しまう(TERM独自拡張。#191フォローアップ。ユーザー指摘: 「見切れちゃってる」)。
+    // art_zoneの高さから元画像と同じアスペクト比になる幅を逆算し、その幅だけを
+    // 中央に取ることでキャラクター全身が収まるようにした(左右は白背景のまま)。
+    const INTRO_ART_ASPECT_W_OVER_H: f32 = 1024.0 / 1536.0;
+    let art_height_px = art_zone.height as f32 * 2.0; // 1セル=縦2論理ピクセル分。
+    let art_width =
+        ((art_height_px * INTRO_ART_ASPECT_W_OVER_H).round() as u16).clamp(1, art_zone.width);
+    let art_area = Rect {
+        x: art_zone.x + (art_zone.width - art_width) / 2,
+        y: art_zone.y,
+        width: art_width,
+        height: art_zone.height,
     };
 
     let art_lines = title_art_lines(art_area.width, art_area.height);
