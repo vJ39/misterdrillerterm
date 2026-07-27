@@ -38,7 +38,10 @@ const ALPHA_THRESHOLD: u8 = 128;
 /// 縦横どちらかがぴったり収まるまで拡大してから、はみ出した分を中央基準で
 /// 切り出す(引き伸ばして歪めることはしない)。
 pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
-    let background = colors::LETTERBOX_BG;
+    // タイトル画面専用の白背景(TERM独自拡張。#191。ユーザー指摘: 「タイトル画面の
+    // 背景白色って可能？」)。元画像は透過(アルファ)背景なので、この色をそのまま
+    // 透過部分の下地として使うだけで白背景化できる。
+    let background = colors::TITLE_BG;
 
     let decoded = image::load_from_memory(INTRO_IMAGE_BYTES)
         .expect("assets/intro.png must be a valid, bundled PNG");

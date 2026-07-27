@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::constants::{
     BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
     OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
+    TITLE_PROMPT_BLINK_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -302,7 +303,9 @@ fn title_logo_glyph(c: char) -> &'static [&'static str; 3] {
 
 /// "MISDRI TERM"のワードマーク3行を、上ほど明るい金〜赤銅色のグラデーションで組む
 /// (termmapの緑グラデーションと同じ発想。ゲーム内のダイヤブロック配色(黄土色系、#62)
-/// に寄せた色にした)。
+/// に寄せた色にした)。この明るいグラデーションは黒背景で映える配色のため、
+/// `draw_title`側でワードマーク部分だけ専用の黒地(LETTERBOX_BG)を敷いている
+/// (#191フォローアップ。ユーザー提案:「矩形だけ黒背景にするのはありかな」)。
 fn build_title_logo_lines() -> [Line<'static>; 3] {
     const GRADIENT: [Color; 3] = [
         Color::Rgb(255, 210, 90),
@@ -339,44 +342,132 @@ fn build_title_logo_lines() -> [Line<'static>; 3] {
 pub fn draw_title(frame: &mut Frame) {
     let area = frame.area();
 
+    // タイトル画面は白背景にしている(TERM独自拡張。#191。ユーザー指摘: 「タイトル
+    // 画面の背景白色って可能？」)。他の画面(設定・ヘルプ・一時停止オーバーレイ等)は
+    // 引き続きLETTERBOX_BG(ダーク)のままで、この画面専用の配色。
     frame.buffer_mut().set_style(
         area,
-        Style::default()
-            .fg(colors::LETTERBOX_BG)
-            .bg(colors::LETTERBOX_BG),
+        Style::default().fg(colors::TITLE_BG).bg(colors::TITLE_BG),
     );
 
-    // アートを画面いっぱいに表示する(TERM独自拡張。#148)。
-    let art_lines = title_art_lines(area.width, area.height);
+    // アートと文字は上下に分割し、重ねない(TERM独自拡張。#191フォローアップ)。
+    // #148ではアートを画面いっぱいに表示し文字を上に重ね描きしていたが、文字パネル
+    // がキャラクターの上に重なって隠してしまっていた(ユーザー指摘: 「スプラッシュ
+    // があまりに隠れすぎるのはよくない」)。アート専用ゾーンを黄金比で確保し、文字と
+    // 重ならないようにした(#129と同じ考え方。ユーザー指摘: 「それでいて黄金比で」)。
+    let art_height = ((area.height as u32 * 618) / 1000).max(1) as u16;
+    let art_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: art_height.min(area.height),
+    };
+    let text_zone = Rect {
+        x: area.x,
+        y: area.y + art_area.height,
+        width: area.width,
+        height: area.height.saturating_sub(art_area.height),
+    };
+
+    let art_lines = title_art_lines(art_area.width, art_area.height);
     frame.render_widget(
         Paragraph::new(Text::from(art_lines)).alignment(Alignment::Center),
-        area,
+        art_area,
     );
 
-    // ロゴ・案内文はアートの上に重ね描きする(TERM独自拡張。#148。ユーザー提案:
-    // 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。パネルの
-    // 地色(LETTERBOX_BG)がその部分のアートを覆い隠す形で表示されるため、
-    // 背景の絵柄によらず文字が読める。
-    let text_style = Style::default()
-        .fg(colors::PANEL_TEXT)
+    draw_title_text(frame, text_zone);
+}
+
+/// タイトル画面下部(アートと重ならない黄金比の残り領域)にロゴ・案内文を描く。
+fn draw_title_text(frame: &mut Frame, text_zone: Rect) {
+    let logo_lines = build_title_logo_lines().to_vec();
+    let logo_rows = logo_lines.len() as u16;
+    let logo_width = logo_lines
+        .iter()
+        .map(|line| line.width())
+        .max()
+        .unwrap_or(0) as u16;
+
+    // ロゴ・(明滅する)スタート案内・キーヒントをまとめて1ブロックとしてtext_zoneの
+    // 中央に配置する(TERM独自拡張。#191フォローアップ)。
+    const GAP_ABOVE_PROMPT: u16 = 1;
+    const PROMPT_ROWS: u16 = 1;
+    const GAP_ABOVE_HINTS: u16 = 2;
+    const HINT_ROWS: u16 = 2;
+    let content_height = logo_rows + GAP_ABOVE_PROMPT + PROMPT_ROWS + GAP_ABOVE_HINTS + HINT_ROWS;
+    let content_area = centered_fixed_rect(text_zone.width, content_height, text_zone);
+
+    // ワードマーク("MISDRI TERM")は黒背景向けの明るい金色グラデーションのため、
+    // 専用の黒地(LETTERBOX_BG)の上に乗せる(#191フォローアップ。ユーザー提案:
+    // 「矩形だけ黒背景にするのはありかな」)。text_zoneは常に白地(呼び出し元で
+    // 塗り済み)なので、ロゴの矩形以外は追加の下地塗りなしでそのまま読める。
+    let logo_box_width = (logo_width + 4).min(content_area.width);
+    let logo_area = Rect {
+        x: content_area.x + (content_area.width - logo_box_width) / 2,
+        y: content_area.y,
+        width: logo_box_width,
+        height: logo_rows,
+    };
+    let solid_black = Style::default()
+        .fg(colors::LETTERBOX_BG)
         .bg(colors::LETTERBOX_BG);
-    let mut text_lines = build_title_logo_lines().to_vec();
-    text_lines.extend([
-        Line::from(Span::styled("ミスドリTERM", text_style)),
-        Line::from(""),
-        Line::from(Span::styled("Enterキーを押してスタート", text_style)),
+    frame.buffer_mut().set_style(logo_area, solid_black);
+    frame.render_widget(
+        Paragraph::new(logo_lines)
+            .style(solid_black)
+            .alignment(Alignment::Center),
+        logo_area,
+    );
+
+    // 案内文は常時表示の大きな枠でごちゃっと出すのではなく、「Enterキーを押して
+    // スタート」だけを明滅させるシンプルな構成にした(TERM独自拡張。#191フォロー
+    // アップ。ユーザー指摘: 「わりとごちゃっとしてるから、PRESS ENTER KEY START的
+    // な文言をチカチカ点滅させとけばよさげ」)。明滅中でもレイアウトが動かないよう、
+    // 非表示の間も行の位置自体は固定しておく。
+    let text_style = Style::default().fg(colors::TITLE_TEXT).bg(colors::TITLE_BG);
+    let prompt_y = content_area.y + logo_rows + GAP_ABOVE_PROMPT;
+    if title_prompt_blink_on() {
+        let prompt_area = Rect {
+            x: content_area.x,
+            y: prompt_y,
+            width: content_area.width,
+            height: PROMPT_ROWS,
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Enterキーを押してスタート",
+                text_style,
+            )))
+            .alignment(Alignment::Center),
+            prompt_area,
+        );
+    }
+
+    let hint_lines = vec![
         Line::from(Span::styled("(Qキーで終了)", text_style)),
         Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
-    ]);
-    let text_rows = text_lines.len() as u16;
-
-    let text_area = centered_fixed_rect(area.width, text_rows, area);
+    ];
+    let hints_area = Rect {
+        x: content_area.x,
+        y: prompt_y + PROMPT_ROWS + GAP_ABOVE_HINTS,
+        width: content_area.width,
+        height: HINT_ROWS,
+    };
     frame.render_widget(
-        Paragraph::new(text_lines)
-            .style(Style::default().bg(colors::LETTERBOX_BG))
-            .alignment(Alignment::Center),
-        text_area,
+        Paragraph::new(hint_lines).alignment(Alignment::Center),
+        hints_area,
     );
+}
+
+/// タイトル画面の「Enterキーを押してスタート」を明滅させるon/off判定。`draw_title`
+/// はゲーム開始前(ゲーム内時刻がまだ存在しない)に毎フレーム呼ばれるため、壁時計
+/// (`SystemTime`)を直接使う(TERM独自拡張。#191フォローアップ)。
+fn title_prompt_blink_on() -> bool {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    (millis / TITLE_PROMPT_BLINK_MS as u128).is_multiple_of(2)
 }
 
 // ---------------------------------------------------------------------------
@@ -2633,26 +2724,27 @@ mod tests {
 
     #[test]
     fn title_screen_text_overlay_fits_within_a_reasonably_sized_terminal() {
-        // #148でアートは画面いっぱいに表示する方式に変えたため、合計行数の
-        // 心配は「ロゴ+案内文パネルが画面の縦幅に収まるか」だけになった
-        // (以前はここにアートの行数も加算していたが、アートはもう別途行数を
-        // 消費しない)。55行はごく一般的なターミナルウィンドウの高さの目安(#127)。
+        // #191フォローアップ: アートと文字を黄金比で上下分割するようにしたため、
+        // 文字(ロゴ+スタート案内+キーヒント)は画面全体でなく残り38.2%の
+        // text_zoneに収まる必要がある。55行はごく一般的なターミナルウィンドウの
+        // 高さの目安(#127)。
         const ASSUMED_COMMON_TERMINAL_H: u16 = 55;
+        const GAP_ABOVE_PROMPT: u16 = 1;
+        const PROMPT_ROWS: u16 = 1;
+        const GAP_ABOVE_HINTS: u16 = 2;
+        const HINT_ROWS: u16 = 2;
 
-        let mut text_lines = build_title_logo_lines().to_vec();
-        text_lines.extend([
-            Line::from(""),
-            Line::from(""),
-            Line::from(""),
-            Line::from(""),
-            Line::from(""),
-        ]);
-        let text_rows = text_lines.len() as u16;
+        let art_height = ((ASSUMED_COMMON_TERMINAL_H as u32 * 618) / 1000).max(1) as u16;
+        let text_zone_height = ASSUMED_COMMON_TERMINAL_H.saturating_sub(art_height);
+
+        let logo_rows = build_title_logo_lines().len() as u16;
+        let content_height =
+            logo_rows + GAP_ABOVE_PROMPT + PROMPT_ROWS + GAP_ABOVE_HINTS + HINT_ROWS;
 
         assert!(
-            text_rows <= ASSUMED_COMMON_TERMINAL_H,
-            "ロゴ+案内文パネルの行数が一般的な端末の高さ({ASSUMED_COMMON_TERMINAL_H}行)を\
-             超えている(text_rows={text_rows})"
+            content_height <= text_zone_height,
+            "ロゴ+案内文がtext_zoneの高さ({text_zone_height}行)を超えている\
+             (content_height={content_height})"
         );
     }
 
