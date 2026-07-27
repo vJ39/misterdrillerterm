@@ -986,7 +986,15 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
                 && let Some(t) = game.vanish_flash_progress((board_row, col))
             {
                 fill_block(buf, draw_x, y, colors::vanish_flash_bg(t));
-            } else if cell == BoardCell::Empty && is_checkpoint_safe_zone_row(board_row) {
+            } else if is_checkpoint_safe_zone_row(board_row) {
+                // チェックポイント地面はセルの中身(掘削済みEmptyか、未掘削の岩か、
+                // 何かの拍子に紛れ込んだダイヤ/アイテム等か)によらず、常にこの
+                // 地面テクスチャ一枚で見せる(TERM独自拡張。#194/#195フォローアップ。
+                // ユーザー指摘:「地面だけどXブロックじゃなくて」「この蜂の巣みたいな
+                // やつが地面でいいのよ」)。個々のXブロックのアイコンを並べて見せると
+                // 「地面」ではなく積み木の集合に見えてしまう上、重力ですり抜けてきた
+                // ものが下からのぞいて見える問題も、この一枚のテクスチャの下に隠れる
+                // ことで解消する。
                 fill_bedrock_ground(buf, draw_x, y);
             } else {
                 draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
@@ -1601,10 +1609,11 @@ fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
 
 /// `board_row`が、100mごとのチェックポイント通過後の安全地帯(TERM独自拡張。
 /// #181/#185)に含まれるかどうか(TERM独自拡張。#186。ユーザー指摘: 「100mごとの
-/// 先はどうせクリアするのでいったん何もなし(地面みたいにしてほしい)」)。安全地帯は
-/// 通過すると必ず`Cell::Empty`になる区間なので、素の空背景ではなく最終ゴールと
-/// 同じ地底の地面ビジュアルで表示する。500mはボーナスフロア(アイテム/AIR配置。
-/// #179)であり空にはならないため対象外にする。
+/// 先はどうせクリアするのでいったん何もなし(地面みたいにしてほしい)」)。この帯は
+/// セルの中身(掘削済みEmptyか、未掘削の岩か、何かの拍子に紛れ込んだ他のブロックか)
+/// によらず、最終ゴールと同じ地底の地面ビジュアル一枚で表示する(#194/#195
+/// フォローアップ。ユーザー指摘: 「この蜂の巣みたいなやつが地面でいいのよ」)。
+/// 500mはボーナスフロア(アイテム/AIR配置。#179)であり対象外にする。
 fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
     if board_row < CHECKPOINT_STEP_M {
         return false;
