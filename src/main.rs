@@ -23,12 +23,13 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    BOMB_SPAWN_RATE_PERCENT_MIN, COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN,
-    DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX,
-    FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
-    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
-    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    BOMB_SPAWN_RATE_PERCENT_MIN, CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP,
+    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
+    FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
+    MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
+    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -268,7 +269,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::PlayerFallSpeed
                             | ui::render::SettingsChoice::MoveSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs
-                            | ui::render::SettingsChoice::BombRate => {}
+                            | ui::render::SettingsChoice::BombRate
+                            | ui::render::SettingsChoice::ChainVanishInterval => {}
                         }
                     }
                     // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
@@ -312,6 +314,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::MoveSpeed
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
                                     | ui::render::SettingsChoice::BombRate
+                                    | ui::render::SettingsChoice::ChainVanishInterval
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -343,6 +346,15 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     BOMB_SPAWN_RATE_PERCENT_MIN,
                                 );
                                 game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
+                            }
+                            ui::render::SettingsChoice::ChainVanishInterval => {
+                                settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
+                                    settings.chain_vanish_interval_ms,
+                                    increase,
+                                );
+                                game.set_chain_vanish_interval_ms(
+                                    settings.chain_vanish_interval_ms,
+                                );
                             }
                             _ => {}
                         }
@@ -564,6 +576,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
                             settings.debug_log_enabled,
+                            settings.chain_vanish_interval_ms,
                             false,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame, None, false),
@@ -595,6 +608,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.dodge_recovery_ms,
                     settings.bomb_spawn_rate_percent,
                     settings.debug_log_enabled,
+                    settings.chain_vanish_interval_ms,
                     true,
                 )
             })?;
@@ -645,7 +659,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::PlayerFallSpeed
                         | ui::render::SettingsChoice::MoveSpeed
                         | ui::render::SettingsChoice::DodgeRecoveryMs
-                        | ui::render::SettingsChoice::BombRate => {}
+                        | ui::render::SettingsChoice::BombRate
+                        | ui::render::SettingsChoice::ChainVanishInterval => {}
                     },
                     // MUSIC/SEのトグルはSpace(TogglePause)・←→キーでも行える(TERM独自拡張。
                     // ユーザー指摘: 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで
@@ -694,6 +709,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::MoveSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                                 | ui::render::SettingsChoice::BombRate
+                                | ui::render::SettingsChoice::ChainVanishInterval
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -783,6 +799,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     settings.bomb_spawn_rate_percent,
                                     increase,
                                     BOMB_SPAWN_RATE_PERCENT_MIN,
+                                );
+                            }
+                            ui::render::SettingsChoice::ChainVanishInterval => {
+                                settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
+                                    settings.chain_vanish_interval_ms,
+                                    increase,
                                 );
                             }
                             _ => {}
@@ -876,6 +898,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
                         game.set_move_cooldown_ms(settings.move_cooldown_ms);
                         game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
+                        game.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
                         // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
                         // 安全地帯明け(行2)以降の全体へ反映する(TERM独自拡張)。
                         game.reroll_spawn_rates_from(
@@ -1081,6 +1104,21 @@ fn adjust_dodge_recovery_ms(current: u64, increase: bool) -> u64 {
         // DODGE_RECOVERY_MS_MINは0固定のため、saturating_subの結果に対する.max()は不要
         // (clippy::unnecessary_min_or_max)。
         current.saturating_sub(DODGE_RECOVERY_MS_STEP)
+    }
+}
+
+/// 自動消滅の連鎖インターバル(ms)を`CHAIN_VANISH_INTERVAL_MS_STEP`ぶん増減する
+/// (TERM独自拡張。#187。ユーザー指摘: 「ブロックが消えて、連鎖的に次ブロックが
+/// 消えるとき、0msで連続するのではなく一定のインターバルで連鎖するように」)。
+fn adjust_chain_vanish_interval_ms(current: u64, increase: bool) -> u64 {
+    if increase {
+        current
+            .saturating_add(CHAIN_VANISH_INTERVAL_MS_STEP)
+            .min(CHAIN_VANISH_INTERVAL_MS_MAX)
+    } else {
+        // CHAIN_VANISH_INTERVAL_MS_MINは0固定のため、saturating_subの結果に対する.max()は
+        // 不要(clippy::unnecessary_min_or_max)。
+        current.saturating_sub(CHAIN_VANISH_INTERVAL_MS_STEP)
     }
 }
 

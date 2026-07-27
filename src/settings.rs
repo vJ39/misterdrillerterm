@@ -9,8 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::constants::{
-    COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT,
-    MOVE_COOLDOWN_MS_DEFAULT, SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
+    CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS,
+    FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT, SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
 };
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
@@ -73,6 +73,11 @@ pub struct Settings {
     /// トグル設定に追加」)。設定画面から切り替える。既定は有効(以前の常時記録の
     /// 挙動を変えない)。
     pub debug_log_enabled: bool,
+    /// 4連結以上の自動消滅が連鎖するとき、1回消滅するごとに次の重力解決までの
+    /// 最小インターバル(ms、TERM独自拡張。#187)。ユーザー指摘: 「ブロックが消えて、
+    /// 連鎖的に次ブロックが消えるとき、0msで連続するのではなく一定のインターバルで
+    /// 連鎖するように」。既定は0(=従来通り)。設定画面から調整する。
+    pub chain_vanish_interval_ms: u64,
 }
 
 impl Default for Settings {
@@ -97,6 +102,7 @@ impl Default for Settings {
             field_width: FIELD_WIDTH_DEFAULT,
             bomb_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             debug_log_enabled: true,
+            chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
         }
     }
 }
@@ -178,6 +184,8 @@ impl Settings {
                 .unwrap_or(default.bomb_spawn_rate_percent),
             debug_log_enabled: parse_bool_field(&text, "debug_log_enabled")
                 .unwrap_or(default.debug_log_enabled),
+            chain_vanish_interval_ms: parse_u64_field(&text, "chain_vanish_interval_ms")
+                .unwrap_or(default.chain_vanish_interval_ms),
         }
     }
 
@@ -199,7 +207,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.block_fall_tick_ms,
@@ -218,7 +226,8 @@ impl Settings {
             self.move_cooldown_ms,
             self.field_width,
             self.bomb_spawn_rate_percent,
-            self.debug_log_enabled
+            self.debug_log_enabled,
+            self.chain_vanish_interval_ms
         );
         // 一時ファイルへ書いてからrenameすることで保存をアトミックにする(TERM独自
         // 拡張。#158)。File::create+write_allをpathへ直接行うと、書き込み途中で
@@ -313,6 +322,10 @@ mod tests {
         assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_DEFAULT);
         assert_eq!(settings.field_width, FIELD_WIDTH_DEFAULT);
         assert_eq!(settings.bomb_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(
+            settings.chain_vanish_interval_ms,
+            CHAIN_VANISH_INTERVAL_MS_DEFAULT
+        );
     }
 
     #[test]
@@ -387,6 +400,7 @@ mod tests {
             field_width: 8,
             bomb_spawn_rate_percent: 60,
             debug_log_enabled: false,
+            chain_vanish_interval_ms: 150,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -411,6 +425,7 @@ mod tests {
             field_width: 20,
             bomb_spawn_rate_percent: 300,
             debug_log_enabled: true,
+            chain_vanish_interval_ms: 1000,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);

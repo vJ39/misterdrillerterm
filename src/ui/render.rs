@@ -546,6 +546,10 @@ pub enum SettingsChoice {
     /// #85調査用のブロック状態遷移ログ(SQLite)を記録するかどうか(TERM独自拡張。
     /// #167。ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」)。
     DebugLogEnabled,
+    /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=従来通り即座に連鎖)。
+    /// TERM独自拡張。#187。ユーザー指摘: 「ブロックが消えて、連鎖的に次ブロックが
+    /// 消えるとき、0msで連続するのではなく一定のインターバルで連鎖するように」。
+    ChainVanishInterval,
 }
 
 impl SettingsChoice {
@@ -569,7 +573,8 @@ impl SettingsChoice {
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DebugLogEnabled,
-            SettingsChoice::DebugLogEnabled => SettingsChoice::Music,
+            SettingsChoice::DebugLogEnabled => SettingsChoice::ChainVanishInterval,
+            SettingsChoice::ChainVanishInterval => SettingsChoice::Music,
         }
     }
 
@@ -578,7 +583,8 @@ impl SettingsChoice {
     /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::DebugLogEnabled,
+            SettingsChoice::Music => SettingsChoice::ChainVanishInterval,
+            SettingsChoice::ChainVanishInterval => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::Se => SettingsChoice::Music,
@@ -627,6 +633,7 @@ pub fn draw_settings(
     dodge_recovery_ms: u64,
     bomb_spawn_rate_percent: u32,
     debug_log_enabled: bool,
+    chain_vanish_interval_ms: u64,
     standalone: bool,
 ) {
     let area = frame.area();
@@ -790,6 +797,11 @@ pub fn draw_settings(
             "DEBUG LOG",
             debug_log_enabled,
             selection == SettingsChoice::DebugLogEnabled,
+        ),
+        ms_line(
+            "連鎖消滅インターバル",
+            chain_vanish_interval_ms,
+            selection == SettingsChoice::ChainVanishInterval,
         ),
         Line::from(""),
         Line::from(Span::styled(

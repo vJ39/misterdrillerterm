@@ -19,7 +19,8 @@ use crate::constants::{
     BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_FUSE_TICK_INTERVAL_MS,
     BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS,
     BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
-    BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHECKPOINT_FLASH_MS,
+    BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHAIN_VANISH_INTERVAL_MS_DEFAULT,
+    CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_MIN, CHECKPOINT_FLASH_MS,
     CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M, CRUSH_ASCEND_MS,
     CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
     DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
@@ -279,6 +280,16 @@ pub struct Game {
     /// できる(TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
     /// 掘削(Drill)のクールダウンは対象外で、引き続き`INPUT_COOLDOWN_MS`固定のまま。
     move_cooldown_ms: u64,
+    /// 4連結以上の自動消滅が連鎖するとき、1回消滅するごとに次の重力解決までの
+    /// 最小インターバル(ms)。既定は`CHAIN_VANISH_INTERVAL_MS_DEFAULT`(0、従来通り)
+    /// だが、設定画面から調整できる(TERM独自拡張。#187。ユーザー指摘: 「ブロックが
+    /// 消えて、連鎖的に次ブロックが消えるとき、0msで連続するのではなく一定の
+    /// インターバルで連鎖するように」)。
+    chain_vanish_interval_ms: u64,
+    /// `chain_vanish_interval_ms`による足止めの残り時間(TERM独自拡張。#187)。
+    /// 自動消滅が発生した直後にこの値へセットされ、0になるまで次の重力tickの
+    /// 解決(`physics::process_gravity_tick`の呼び出し)を1tickぶんずつ足止めする。
+    chain_pause_remaining: Duration,
     /// 移動系入力(MoveLeft/MoveRight)専用のクールダウン。掘削(Drill)とは別に管理する
     /// (TERM独自拡張。ユーザー指摘: 「カーソルとスペース、両方押してるときにどちらかが
     /// 効かない」。1つの共有クールダウンだと、同一フレームで移動キーと掘削キーが両方
@@ -434,6 +445,8 @@ impl Game {
             player_fall_tick_ms: FALL_TICK_MS,
             shake_duration_ms: SHAKE_DURATION_MS,
             move_cooldown_ms: MOVE_COOLDOWN_MS_DEFAULT,
+            chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
+            chain_pause_remaining: Duration::ZERO,
             // ゲーム開始直後は即座に入力を受理できるよう、アキュムレータを満タン
             // (=1クールダウンぶん貯まっている状態)から始める。
             move_cooldown_accum: Duration::from_millis(MOVE_COOLDOWN_MS_DEFAULT),
@@ -1097,6 +1110,16 @@ impl Game {
         while self.fall_tick_accum >= tick {
             self.fall_tick_accum -= tick;
 
+            // 自動消滅の連鎖インターバル(TERM独自拡張。#187。ユーザー指摘: 「ブロックが
+            // 消えて、連鎖的に次ブロックが消えるとき、0msで連続するのではなく一定の
+            // インターバルで連鎖するように」)。直前の自動消滅から`chain_vanish_interval_ms`
+            // が経過していなければ、この1tickぶんは重力解決自体を足止めする(既定の0では
+            // 何もしない=従来通り即座に解決する)。
+            if self.chain_pause_remaining > Duration::ZERO {
+                self.chain_pause_remaining = self.chain_pause_remaining.saturating_sub(tick);
+                continue;
+            }
+
             // 「天に召される」演出中(TERM独自拡張)も重力処理自体は止めないため、
             // プレイヤーの論理位置は演出完了まで押し潰された地点に固定されたままになる。
             // その間に別の塊が同じ地点へ落ちてきても二重にライフを失わないよう、
@@ -1170,6 +1193,12 @@ impl Game {
             }
             self.note_vanished_cells(result.vanished_cells);
             self.log_board_snapshot_if_due();
+
+            if (result.auto_vanished_blocks > 0 || result.auto_vanished_rock_blocks > 0)
+                && self.chain_vanish_interval_ms > 0
+            {
+                self.chain_pause_remaining = Duration::from_millis(self.chain_vanish_interval_ms);
+            }
 
             if result.life_lost_to_crush {
                 self.apply_miss(&mut events);
@@ -1734,6 +1763,14 @@ impl Game {
     /// 範囲外の値は`MOVE_COOLDOWN_MS_MIN`〜`MAX`にクランプする。
     pub fn set_move_cooldown_ms(&mut self, ms: u64) {
         self.move_cooldown_ms = ms.clamp(MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_MAX);
+    }
+
+    /// 自動消滅の連鎖インターバルを直接指定する(起動時、Settingsから読み込んだ値を
+    /// 適用する用途。TERM独自拡張。#187)。範囲外の値は`CHAIN_VANISH_INTERVAL_MS_MIN`〜
+    /// `MAX`にクランプする。
+    pub fn set_chain_vanish_interval_ms(&mut self, ms: u64) {
+        self.chain_vanish_interval_ms =
+            ms.clamp(CHAIN_VANISH_INTERVAL_MS_MIN, CHAIN_VANISH_INTERVAL_MS_MAX);
     }
 
     /// 現在の揺れ時間(ms)。設定の永続化(main.rs/Settings)用に公開する。
@@ -3329,6 +3366,110 @@ mod tests {
         assert_eq!(game.board.cell(999, 1), Cell::Empty);
         assert_eq!(game.board.cell(999, 2), Cell::Empty);
         assert_eq!(game.board.cell(999, 3), Cell::Empty);
+    }
+
+    #[test]
+    fn chain_pause_blocks_gravity_resolution_until_it_elapses_then_resumes() {
+        // ユーザー指摘(#187): 「ブロックが消えて、連鎖的に次ブロックが消えるとき、0msで
+        // 連続するのではなく一定のインターバルで連鎖するように、設定画面から指定
+        // できるようにしてほしい」。`chain_pause_remaining`が0より大きい間は重力解決
+        // (盤面の変化)自体が一切進まず、経過後は通常通り再開することを確認する。
+        // 深度に応じた落下速度上昇(depth_fraction)の影響を避けるため、プレイヤーは
+        // 浅い深度に置く。
+        let mut game = Game::new(20);
+        clear_board(&mut game);
+        game.player.row = 1;
+        game.player.col = 0;
+        game.chain_pause_remaining = Duration::from_millis(300);
+
+        // 支えを失って揺れ待ちの監視用ブロック。
+        game.board.rows[5][5] = Cell::Rock { hits: 0 };
+        game.board.rows[6][5] = Cell::Empty;
+
+        // 足止め中は、監視用ブロックの揺れ・落下も一切進まないはず
+        // (重力解決そのものが止まっているため)。
+        game.update(Duration::from_millis(FALL_TICK_MS));
+        assert_eq!(
+            game.board.cell(5, 5),
+            Cell::Rock { hits: 0 },
+            "足止め中は重力解決が進まないはず"
+        );
+        assert!(game.chain_pause_remaining > Duration::ZERO);
+
+        // 足止めが明ければ(合計300ms経過後)、揺れ→落下が通常通り再開する。
+        game.update(Duration::from_millis(
+            300 + (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+        assert_eq!(
+            game.board.cell(6, 5),
+            Cell::Rock { hits: 0 },
+            "足止めが明ければ監視用ブロックの落下も再開するはず"
+        );
+    }
+
+    #[test]
+    fn auto_vanish_sets_a_non_zero_chain_pause_when_the_interval_is_configured() {
+        // 実際に自動消滅が発生した際、`chain_vanish_interval_ms`を設定していれば
+        // `chain_pause_remaining`が0より大きい値にセットされることを確認する
+        // (足止め時間の正確な残り値は深度依存の落下速度で変わるため、ここでは
+        // 「セットされていること」だけを確認する)。
+        let mut game = Game::new(11);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 11; // 落下グループから十分離す
+        game.set_chain_vanish_interval_ms(300);
+
+        game.board.rows[998][0] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][1] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][2] = Cell::Color(ColorKind::Red);
+        game.board.rows[999][3] = Cell::Color(ColorKind::Red); // 最深行=常に支持
+
+        // SHAKE_TICKSぶんは揺れるだけで、その次の周期で落下+着地+自動消滅する。
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 })),
+            "前提: 自動消滅が発生しているはず: {events:?}"
+        );
+        assert!(
+            game.chain_pause_remaining > Duration::ZERO,
+            "自動消滅直後は連鎖インターバルぶんの足止めがセットされるはず"
+        );
+    }
+
+    #[test]
+    fn chain_vanish_interval_of_zero_behaves_exactly_like_before_with_no_extra_delay() {
+        // 既定値(0)では、従来通り足止め無しで即座に連鎖することを確認する回帰テスト。
+        let mut game = Game::new(13);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 11;
+        assert_eq!(
+            game.chain_vanish_interval_ms, 0,
+            "前提: 既定値は0(従来通り)のはず"
+        );
+
+        game.board.rows[998][0] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][1] = Cell::Color(ColorKind::Red);
+        game.board.rows[998][2] = Cell::Color(ColorKind::Red);
+        game.board.rows[999][3] = Cell::Color(ColorKind::Red);
+
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::BlockDestroyed { blocks: 4 }))
+        );
+        assert_eq!(
+            game.chain_pause_remaining,
+            Duration::ZERO,
+            "インターバル0なら足止めはセットされないはず"
+        );
     }
 
     #[test]
