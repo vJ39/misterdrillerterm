@@ -280,62 +280,6 @@ fn title_art_lines(cols: u16, rows: u16) -> Vec<Line<'static>> {
     })
 }
 
-/// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント
-/// (3行×3列、TERM独自拡張。ユーザー指摘: 「TERMMAPみたいにかっこいい題字
-/// つくってくれ」)。T/E/R/Mは`vJ39/termmap`のワードマーク(`keymap.rs`の`LOGO`)と
-/// 同じ字形をそのまま流用し、I/S/Dは同じ作法(角・ヒゲの罫線文字)で新規に起こした。
-/// 半角スペースは2列ぶんの空白で単語の区切りに使う。
-fn title_logo_glyph(c: char) -> &'static [&'static str; 3] {
-    match c {
-        'M' => &["┏┳┓", "┃┃┃", "╹╹╹"],
-        'I' => &["╺┳╸", " ┃ ", "╺┻╸"],
-        'S' => &["┏━╸", "┗━┓", "╺━┛"],
-        // 単純な箱形("┏━┓"/"┃ ┃"/"┗━┛")だとOと見分けがつかなかった(ユーザー指摘の
-        // スクショで実際に「MISORI TERM」に見えていた)ため、右側だけ丸角(細線)にして
-        // 左の角ばった縦棒(太線)とのコントラストでDの丸みを出す。
-        'D' => &["┏━╮", "┃ │", "┗━╯"],
-        'R' => &["┏━┓", "┣┳┛", "╹┗╸"],
-        'T' => &["╺┳╸", " ┃ ", " ╹ "],
-        'E' => &["┏━╸", "┣╸ ", "┗━╸"],
-        _ => &["  ", "  ", "  "],
-    }
-}
-
-/// "MISDRI TERM"のワードマーク3行を、上ほど明るい金〜赤銅色のグラデーションで組む
-/// (termmapの緑グラデーションと同じ発想。ゲーム内のダイヤブロック配色(黄土色系、#62)
-/// に寄せた色にした)。この明るいグラデーションは黒背景で映える配色のため、
-/// `draw_title`側でワードマーク部分だけ専用の黒地(LETTERBOX_BG)を敷いている
-/// (#191フォローアップ。ユーザー提案:「矩形だけ黒背景にするのはありかな」)。
-fn build_title_logo_lines() -> [Line<'static>; 3] {
-    const GRADIENT: [Color; 3] = [
-        Color::Rgb(255, 210, 90),
-        Color::Rgb(225, 145, 55),
-        Color::Rgb(165, 85, 35),
-    ];
-    let mut rows = [String::new(), String::new(), String::new()];
-    for c in "MISDRI TERM".chars() {
-        let glyph = title_logo_glyph(c);
-        for (row, text) in rows.iter_mut().zip(glyph.iter()) {
-            row.push_str(text);
-        }
-    }
-    let [row0, row1, row2] = rows;
-    [
-        Line::from(Span::styled(
-            row0,
-            Style::default().fg(GRADIENT[0]).bg(colors::LETTERBOX_BG),
-        )),
-        Line::from(Span::styled(
-            row1,
-            Style::default().fg(GRADIENT[1]).bg(colors::LETTERBOX_BG),
-        )),
-        Line::from(Span::styled(
-            row2,
-            Style::default().fg(GRADIENT[2]).bg(colors::LETTERBOX_BG),
-        )),
-    ]
-}
-
 /// タイトル画面を描画する(起動時スプラッシュ画像+ゲーム名+スタート案内を
 /// 1画面にまとめる)。このタイトル画面上でのみ、Qキーがアプリ終了として扱われる
 /// (main.rsの画面遷移)。
@@ -395,15 +339,27 @@ pub fn draw_title(frame: &mut Frame) {
     draw_title_text(frame, text_zone);
 }
 
+/// ロゴ画像の縦幅は、text_zoneの高さに対してこの割合を上限とする(残りは
+/// スタート案内・キーヒントに残す)。
+const LOGO_HEIGHT_PERCENT_OF_TEXT_ZONE: u32 = 40;
+/// ロゴ画像の縦幅の下限・上限(端末セル行数)。極端に小さい/大きい端末でも
+/// ワードマークが潰れたり画面を占領しすぎたりしないようにする。
+const LOGO_MIN_ROWS: u16 = 4;
+const LOGO_MAX_ROWS: u16 = 12;
+
 /// タイトル画面下部(アートと重ならない黄金比の残り領域)にロゴ・案内文を描く。
 fn draw_title_text(frame: &mut Frame, text_zone: Rect) {
-    let logo_lines = build_title_logo_lines().to_vec();
+    // ワードマークはユーザー自作のドット絵ロゴ画像(TERM独自拡張。#192。ユーザー
+    // 指摘:「これスプライト処理してつけられる?」)。横幅text_zone全体・縦は
+    // 控えめな行数を上限に、アスペクト比を保ったまま「contain」で収める。画像は
+    // 既に自前の黒縁取りを持つため、以前のASCIIロゴ(#191フォローアップ)のような
+    // 専用の黒地は不要でそのまま白背景の上に乗せられる。
+    let logo_row_budget = ((text_zone.height as u32 * LOGO_HEIGHT_PERCENT_OF_TEXT_ZONE) / 100)
+        .clamp(LOGO_MIN_ROWS as u32, LOGO_MAX_ROWS as u32) as u16;
+    let logo_canvas = intro::build_logo_canvas(text_zone.width, logo_row_budget);
+    let logo_lines = logo_canvas.to_lines(1.0);
     let logo_rows = logo_lines.len() as u16;
-    let logo_width = logo_lines
-        .iter()
-        .map(|line| line.width())
-        .max()
-        .unwrap_or(0) as u16;
+    let logo_width = logo_lines.first().map(|line| line.spans.len()).unwrap_or(0) as u16;
 
     // ロゴ・(明滅する)スタート案内・キーヒントをまとめて1ブロックとしてtext_zoneの
     // 中央に配置する(TERM独自拡張。#191フォローアップ)。
@@ -414,25 +370,14 @@ fn draw_title_text(frame: &mut Frame, text_zone: Rect) {
     let content_height = logo_rows + GAP_ABOVE_PROMPT + PROMPT_ROWS + GAP_ABOVE_HINTS + HINT_ROWS;
     let content_area = centered_fixed_rect(text_zone.width, content_height, text_zone);
 
-    // ワードマーク("MISDRI TERM")は黒背景向けの明るい金色グラデーションのため、
-    // 専用の黒地(LETTERBOX_BG)の上に乗せる(#191フォローアップ。ユーザー提案:
-    // 「矩形だけ黒背景にするのはありかな」)。text_zoneは常に白地(呼び出し元で
-    // 塗り済み)なので、ロゴの矩形以外は追加の下地塗りなしでそのまま読める。
-    let logo_box_width = (logo_width + 4).min(content_area.width);
     let logo_area = Rect {
-        x: content_area.x + (content_area.width - logo_box_width) / 2,
+        x: content_area.x + (content_area.width.saturating_sub(logo_width)) / 2,
         y: content_area.y,
-        width: logo_box_width,
+        width: logo_width.min(content_area.width),
         height: logo_rows,
     };
-    let solid_black = Style::default()
-        .fg(colors::LETTERBOX_BG)
-        .bg(colors::LETTERBOX_BG);
-    frame.buffer_mut().set_style(logo_area, solid_black);
     frame.render_widget(
-        Paragraph::new(logo_lines)
-            .style(solid_black)
-            .alignment(Alignment::Center),
+        Paragraph::new(logo_lines).alignment(Alignment::Center),
         logo_area,
     );
 
@@ -2754,7 +2699,9 @@ mod tests {
         let art_height = ((ASSUMED_COMMON_TERMINAL_H as u32 * 618) / 1000).max(1) as u16;
         let text_zone_height = ASSUMED_COMMON_TERMINAL_H.saturating_sub(art_height);
 
-        let logo_rows = build_title_logo_lines().len() as u16;
+        // ロゴ画像の実際の行数は元画像のアスペクト比・端末幅で変わるが、
+        // LOGO_MAX_ROWS(行数上限)を超えることはない(#192)。
+        let logo_rows = LOGO_MAX_ROWS;
         let content_height =
             logo_rows + GAP_ABOVE_PROMPT + PROMPT_ROWS + GAP_ABOVE_HINTS + HINT_ROWS;
 
