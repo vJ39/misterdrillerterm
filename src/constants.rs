@@ -37,6 +37,12 @@ pub const CHECKPOINT_FLASH_MS: u64 = 1800;
 /// 指摘: 「20m長すぎなので5mにしよう」)。
 pub const CHECKPOINT_SAFE_ZONE_M: usize = 5;
 
+/// 安全地帯(地面ビジュアル表示区間、`CHECKPOINT_SAFE_ZONE_M`)の直後、通常の地形が
+/// 再開するまでに空ける追加のスキマ(m、TERM独自拡張。#189。ユーザー指摘: 「100m
+/// きざみの地面と次のブロックがギチギチなので、5mスキマあけて」)。この区間は
+/// `Cell::Empty`にはするが地面テクスチャは付けない(見た目は素の空白=開けた空間)。
+pub const CHECKPOINT_ZONE_GAP_M: usize = 5;
+
 /// #179のボーナスフロアが発生する深度(m、TERM独自拡張)。
 pub const BONUS_FLOOR_DEPTH_M: usize = 500;
 

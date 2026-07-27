@@ -21,12 +21,13 @@ use crate::constants::{
     BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
     BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHAIN_VANISH_INTERVAL_MS_DEFAULT,
     CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_MIN, CHECKPOINT_FLASH_MS,
-    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M, CRUSH_ASCEND_MS,
-    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
-    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
-    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
-    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
+    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_GAP_M,
+    CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M, CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
+    DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS,
+    DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX,
+    DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS,
+    FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
     FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
     INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
     MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
@@ -1192,6 +1193,7 @@ impl Game {
                 });
             }
             self.note_vanished_cells(result.vanished_cells);
+            self.purge_checkpoint_zone_debris();
             self.log_board_snapshot_if_due();
 
             if (result.auto_vanished_blocks > 0 || result.auto_vanished_rock_blocks > 0)
@@ -1968,6 +1970,10 @@ impl Game {
         let depth_rows = self.board.depth_rows();
         let zone_start_row = at_m;
         let zone_end_row = (zone_start_row + CHECKPOINT_SAFE_ZONE_M).min(depth_rows);
+        // 地面ビジュアル区間(ground_end_row-zone_start_row)の直後、通常の地形が再開
+        // するまでのスキマ(TERM独自拡張。#189。ユーザー指摘: 「100mきざみの地面と
+        // 次のブロックがギチギチなので、5mスキマあけて」)。
+        let gap_end_row = (zone_end_row + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
         if at_m == BONUS_FLOOR_DEPTH_M {
             self.board.reroll_overlays_in_row_range(
                 zone_start_row,
@@ -1983,12 +1989,51 @@ impl Game {
                 100,
                 &self.gravity_state,
             );
-        } else {
-            for row in zone_start_row..zone_end_row {
+            for row in zone_end_row..gap_end_row {
                 for col in 0..self.board.width() {
                     self.board.set(row, col, Cell::Empty);
                 }
             }
+        } else {
+            for row in zone_start_row..gap_end_row {
+                for col in 0..self.board.width() {
+                    self.board.set(row, col, Cell::Empty);
+                }
+            }
+        }
+    }
+
+    /// チェックポイントの安全地帯(ground_end_row-zone_start_row)+スキマ区間に、上から
+    /// 崩れてきたブロックやアイテムが滞留しないようにする(TERM独自拡張。#189。
+    /// ユーザー指摘: 「その地面よりも下にブロックが落ちないように(アイテムなども)」
+    /// 「100mラインを超えたら滞留してるブロック、アイテムはすべてパージで」)。
+    /// 既にくり抜いた(=到達済みまたはlookaheadで先行くり抜き済みの)チェックポイント
+    /// についてのみ、区間内に何か入り込んでいれば消滅フラッシュ演出付きでパージする。
+    /// 500mのボーナスフロアはアイテム/AIRを意図的に配置する区間のため対象外。
+    fn purge_checkpoint_zone_debris(&mut self) {
+        let width = self.board.width();
+        let depth_rows = self.board.depth_rows();
+        let mut cleared = Vec::new();
+        for checkpoint in 1..=self.zone_carved_up_to_checkpoint {
+            let at_m = checkpoint * CHECKPOINT_STEP_M;
+            if at_m == BONUS_FLOOR_DEPTH_M {
+                continue;
+            }
+            let zone_start_row = at_m;
+            let zone_end_row =
+                (zone_start_row + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
+            for row in zone_start_row..zone_end_row {
+                for col in 0..width {
+                    let cell = self.board.cell(row, col);
+                    if cell != Cell::Empty {
+                        cleared.push(((row, col), cell));
+                        self.board.set(row, col, Cell::Empty);
+                    }
+                }
+            }
+        }
+        if !cleared.is_empty() {
+            self.note_vanished_cells(cleared);
         }
     }
 
@@ -4769,6 +4814,100 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_gap_follows_the_ground_zone_before_normal_terrain_resumes() {
+        // ユーザー指摘(#189): 「100mきざみの地面と次のブロックがギチギチなので、
+        // 5mスキマあけて」。安全地帯(地面ビジュアル区間、CHECKPOINT_SAFE_ZONE_M)の
+        // 直後、さらにCHECKPOINT_ZONE_GAP_Mぶんも空になっていることを確認する。
+        let mut game = Game::new(202);
+        game.apply_checkpoint_safe_zone(100);
+        let width = game.board.width();
+        let gap_start = 100 + crate::constants::CHECKPOINT_SAFE_ZONE_M;
+        let gap_end = gap_start + crate::constants::CHECKPOINT_ZONE_GAP_M;
+        for row in gap_start..gap_end {
+            for col in 0..width {
+                assert_eq!(
+                    game.board.cell(row, col),
+                    Cell::Empty,
+                    "地面区間直後のスキマ(row={row}, col={col})は空のはず"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_gap_after_the_bonus_floor_is_also_cleared() {
+        // #189: 500mボーナスフロア自体はアイテム/AIRを意図的に配置するが、その直後の
+        // スキマは通常のチェックポイントと同様に空けるはず。
+        let mut game = Game::new(203);
+        game.apply_checkpoint_safe_zone(crate::constants::BONUS_FLOOR_DEPTH_M);
+        let width = game.board.width();
+        let gap_start =
+            crate::constants::BONUS_FLOOR_DEPTH_M + crate::constants::CHECKPOINT_SAFE_ZONE_M;
+        let gap_end = gap_start + crate::constants::CHECKPOINT_ZONE_GAP_M;
+        for row in gap_start..gap_end {
+            for col in 0..width {
+                assert_eq!(
+                    game.board.cell(row, col),
+                    Cell::Empty,
+                    "ボーナスフロア直後のスキマ(row={row}, col={col})は空のはず"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn debris_that_lands_inside_an_already_carved_checkpoint_zone_is_purged_next_tick() {
+        // ユーザー指摘(#189): 「その地面よりも下にブロックが落ちないように(アイテム
+        // なども)」「100mラインを超えたら滞留してるブロック、アイテムはすべてパージで」。
+        // 既にくり抜き済みの安全地帯+スキマ区間に何か入り込んでも、次の重力tickで
+        // 消滅フラッシュ演出付きでパージされることを確認する。
+        let mut game = Game::new(204);
+        clear_board(&mut game);
+        game.player.row = 1;
+        game.player.col = 0;
+        game.zone_carved_up_to_checkpoint = 1; // checkpoint 100mまでくり抜き済み扱い
+
+        // 本来は既にEmptyのはずの安全地帯+スキマ区間に、崩れてきた想定のブロックと
+        // アイテムを直接置く。
+        game.board.rows[102][2] = Cell::Color(ColorKind::Red);
+        game.board.rows[107][3] = Cell::Item(ItemEffect::ClearAbove);
+
+        game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert_eq!(
+            game.board.cell(102, 2),
+            Cell::Empty,
+            "ゾーン内に滞留したブロックはパージされるはず"
+        );
+        assert_eq!(
+            game.board.cell(107, 3),
+            Cell::Empty,
+            "ゾーン内に滞留したアイテムもパージされるはず"
+        );
+    }
+
+    #[test]
+    fn purge_does_not_touch_the_bonus_floor_zone() {
+        // #189: 500mボーナスフロアはアイテム/AIRを意図的に配置する区間なので、
+        // パージの対象外であることを確認する。
+        let mut game = Game::new(205);
+        clear_board(&mut game);
+        game.player.row = 1;
+        game.player.col = 0;
+        game.zone_carved_up_to_checkpoint = 5; // 500mまでくり抜き済み扱い
+
+        game.board.rows[502][2] = Cell::Oxygen;
+
+        game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert_eq!(
+            game.board.cell(502, 2),
+            Cell::Oxygen,
+            "ボーナスフロア内のアイテムはパージされないはず"
+        );
     }
 
     #[test]
