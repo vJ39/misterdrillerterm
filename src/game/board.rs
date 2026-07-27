@@ -9,8 +9,9 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    COLOR_CLUSTER_DEPTH_START_PROB, ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK,
-    STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS, depth_fraction,
+    BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, COLOR_CLUSTER_DEPTH_START_PROB,
+    ROCK_CLUSTER_DEPTH_MAX_BONUS, ROCK_HITS_TO_BREAK, STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS,
+    depth_fraction,
 };
 
 /// フィールド1マスの内容。
@@ -483,6 +484,21 @@ fn ensure_row_is_not_fully_blocked_by_rock(
     }
 }
 
+/// `row`が、100mごとのチェックポイント通過後の「地面」(実掘削が必要な固体障壁、
+/// TERM独自拡張。#190)に含まれるかどうか。`ui::render::is_checkpoint_safe_zone_row`
+/// と同じ判定を生成側でも使う(500mのボーナスフロアはアイテム/AIR配置#179のため
+/// 対象外)。
+fn is_checkpoint_ground_row(row: usize) -> bool {
+    if row < CHECKPOINT_STEP_M {
+        return false;
+    }
+    let checkpoint_start = (row / CHECKPOINT_STEP_M) * CHECKPOINT_STEP_M;
+    if checkpoint_start == BONUS_FLOOR_DEPTH_M {
+        return false;
+    }
+    row < checkpoint_start + CHECKPOINT_SAFE_ZONE_M
+}
+
 /// ゲームフィールド全体(1000行×`width`列)。`width`(列数)はTERM独自拡張で設定
 /// 可能(ユーザー指摘: 「設定値に列の数を変更できるようにして」)。新規ゲーム開始時に
 /// 決まり、以後そのゲームの間は固定(既存の`rows`各要素の長さと必ず一致する)。
@@ -510,6 +526,16 @@ impl Board {
         let mut item_caps = ItemSpawnCaps::fresh();
         let rows = (0..depth_rows)
             .map(|row| {
+                if is_checkpoint_ground_row(row) {
+                    // チェックポイント地面は掘るまで一律岩ブロックの固体障壁にする
+                    // (TERM独自拡張。#190フォローアップ。ユーザー指摘: 「地面に
+                    // ブロック等/アイテムも重ねないって言ってなかったっけ?」)。通常の
+                    // 乱数配置任せだとダイヤ/アイテム/色ブロックが混在してしまい、
+                    // 掘った後に表示される地面テクスチャ(render側)と食い違って見える。
+                    // 逃げ道(ensure_row_is_not_fully_blocked_by_rock)もここでは適用
+                    // しない、地面はそもそも掘削必須の壁として意図されているため。
+                    return vec![Cell::Rock { hits: 0 }; width];
+                }
                 let mut cells = vec![Cell::Empty; width];
                 for (col, cell) in cells.iter_mut().enumerate() {
                     *cell = match base[row][col] {
@@ -1494,6 +1520,39 @@ mod tests {
             assert_eq!(board.cell(0, col), Cell::Empty);
             assert_eq!(board.cell(1, col), Cell::Empty);
         }
+    }
+
+    // --- 生成: チェックポイント地面(100mごと)は掘るまで一律岩ブロック(TERM独自拡張) ---
+
+    #[test]
+    fn generate_makes_the_checkpoint_ground_band_a_uniform_wall_of_rock() {
+        // #194: 地面が実掘削必須の固体障壁になるよう、生成時点で一律Cell::Rockに
+        // している。ダイヤ/アイテム/色ブロックが混在してはいけない(ユーザー指摘:
+        // 「地面にブロック等/アイテムも重ねないって言ってなかったっけ?」)。
+        let board = Board::generate(1, 210, FIELD_WIDTH);
+        for row in 100..105 {
+            for col in 0..FIELD_WIDTH {
+                assert!(
+                    matches!(board.cell(row, col), Cell::Rock { hits: 0 }),
+                    "row={row} col={col}は岩ブロックのはず(実際={:?})",
+                    board.cell(row, col)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generate_does_not_force_the_bonus_floor_ground_band_to_rock() {
+        // 500mはボーナスフロア(#179、アイテム/AIR配置)のため、チェックポイント
+        // 地面の岩固定ロジックの対象外にする。
+        let board = Board::generate(1, 510, FIELD_WIDTH);
+        let all_rock = (500..505).all(|row| {
+            (0..FIELD_WIDTH).all(|col| matches!(board.cell(row, col), Cell::Rock { .. }))
+        });
+        assert!(
+            !all_rock,
+            "ボーナスフロアの地面帯は一律岩に強制されないはず"
+        );
     }
 
     // --- プレイ中の配分率(岩/AIR)変更(TERM独自拡張) ---
