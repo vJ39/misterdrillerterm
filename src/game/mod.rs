@@ -20,8 +20,8 @@ use crate::constants::{
     BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS,
     BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
     BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHECKPOINT_FLASH_MS,
-    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CRUSH_ASCEND_MS, CRUSH_FLASH_MS,
-    DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
+    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M, CRUSH_ASCEND_MS,
+    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
     DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
     DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
     DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
@@ -306,6 +306,10 @@ pub struct Game {
     /// 直近でGameEvent::Checkpoint100mを通知した時点の区切り番号(重複通知防止。
     /// TERM独自拡張。#178。`depth_m / CHECKPOINT_STEP_M`の値をそのまま持つ)。
     last_checkpoint_reported: usize,
+    /// 安全地帯のくり抜き(`apply_checkpoint_safe_zone`)を既に済ませた、最後の
+    /// チェックポイント区切り番号(TERM独自拡張。#188。`last_checkpoint_reported`とは
+    /// 独立して手前から先行くり抜きするため別カウンタにしてある)。
+    zone_carved_up_to_checkpoint: usize,
     /// 押し潰しミス発生時、残りこれだけの間「潰れた」見た目を表示し続ける
     /// (0になったらGameOverオーバーレイの表示を許す。TERM独自拡張、9章)。
     crush_flash_remaining: Duration,
@@ -438,6 +442,7 @@ impl Game {
             invulnerability_ticks_remaining: 0,
             last_level_reported,
             last_checkpoint_reported,
+            zone_carved_up_to_checkpoint: 0,
             crush_flash_remaining: Duration::ZERO,
             checkpoint_flash_remaining: Duration::ZERO,
             checkpoint_flash_depth_m: 0,
@@ -917,6 +922,28 @@ impl Game {
             }
         }
 
+        // チェックポイントの安全地帯(#181)は、実際に到達するちょうどその瞬間ではなく
+        // `CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M`ぶん手前に近づいた時点で先行してくり抜く
+        // (TERM独自拡張。#188。ユーザー指摘: 「地面は100mごと到達してからではなく、
+        // 近づいてくるようにして」)。頭上クリア・バナー・ファンファーレ等の到達演出
+        // 自体は下の到達判定のタイミングのまま変えない。通常のプレイでは1行ずつしか
+        // 進まないためループは高々1回で済むが、テスト等がplayer.rowを直接遠くへ
+        // 書き換えるような非正規のジャンプでも、複数チェックポイント分を取りこぼさず
+        // 追いつけるようループにしてある。
+        loop {
+            let next_checkpoint = self.zone_carved_up_to_checkpoint + 1;
+            let next_checkpoint_depth_m = next_checkpoint * CHECKPOINT_STEP_M;
+            if next_checkpoint_depth_m >= FIELD_DEPTH_M {
+                break;
+            }
+            if self.player.depth_m() + CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M < next_checkpoint_depth_m
+            {
+                break;
+            }
+            self.apply_checkpoint_safe_zone(next_checkpoint_depth_m);
+            self.zone_carved_up_to_checkpoint = next_checkpoint;
+        }
+
         // チェックポイント(100mごと、TERM独自拡張。#178)。7章のレベル進行(30m刻み、
         // 表示のみ)とは別に、100m到達ごとに頭上を全クリアしゴールSE・演出を出す。
         // 最終ゴール(FIELD_DEPTH_M)ちょうどは、Clearedイベント自体が同じ役割の演出を
@@ -934,7 +961,6 @@ impl Game {
             let at_m = checkpoint * CHECKPOINT_STEP_M;
             if !skipped_ahead && self.status == GameStatus::Playing && at_m < FIELD_DEPTH_M {
                 self.debug_clear_above_player();
-                self.apply_checkpoint_safe_zone(at_m);
                 self.checkpoint_flash_remaining = Duration::from_millis(CHECKPOINT_FLASH_MS);
                 self.checkpoint_flash_depth_m = at_m;
                 events.push(GameEvent::Checkpoint100m { at_m });
@@ -2895,6 +2921,46 @@ mod tests {
             !far_all_empty,
             "まだ到達していない200mチェックポイントの安全地帯は、くり抜かれていないはず"
         );
+    }
+
+    #[test]
+    fn checkpoint_safe_zone_is_carved_out_lookahead_rows_before_the_player_actually_reaches_it() {
+        // ユーザー指摘(#188): 「地面は100mごと到達してからではなく、近づいてくるように
+        // して」。安全地帯は到達したちょうどその瞬間ではなく、
+        // CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_Mぶん手前に近づいた時点で先行してくり抜かれ、
+        // 到達演出(イベント・バナー)自体はまだ発火しないはず。
+        let lookahead = crate::constants::CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M;
+        let mut game = Game::new(302);
+        game.player.row = crate::constants::CHECKPOINT_STEP_M - lookahead - 2;
+        game.player.facing = Direction::Down;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        let width = game.board.width();
+        let not_yet_carved = (0..width).all(|col| game.board.cell(100, col) != Cell::Empty);
+        assert!(
+            not_yet_carved,
+            "lookahead境界に届く前は安全地帯がまだくり抜かれていないはず"
+        );
+
+        game.try_drill();
+        let events = game.update(Duration::from_millis(FALL_TICK_MS)); // depth = 100 - lookahead
+
+        assert!(
+            !events.contains(&GameEvent::Checkpoint100m { at_m: 100 }),
+            "まだ到達していないので到達イベントは発火しないはず: {events:?}"
+        );
+        assert_eq!(
+            game.checkpoint_flash_depth_m(),
+            None,
+            "まだ到達していないので到達演出は出ないはず"
+        );
+        for col in 0..width {
+            assert_eq!(
+                game.board.cell(100, col),
+                Cell::Empty,
+                "lookahead分近づいた時点で安全地帯は先行してくり抜かれているはず(row=100, col={col})"
+            );
+        }
     }
 
     #[test]

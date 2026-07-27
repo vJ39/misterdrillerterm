@@ -40,6 +40,16 @@ pub const CHECKPOINT_SAFE_ZONE_M: usize = 5;
 /// #179のボーナスフロアが発生する深度(m、TERM独自拡張)。
 pub const BONUS_FLOOR_DEPTH_M: usize = 500;
 
+/// チェックポイントの安全地帯(#181)を、実際にそのチェックポイントへ到達する何m
+/// 手前からくり抜いておくか(TERM独自拡張。#188。ユーザー指摘: 「地面は100mごと
+/// 到達してからではなく、近づいてくるようにして」)。以前は到達したちょうどその瞬間に
+/// くり抜いていたため、地面ビジュアル(#186)が到達と同時に突然出現していた。
+/// `ui::render::FIELD_VISIBLE_ROWS`(14)×`PLAYER_SCREEN_ROW_RATIO_NUM/DEN`(1/3)の
+/// 反対側、つまり画面下方向に見えるおおよその行数に合わせ、スクロールで画面内に
+/// 入ってくるのとほぼ同じタイミングで地面が見え始めるようにする。到達演出(頭上
+/// クリア・バナー・ファンファーレ)自体のタイミングは変えない。
+pub const CHECKPOINT_ZONE_REVEAL_LOOKAHEAD_M: usize = 9;
+
 /// ボーナスフロアでのC/K/Rアイテム・AIR出現率(%、TERM独自拡張。#179。
 /// 100=通常のまま、500=5倍相当)。
 pub const BONUS_FLOOR_ITEM_AIR_RATE_PERCENT: u32 = 500;
