@@ -966,10 +966,9 @@ fn draw_off_screen_bomb_warnings(
     if warning_cols.is_empty() {
         return;
     }
-    let blink_on = ((game.player.elapsed_seconds * 1000.0) as u32
-        / OFF_SCREEN_BOMB_WARNING_BLINK_MS)
-        .is_multiple_of(2);
-    if !blink_on {
+    let cycle_ms = OFF_SCREEN_BOMB_WARNING_ON_MS + OFF_SCREEN_BOMB_WARNING_OFF_MS;
+    let phase_ms = (game.player.elapsed_seconds * 1000.0) as u32 % cycle_ms;
+    if phase_ms >= OFF_SCREEN_BOMB_WARNING_ON_MS {
         return;
     }
     for col in warning_cols {
@@ -1230,8 +1229,12 @@ fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
 /// 通常の本体色と警告色(赤)を切り替える。
 const BOMB_BODY_FLASH_PERIOD_MS: u32 = 100;
 
-/// 画面外のボム警告(縦列の赤ピカピカ)の点滅周期(ms、TERM独自拡張。#175)。
-const OFF_SCREEN_BOMB_WARNING_BLINK_MS: u32 = 50;
+/// 画面外のボム警告(縦列の赤ピカピカ)を赤く見せる時間(ms、TERM独自拡張。#175・
+/// #203・#205)。常時赤に近い遅い点滅は盤面の可視性を奪うため、短く点灯して
+/// すぐ消える非対称なデューティ比にする(ユーザー指摘: 「50ms赤点、500ms滅」)。
+const OFF_SCREEN_BOMB_WARNING_ON_MS: u32 = 50;
+/// 画面外のボム警告を消灯させておく時間(ms)。
+const OFF_SCREEN_BOMB_WARNING_OFF_MS: u32 = 500;
 
 fn bomb_body_color(remaining_ms: u32) -> Color {
     if remaining_ms > BOMB_DANGER_MS {
@@ -2294,7 +2297,7 @@ mod tests {
             "点滅ON中は画面外ボムの列が赤く塗られるはず"
         );
 
-        game.player.elapsed_seconds = OFF_SCREEN_BOMB_WARNING_BLINK_MS as f32 / 1000.0;
+        game.player.elapsed_seconds = OFF_SCREEN_BOMB_WARNING_ON_MS as f32 / 1000.0;
         let mut buf_off = Buffer::empty(inner);
         draw_off_screen_bomb_warnings(&mut buf_off, inner, top_row, visible_rows, &game);
         assert!(
