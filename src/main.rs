@@ -29,7 +29,8 @@ use constants::{
     DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
     FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
     MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
-    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN,
+    STAR_SPAWN_RATE_PERCENT_STEP,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -406,10 +407,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 );
                             }
                             ui::render::SettingsChoice::StarRate => {
-                                settings.star_spawn_rate_percent = adjust_rate_percent(
+                                settings.star_spawn_rate_percent = adjust_star_rate_percent(
                                     settings.star_spawn_rate_percent,
                                     increase,
-                                    STAR_SPAWN_RATE_PERCENT_MIN,
                                 );
                             }
                             ui::render::SettingsChoice::DiamondRate => {
@@ -732,10 +732,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 );
                             }
                             ui::render::SettingsChoice::StarRate => {
-                                settings.star_spawn_rate_percent = adjust_rate_percent(
+                                settings.star_spawn_rate_percent = adjust_star_rate_percent(
                                     settings.star_spawn_rate_percent,
                                     increase,
-                                    STAR_SPAWN_RATE_PERCENT_MIN,
                                 );
                             }
                             ui::render::SettingsChoice::DiamondRate => {
@@ -1026,10 +1025,10 @@ enum PauseOverlay {
     Help,
 }
 
-/// Xブロック/AIR/スターの出現率設定(%)を1ステップぶん増減し、指定した下限
-/// (岩/AIRは`SPAWN_RATE_PERCENT_MIN`、スターは0まで下げられる`STAR_SPAWN_RATE_PERCENT_MIN`)
-/// 〜`SPAWN_RATE_PERCENT_MAX`にクランプする(TERM独自拡張。ユーザー指摘: 「設定で
-/// Xブロックの配分量・AIRの配分量をいじれるようにしたい」「スターブロック比率0〜」)。
+/// Xブロック/AIR等の出現率設定(%)を1ステップぶん増減し、指定した下限〜
+/// `SPAWN_RATE_PERCENT_MAX`にクランプする(TERM独自拡張。ユーザー指摘: 「設定で
+/// Xブロックの配分量・AIRの配分量をいじれるようにしたい」)。スターは上限・
+/// 刻み幅が異なるため`adjust_star_rate_percent`を別に使う。
 fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
     if increase {
         current
@@ -1037,6 +1036,26 @@ fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
             .min(SPAWN_RATE_PERCENT_MAX)
     } else {
         current.saturating_sub(SPAWN_RATE_PERCENT_STEP).max(min)
+    }
+}
+
+/// スターブロックの出現率設定(%)を1ステップぶん増減する(TERM独自拡張。ユーザー
+/// 指摘: 「スター配分300%もっと増やしてよ大量に」)。他ブロックと共通の
+/// `adjust_rate_percent`とは上限・刻み幅が異なる専用の上限
+/// (`STAR_SPAWN_RATE_PERCENT_MAX`)・刻み幅(`STAR_SPAWN_RATE_PERCENT_STEP`)を使う。
+fn adjust_star_rate_percent(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(STAR_SPAWN_RATE_PERCENT_STEP)
+            .min(STAR_SPAWN_RATE_PERCENT_MAX)
+    } else {
+        // 現在STAR_SPAWN_RATE_PERCENT_MIN=0のためu32のsaturating_sub結果への
+        // .max()は無意味と判定されるが(clippy::unnecessary_min_or_max)、下限を
+        // 明示するための記述として意図的に残す(将来0以外に変える場合の安全策)。
+        #[allow(clippy::unnecessary_min_or_max)]
+        current
+            .saturating_sub(STAR_SPAWN_RATE_PERCENT_STEP)
+            .max(STAR_SPAWN_RATE_PERCENT_MIN)
     }
 }
 
@@ -1305,6 +1324,21 @@ mod tests {
         assert_eq!(
             adjust_rate_percent(u32::MAX, true, SPAWN_RATE_PERCENT_MIN),
             SPAWN_RATE_PERCENT_MAX
+        );
+    }
+
+    #[test]
+    fn adjust_star_rate_percent_can_reach_the_higher_star_specific_max() {
+        // ユーザー指摘: 「スター配分300%もっと増やしてよ大量に」。他ブロックと共通の
+        // SPAWN_RATE_PERCENT_MAX(300%)より大きい、スター専用の上限まで増やせるはず。
+        assert_eq!(
+            adjust_star_rate_percent(u32::MAX, true),
+            STAR_SPAWN_RATE_PERCENT_MAX,
+            "破損データでのオーバーフローpanicもせず上限へ飽和するはず"
+        );
+        assert_eq!(
+            adjust_star_rate_percent(0, false),
+            STAR_SPAWN_RATE_PERCENT_MIN
         );
     }
 

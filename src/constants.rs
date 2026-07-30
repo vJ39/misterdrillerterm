@@ -368,6 +368,19 @@ pub const SPAWN_RATE_PERCENT_STEP: u32 = 20;
 /// 比率0〜」。岩/AIRと異なり、完全に出現させない(0%)設定も許可する。
 pub const STAR_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 
+/// スターブロックの出現率設定の上限(%、TERM独自拡張)。ユーザー指摘: 「スター配分
+/// 300%もっと増やしてよ大量に」。他ブロックと共通の`SPAWN_RATE_PERCENT_MAX`(300%)
+/// では基礎確率`STAR_SPAWN_PROB`(0.015)が0.45%止まりで「大量」に見えないため、
+/// 専用の上限を設ける。値は`overlay_rock_oxygen_diamond_with_rates`側の
+/// マス単体確率の上限クランプ(0.9)にちょうど到達する値(0.9 / 0.015 = 60倍)に
+/// 合わせた。これ以上にしても最終確率は0.9で飽和するだけで見た目上の変化が
+/// 無いため、上限として意味を持つ最大値がこれになる。
+pub const STAR_SPAWN_RATE_PERCENT_MAX: u32 = 6000;
+/// スターブロックの出現率設定の調整刻み幅(%)。上限が大きいため、他の配分率と
+/// 共通の`SPAWN_RATE_PERCENT_STEP`(20)のままだと最大まで調整するのに300回近い
+/// 入力が必要になってしまう。TERM独自拡張。
+pub const STAR_SPAWN_RATE_PERCENT_STEP: u32 = 300;
+
 /// ダイヤブロックの出現率設定の下限(%、TERM独自拡張)。スターと同様、完全に
 /// 出現させない(0%)設定も許可する。ユーザー指摘: 「ダイヤブロック0%設定」。
 pub const DIAMOND_SPAWN_RATE_PERCENT_MIN: u32 = 0;
