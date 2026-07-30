@@ -476,6 +476,55 @@ fn overlay_rock_oxygen_diamond_with_rates(
     Cell::Color(base_color)
 }
 
+/// アイテムブロック3種だけの独立したルーレット抽選(TERM独自拡張。#210/#211)。
+/// `overlay_rock_oxygen_diamond_with_rates`内の岩/AIR/スター/ダイヤ抽選とは別の
+/// 用途で、既に他の内容(岩/AIR/スター/ダイヤ/色)が確定済みのセルに対して、後から
+/// アイテムへ変えるかどうかだけを独立に判定する(`Board::top_up_items`が使う)。
+/// 選ばれなかった場合は`None`を返し、呼び出し側は元のセル内容をそのまま残す。
+fn roll_item_effect_only(
+    rng: &mut ChaCha8Rng,
+    item_clear_above_rate_percent: u32,
+    item_unify_colors_rate_percent: u32,
+    item_starify_screen_rate_percent: u32,
+    item_caps: &mut ItemSpawnCaps,
+) -> Option<ItemEffect> {
+    let item_clear_above = if item_caps.clear_above_remaining > 0 {
+        crate::constants::ITEM_CLEAR_ABOVE_SPAWN_PROB * item_clear_above_rate_percent as f32 / 100.0
+    } else {
+        0.0
+    };
+    let item_unify_colors = if item_caps.unify_colors_remaining > 0 {
+        crate::constants::ITEM_UNIFY_COLORS_SPAWN_PROB * item_unify_colors_rate_percent as f32
+            / 100.0
+    } else {
+        0.0
+    };
+    let item_starify_screen = if item_caps.starify_screen_remaining > 0 {
+        crate::constants::ITEM_STARIFY_SCREEN_SPAWN_PROB * item_starify_screen_rate_percent as f32
+            / 100.0
+    } else {
+        0.0
+    };
+
+    let r: f32 = rng.random_range(0.0..1.0);
+    let mut threshold = item_clear_above;
+    if r < threshold {
+        item_caps.clear_above_remaining -= 1;
+        return Some(ItemEffect::ClearAbove);
+    }
+    threshold += item_unify_colors;
+    if r < threshold {
+        item_caps.unify_colors_remaining -= 1;
+        return Some(ItemEffect::UnifyColors);
+    }
+    threshold += item_starify_screen;
+    if r < threshold {
+        item_caps.starify_screen_remaining -= 1;
+        return Some(ItemEffect::StarifyScreen);
+    }
+    None
+}
+
 /// 行内の全マスが岩ブロックになっている場合、少なくとも1マスを色ブロックへ
 /// 差し替える(TERM独自拡張。ユーザー指摘: 「Xブロック配置のとき横一列全部埋まる
 /// 配置にはならないように」)。岩ブロックだけで完全にふさがった横一列は掘削しないと
@@ -563,6 +612,92 @@ impl Board {
             .flatten()
             .filter(|c| matches!(c, Cell::Item(e) if *e == effect))
             .count()
+    }
+
+    /// `from_row..to_row`(to_row自体は含まない)の範囲に存在する、指定した効果の
+    /// アイテムブロックの個数(TERM独自拡張。#210/#211)。`count_item`は盤面全体を
+    /// 対象にするのに対し、こちらは窓単位の上限判定(`top_up_items`)専用に範囲を
+    /// 限定する。
+    fn count_item_in_range(&self, effect: ItemEffect, from_row: usize, to_row: usize) -> usize {
+        self.rows[from_row..to_row.min(self.rows.len())]
+            .iter()
+            .flatten()
+            .filter(|c| matches!(c, Cell::Item(e) if *e == effect))
+            .count()
+    }
+
+    /// アイテムブロック3種を、プレイヤーより少し先の窓の範囲内で常に
+    /// `ITEM_MAX_COUNT_ON_BOARD`個になるよう補充する(TERM独自拡張。#210/#211)。
+    ///
+    /// `window_start_row`(通常はプレイヤーの現在行)から`frontier_row`(既に
+    /// アイテム抽選が済んでいる行の直後)までの既存個数を数え、上限に達していない
+    /// ぶんだけ`[frontier_row, target_row)`の新規territory(まだ抽選していない
+    /// 未掘削マス)へ追加で抽選する。`frontier_row`より前は二度と触らない
+    /// (岩/AIR/スター/ダイヤ/色の内容を保持したまま、アイテムに変える判定だけを
+    /// 後から独立して行う。既存のEmpty・Itemセルは対象外)。
+    ///
+    /// プレイヤーが深く進むにつれて`window_start_row`も進み、既存アイテムが
+    /// (回収済みかどうかを問わず)窓の外(プレイヤーより後方)へ落ちるぶん、次回
+    /// 呼び出し時の残数計算で自動的に補充余地が生まれる。呼び出し側
+    /// (`Game::top_up_items_ahead`)がプレイヤーの行が進むたびに呼ぶことで、
+    /// 「盤面全体で生涯10個」ではなく「常に前方に最大10個」の見え方になる。
+    pub fn top_up_items(
+        &mut self,
+        window_start_row: usize,
+        frontier_row: usize,
+        target_row: usize,
+        item_clear_above_rate_percent: u32,
+        item_unify_colors_rate_percent: u32,
+        item_starify_screen_rate_percent: u32,
+    ) {
+        if target_row <= frontier_row {
+            return;
+        }
+        use rand::RngExt;
+        let seed: u64 = rand::rng().random();
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+        // window_start_row(プレイヤーの現在行)がfrontier_rowより先に進んでいる
+        // ことがある(例: テストがplayer.rowを直接大きく書き換えた、あるいは
+        // 補充がまだ一度も走っていない場合)。その場合「既に確定済みの窓内」は
+        // 実質空なので、カウント対象の開始行はfrontier_rowを超えないようにする。
+        let count_start_row = window_start_row.min(frontier_row);
+        let max = crate::constants::ITEM_MAX_COUNT_ON_BOARD;
+        let mut caps = ItemSpawnCaps {
+            clear_above_remaining: max.saturating_sub(self.count_item_in_range(
+                ItemEffect::ClearAbove,
+                count_start_row,
+                frontier_row,
+            )),
+            unify_colors_remaining: max.saturating_sub(self.count_item_in_range(
+                ItemEffect::UnifyColors,
+                count_start_row,
+                frontier_row,
+            )),
+            starify_screen_remaining: max.saturating_sub(self.count_item_in_range(
+                ItemEffect::StarifyScreen,
+                count_start_row,
+                frontier_row,
+            )),
+        };
+
+        for row in frontier_row..target_row.min(self.rows.len()) {
+            for col in 0..self.width {
+                let current = self.rows[row][col];
+                if current == Cell::Empty || matches!(current, Cell::Item(_)) {
+                    continue;
+                }
+                if let Some(effect) = roll_item_effect_only(
+                    &mut rng,
+                    item_clear_above_rate_percent,
+                    item_unify_colors_rate_percent,
+                    item_starify_screen_rate_percent,
+                    &mut caps,
+                ) {
+                    self.rows[row][col] = Cell::Item(effect);
+                }
+            }
+        }
     }
 
     /// `from_row`以降の未掘削マス(`Cell::Empty`以外の全セル)について、色・岩(X)・

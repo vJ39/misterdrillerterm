@@ -414,6 +414,18 @@ pub struct Game {
     bomb_spawn_check_accum_ms: u64,
     /// ボム出現頻度設定(%、100=既定、TERM独自拡張。#96)。設定画面から調整できる。
     bomb_spawn_rate_percent: u32,
+    /// アイテムブロック3種の出現率設定(%、100=既定、TERM独自拡張。#210/#211)。
+    /// `reroll_spawn_rates_from`で最新の設定値に更新され、`top_up_items_ahead`が
+    /// tickごとの窓補充で参照する。
+    item_clear_above_rate_percent: u32,
+    item_unify_colors_rate_percent: u32,
+    item_starify_screen_rate_percent: u32,
+    /// アイテムブロック3種について、この行より前は既に抽選済み(補充対象外)
+    /// (TERM独自拡張。#210/#211)。プレイヤーが進むたびに`target_row`
+    /// (`player.row + ITEM_WINDOW_AHEAD_ROWS`)まで前進させ、新たに範囲に入った
+    /// 行だけを抽選する。一度抽選した行の内容は(アイテムになった/ならなかったに
+    /// 関わらず)二度と変えない。
+    item_top_up_frontier_row: usize,
     /// ボム出現位置・確率判定専用の乱数生成器(TERM独自拡張。#96)。ゲームのシードから
     /// 派生させるため、同じシードなら同じ出現パターンが再現できる(既存の盤面生成と
     /// 同じ決定性の考え方)。
@@ -499,6 +511,12 @@ impl Game {
             bombs: Vec::new(),
             bomb_spawn_check_accum_ms: 0,
             bomb_spawn_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+            item_clear_above_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+            item_unify_colors_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+            item_starify_screen_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+            // 実際の設定値は直後に必ず呼ばれるreroll_spawn_rates_fromが反映するため、
+            // ここでは未抽選(0)のまま初期化する(TERM独自拡張。#210/#211)。
+            item_top_up_frontier_row: 0,
             // ボード生成(`Board::generate`)とは別系統の乱数列にするため、シードを
             // ビット反転して使う(TERM独自拡張。#96)。同じゲームシードなら同じボム
             // 出現パターンが再現される。
@@ -987,6 +1005,10 @@ impl Game {
             self.status = GameStatus::Cleared;
             events.push(GameEvent::Cleared);
         }
+
+        // アイテムブロック3種の窓補充(TERM独自拡張。#210/#211)。行が進むたびに
+        // 窓(プレイヤーの現在行+ITEM_WINDOW_AHEAD_ROWS)を前進させる。
+        self.top_up_items_ahead();
     }
 
     /// メインループから毎フレーム呼ぶ。deltaぶんの時間経過(酸素減少・落下tick)を反映する。
@@ -1822,7 +1844,13 @@ impl Game {
     ///
     /// `item_*_rate_percent`(%、100=通常のまま)はアイテムブロック3種(#98/#101/#107)の
     /// 出現率をそれぞれ個別に調整する(TERM独自拡張。ユーザー指摘: 「各種アイテムの
-    /// 出現頻度の設定項目増やして」)。
+    /// 出現頻度の設定項目増やして」)。アイテムは盤面全体への一括反映ではなく、
+    /// プレイヤーより少し先の窓単位で常に上限個数になるよう補充する方式
+    /// (`top_up_items_ahead`)で個別に扱う(TERM独自拡張。#210/#211。事故: 配分率を
+    /// 300%にすると深度40〜50m台で盤面全体の生涯上限を使い切り、残り900m以上
+    /// まったく出現しなくなった)。ここでは最新の設定値を保持するだけで、実際の
+    /// 抽選は`top_up_items_ahead`(この呼び出しの最後、および`check_level_and_clear`)
+    /// が行う。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_spawn_rates_from(
         &mut self,
@@ -1837,19 +1865,48 @@ impl Game {
         color_count: u8,
         color_cluster_rate_percent: u32,
     ) {
+        self.item_clear_above_rate_percent = item_clear_above_rate_percent;
+        self.item_unify_colors_rate_percent = item_unify_colors_rate_percent;
+        self.item_starify_screen_rate_percent = item_starify_screen_rate_percent;
         self.board.reroll_overlays_from_row(
             from_row,
             rock_rate_percent,
             air_rate_percent,
             star_rate_percent,
             diamond_rate_percent,
-            item_clear_above_rate_percent,
-            item_unify_colors_rate_percent,
-            item_starify_screen_rate_percent,
+            0,
+            0,
+            0,
             color_count,
             color_cluster_rate_percent,
             &self.gravity_state,
         );
+        self.top_up_items_ahead();
+    }
+
+    /// アイテムブロック3種を、プレイヤーの現在行から`ITEM_WINDOW_AHEAD_ROWS`ぶん
+    /// 先までの窓の範囲内で常に`ITEM_MAX_COUNT_ON_BOARD`個になるよう補充する
+    /// (TERM独自拡張。#210/#211)。`item_top_up_frontier_row`(既に抽選済みの行の
+    /// 直後)より先に新しく窓へ入った行だけを対象にするため、既に抽選済みの行の
+    /// 内容は変えない。プレイヤーが進むにつれて窓の下限(プレイヤーの現在行)も
+    /// 進み、既存アイテムが窓の外(プレイヤーより後方)へ落ちたぶんだけ次回の
+    /// 呼び出しで補充余地が生まれる。`reroll_spawn_rates_from`(設定変更時)と
+    /// `check_level_and_clear`(行が進むたび)の両方から呼ぶ。
+    fn top_up_items_ahead(&mut self) {
+        let target_row = (self.player.row + crate::constants::ITEM_WINDOW_AHEAD_ROWS)
+            .min(self.board.depth_rows());
+        if target_row <= self.item_top_up_frontier_row {
+            return;
+        }
+        self.board.top_up_items(
+            self.player.row,
+            self.item_top_up_frontier_row,
+            target_row,
+            self.item_clear_above_rate_percent,
+            self.item_unify_colors_rate_percent,
+            self.item_starify_screen_rate_percent,
+        );
+        self.item_top_up_frontier_row = target_row;
     }
 
     /// デバッグ: 揺れ時間(ブロックが支えを失ってから実際に落下し始めるまでの時間)を
@@ -2623,6 +2680,48 @@ mod tests {
         assert!(
             matches!(game.board.cell(998, 0), Cell::Diamond),
             "ダイヤはアイテムのすぐ上に着地するはず"
+        );
+    }
+
+    #[test]
+    fn item_top_up_keeps_placing_new_items_far_ahead_as_the_player_advances() {
+        // 事故の再現・再発防止(#210/#211): 「盤面全体で生涯10個」という旧仕様
+        // (#113)だと、配分率300%では深度40〜50m台で上限を使い切り、残り900m以上
+        // まったく出現しなくなっていた。窓単位の補充に変更した後は、プレイヤーが
+        // 深く進んでも常に前方の窓にアイテムが供給され続けるはず。
+        let mut game = Game::new(1);
+        game.reroll_spawn_rates_from(2, 100, 100, 100, 100, 300, 300, 300, 4, 100);
+
+        let count_in_range = |game: &Game, effect: ItemEffect, from: usize, to: usize| {
+            game.board.rows[from..to]
+                .iter()
+                .flatten()
+                .filter(|c| matches!(c, Cell::Item(e) if *e == effect))
+                .count()
+        };
+
+        assert!(
+            count_in_range(&game, ItemEffect::UnifyColors, 0, 100) > 0,
+            "ゲーム開始直後の窓にはCアイテムが存在するはず"
+        );
+
+        // プレイヤーを深度500mまで1行ずつ進め、その都度check_level_and_clearを呼ぶ
+        // (通常プレイと同じ呼び出しパターン)。窓は毎回わずかに前進するだけなので、
+        // 一度に500行ぶんをまとめて抽選する(その回だけ上限に達して終わる)のとは
+        // 違う結果になる。
+        for row in 1..=500 {
+            game.player.row = row;
+            game.check_level_and_clear(&mut Vec::new());
+        }
+
+        assert!(
+            count_in_range(&game, ItemEffect::UnifyColors, 500, 600) > 0,
+            "深度500m地点でも前方の窓にCアイテムが補充されているはず(旧仕様では\
+             盤面全体の上限を序盤で使い切り、ここは0個になっていた)"
+        );
+        assert!(
+            count_in_range(&game, ItemEffect::StarifyScreen, 500, 600) > 0,
+            "深度500m地点でも前方の窓にKアイテムが補充されているはず"
         );
     }
 
