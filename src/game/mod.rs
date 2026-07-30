@@ -26,12 +26,12 @@ use crate::constants::{
     DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
     DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
     DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
-    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT,
-    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
-    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
-    MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, PLAYER_SCREEN_ROWS_ABOVE,
-    SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS, depth_fraction,
+    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_MAX,
+    FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS,
+    LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT,
+    MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER,
+    OXYGEN_WARNING_THRESHOLD, PLAYER_SCREEN_ROWS_ABOVE, SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS,
+    depth_fraction,
 };
 use board::{
     BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
@@ -41,6 +41,11 @@ use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
 use player::{Direction, Player};
 
 use crate::debug_log::DebugLog;
+
+// `Game::new`/`new_with_lives`(テスト専用)のみが参照するため、通常ビルドでは
+// unused import警告になる。
+#[cfg(test)]
+use crate::constants::FIELD_WIDTH_DEFAULT;
 
 /// 深度(m)から、直近で到達済みのチェックポイント区切り番号を計算する(TERM独自
 /// 拡張。#178/#190)。地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点
@@ -417,12 +422,16 @@ pub struct Game {
 
 impl Game {
     /// 指定シードで、既定ライフ数・既定フィールド幅の新しいゲームを開始する。
+    /// 実行時は常に`new_with_width`(設定のフィールド幅を反映)経由で生成される
+    /// ため、これはテストの簡便用ヘルパー。
+    #[cfg(test)]
     pub fn new(seed: u64) -> Self {
         Self::new_with_lives(seed, LIVES_DEFAULT)
     }
 
     /// 指定シード・ライフ数で、既定フィールド幅の新しいゲームを開始する
-    /// (spec.md 8章「1〜5機から選べる」)。
+    /// (spec.md 8章「1〜5機から選べる」)。テスト専用ヘルパー(上記`new`と同じ理由)。
+    #[cfg(test)]
     pub fn new_with_lives(seed: u64, lives: u8) -> Self {
         Self::new_with_lives_and_width(seed, lives, FIELD_WIDTH_DEFAULT)
     }
