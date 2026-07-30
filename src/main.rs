@@ -118,9 +118,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 通常プレイはOS乱数から生成したシードを使う(spec.md 3章)。
     let mut rng = rand::rng();
 
-    // アプリの画面状態(spec.md 1章末尾「Qキーはタイトルへ戻る」)。タイトル画面自体で
-    // Qが押された場合のみアプリを終了する。ゲームプレイ中・ポーズ中・ゲームオーバー・
-    // クリア画面でのQは、Gameを作り直してタイトルへ戻す(酸素・スコア・深度等が
+    // アプリの画面状態(spec.md 1章末尾「Escキーはタイトルへ戻る」)。タイトル画面自体で
+    // Escが押された場合のみアプリを終了する。ゲームプレイ中・ポーズ中・ゲームオーバー・
+    // クリア画面でのEscは、Gameを作り直してタイトルへ戻す(酸素・スコア・深度等が
     // 全てリセットされる)。
     let mut screen = Screen::Title;
     let mut last_tick = Instant::now();
@@ -829,7 +829,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             };
             terminal.draw(|frame| ui::render::draw_help(frame, Some(&jukebox_state), true))?;
 
-            // ヘルプ画面はQキーでタイトルへ戻る(TERM独自拡張。ユーザー指摘:
+            // ヘルプ画面はEscキーでタイトルへ戻る(TERM独自拡張。ユーザー指摘:
             // 「ショートカットのヘルプページも必要」)。↑/↓で曲を選び、X/Zで
             // 再生・停止するジュークボックス操作を追加した(#151)。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {

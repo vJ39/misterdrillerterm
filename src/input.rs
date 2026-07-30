@@ -28,7 +28,8 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // 引き続き有効(併用)。
         KeyCode::Char(' ') => InputAction::TogglePause,
         KeyCode::Char('p') | KeyCode::Char('P') => InputAction::TogglePause,
-        KeyCode::Char('q') | KeyCode::Char('Q') => InputAction::Quit,
+        // 終了/タイトルへ戻る(TERM独自拡張。ユーザー指摘: 「すべてのQキーをESCに変更」)。
+        KeyCode::Esc => InputAction::Quit,
         // GameOverダイアログの選択確定・タイトル画面からの開始はEnterキーのみで行う
         // (TERM独自拡張。ユーザー指摘: 「メニューから進むのEnter」「他のボタンで
         // 進んではいけない」)。
@@ -86,10 +87,11 @@ pub fn poll_input_batch(poll_ms: u64) -> std::io::Result<Vec<InputAction>> {
     Ok(actions)
 }
 
-/// タイトル画面用。Q/S/HキーはそれぞれQuit/OpenSettings/OpenHelpとして区別し、
+/// タイトル画面用。Esc/S/HキーはそれぞれQuit/OpenSettings/OpenHelpとして区別し、
 /// 「進む」(`Advance`)はEnterキーのみで発動する(TERM独自拡張。ユーザー指摘:
-/// 「メニューから進むのEnter」「他のボタンで進んではいけない」。以前はQ/S/H以外の
-/// 任意のキーで進めたが、誤操作防止のためEnter専用にした)。それ以外のキーは
+/// 「メニューから進むのEnter」「他のボタンで進んではいけない」。以前はEsc/S/H以外の
+/// 任意のキーで進めたが、誤操作防止のためEnter専用にした。終了キーは元Qだったが
+/// 「すべてのQキーをESCに変更」の指摘でEscへ変更)。それ以外のキーは
 /// `None`(無視)を返す。
 pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
     if !event::poll(Duration::from_millis(poll_ms))? {
@@ -105,7 +107,7 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
     }
 
     Ok(Some(match key.code {
-        KeyCode::Char('q') | KeyCode::Char('Q') => AnyKeyAction::Quit,
+        KeyCode::Esc => AnyKeyAction::Quit,
         KeyCode::Char('s') | KeyCode::Char('S') => AnyKeyAction::OpenSettings,
         KeyCode::Char('h') | KeyCode::Char('H') => AnyKeyAction::OpenHelp,
         KeyCode::Enter => AnyKeyAction::Advance,
@@ -118,7 +120,7 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
 pub enum AnyKeyAction {
     /// Enterキー。「進む」トリガーとして扱う。
     Advance,
-    /// Qキー。呼び出し側でアプリ/スプラッシュの終了として扱う。
+    /// Escキー。呼び出し側でアプリ/スプラッシュの終了として扱う。
     Quit,
     /// Sキー。タイトル画面での設定画面オープンとして扱う(TERM独自拡張。
     /// ユーザー指摘: 「設定画面つくって、カーソルで選んでスペースでトグル」)。

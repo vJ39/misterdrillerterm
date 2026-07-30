@@ -217,7 +217,7 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
             plan.game_frame,
             "PAUSED",
             &[
-                "何かキーを押すと再開 / Qキーでタイトルへ",
+                "何かキーを押すと再開 / Escキーでタイトルへ",
                 &format!(
                     "Mキーで音楽{} / Eキーで効果音{}",
                     on_off_label(music_enabled),
@@ -233,7 +233,7 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
         }
         GameStatus::GameOver => {}
         GameStatus::Cleared => {
-            draw_overlay(frame, plan.game_frame, "CLEAR !", &["Qキーでタイトルへ"])
+            draw_overlay(frame, plan.game_frame, "CLEAR !", &["Escキーでタイトルへ"])
         }
         GameStatus::Playing => {}
     }
@@ -245,7 +245,7 @@ fn on_off_label(enabled: bool) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// タイトル画面(spec.md 1章「Qキーはタイトルへ戻る」の受け皿)
+// タイトル画面(spec.md 1章「Escキーはタイトルへ戻る」の受け皿)
 // ---------------------------------------------------------------------------
 
 /// タイトル画面のアートは端末サイズいっぱいに表示する(TERM独自拡張。#148。
@@ -334,7 +334,7 @@ fn build_title_logo_lines() -> [Line<'static>; 3] {
 }
 
 /// タイトル画面を描画する(起動時スプラッシュ画像+ゲーム名+スタート案内を
-/// 1画面にまとめる)。このタイトル画面上でのみ、Qキーがアプリ終了として扱われる
+/// 1画面にまとめる)。このタイトル画面上でのみ、Escキーがアプリ終了として扱われる
 /// (main.rsの画面遷移)。
 pub fn draw_title(frame: &mut Frame) {
     let area = frame.area();
@@ -365,7 +365,7 @@ pub fn draw_title(frame: &mut Frame) {
         Line::from(Span::styled("ミスドリTERM", text_style)),
         Line::from(""),
         Line::from(Span::styled("Enterキーを押してスタート", text_style)),
-        Line::from(Span::styled("(Qキーで終了)", text_style)),
+        Line::from(Span::styled("(Escキーで終了)", text_style)),
         Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
     ]);
     let text_rows = text_lines.len() as u16;
@@ -395,10 +395,11 @@ pub struct HelpJukeboxState {
 /// `Some`の時のみ、埋め込みBGMを選んで試聴できるジュークボックス欄を表示する
 /// (TERM独自拡張。#151)。一時停止中のヘルプオーバーレイでは実際のプレイ中BGMと
 /// 混ざってしまうため対象外にし、タイトルから開く独立画面のみで有効にする。
-/// `standalone`はタイトルから開いた独立画面(true、Qでタイトルへ戻る)か、プレイ中の
-/// 一時停止オーバーレイ(false、Qはオーバーレイを閉じてプレイ再開するだけ)かを表す
+/// `standalone`はタイトルから開いた独立画面(true、Escでタイトルへ戻る)か、プレイ中の
+/// 一時停止オーバーレイ(false、Escはオーバーレイを閉じてプレイ再開するだけ)かを表す
 /// (TERM独自拡張。#155。以前は文脈を問わず「Qキーでタイトルへ戻る」と表示しており、
-/// 一時停止オーバーレイ表示中は実際の挙動と食い違っていた)。
+/// 一時停止オーバーレイ表示中は実際の挙動と食い違っていた。終了キー自体は元Qだったが
+/// 「すべてのQキーをESCに変更」の指摘でEscへ変更した(#204))。
 pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalone: bool) {
     let area = frame.area();
 
@@ -438,7 +439,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         heading("== 操作 =="),
         line("←/→: 移動(掘削なし)        ↑/↓: 向きを変える(移動なし)"),
         line("X/Z: 掘削(向いている方向)   Space/P: 一時停止"),
-        line("Q: タイトルへ戻る/終了"),
+        line("Esc: タイトルへ戻る/終了"),
         line("S: 設定画面   H: このヘルプ (プレイ中に押すと自動で一時停止する)"),
         line(""),
         heading("== 一時停止中のみ =="),
@@ -476,9 +477,9 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
 
     lines.push(Line::from(""));
     lines.push(line(if standalone {
-        "Qキーでタイトルへ戻る"
+        "Escキーでタイトルへ戻る"
     } else {
-        "Qキーで閉じてプレイに戻る"
+        "Escキーで閉じてプレイに戻る"
     }));
 
     let paragraph = Paragraph::new(lines)
@@ -608,9 +609,9 @@ impl SettingsChoice {
 
 /// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤ・アイテム3種の
 /// 出現率(%)、色ブロックの色数、現在選択中の項目をカーソル(反転表示)で示す。
-/// `standalone`はタイトルから開いた独立画面(true、Qでタイトルへ戻る)か、プレイ中の
-/// 一時停止オーバーレイ(false、Qはオーバーレイを閉じてプレイ再開するだけ)かを表す
-/// (TERM独自拡張。#155)。
+/// `standalone`はタイトルから開いた独立画面(true、Escでタイトルへ戻る)か、プレイ中の
+/// 一時停止オーバーレイ(false、Escはオーバーレイを閉じてプレイ再開するだけ)かを表す
+/// (TERM独自拡張。#155。終了キーは元Qだったが#204でEscへ変更した)。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_settings(
     frame: &mut Frame,
@@ -810,9 +811,9 @@ pub fn draw_settings(
         )),
         Line::from(Span::styled(
             if standalone {
-                "配分・色数は←→で調整 / Qでタイトルへ"
+                "配分・色数は←→で調整 / Escでタイトルへ"
             } else {
-                "配分・色数は←→で調整 / Qで閉じる"
+                "配分・色数は←→で調整 / Escで閉じる"
             },
             text_style,
         )),
