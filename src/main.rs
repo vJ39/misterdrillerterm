@@ -391,68 +391,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
-                        match settings_selection {
-                            ui::render::SettingsChoice::RockRate => {
-                                settings.rock_spawn_rate_percent = adjust_rate_percent(
-                                    settings.rock_spawn_rate_percent,
-                                    increase,
-                                    SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::AirRate => {
-                                settings.air_spawn_rate_percent = adjust_rate_percent(
-                                    settings.air_spawn_rate_percent,
-                                    increase,
-                                    SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::StarRate => {
-                                settings.star_spawn_rate_percent = adjust_star_rate_percent(
-                                    settings.star_spawn_rate_percent,
-                                    increase,
-                                );
-                            }
-                            ui::render::SettingsChoice::DiamondRate => {
-                                settings.diamond_spawn_rate_percent = adjust_rate_percent(
-                                    settings.diamond_spawn_rate_percent,
-                                    increase,
-                                    DIAMOND_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ItemClearAboveRate => {
-                                settings.item_clear_above_rate_percent = adjust_rate_percent(
-                                    settings.item_clear_above_rate_percent,
-                                    increase,
-                                    ITEM_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ItemUnifyColorsRate => {
-                                settings.item_unify_colors_rate_percent = adjust_rate_percent(
-                                    settings.item_unify_colors_rate_percent,
-                                    increase,
-                                    ITEM_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ItemStarifyScreenRate => {
-                                settings.item_starify_screen_rate_percent = adjust_rate_percent(
-                                    settings.item_starify_screen_rate_percent,
-                                    increase,
-                                    ITEM_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ColorCount => {
-                                settings.color_count =
-                                    adjust_color_count(settings.color_count, increase);
-                            }
-                            ui::render::SettingsChoice::ColorClusterRate => {
-                                settings.color_cluster_rate_percent = adjust_rate_percent(
-                                    settings.color_cluster_rate_percent,
-                                    increase,
-                                    COLOR_CLUSTER_RATE_PERCENT_MIN,
-                                );
-                            }
-                            _ => {}
-                        }
+                        adjust_spawn_rate_setting(&mut settings, settings_selection, increase);
                         settings.save();
                         let from_row = game.player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS;
                         game.reroll_spawn_rates_from(
@@ -716,66 +655,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
+                        if adjust_spawn_rate_setting(&mut settings, settings_selection, increase) {
+                            settings.save();
+                            continue;
+                        }
                         match settings_selection {
-                            ui::render::SettingsChoice::RockRate => {
-                                settings.rock_spawn_rate_percent = adjust_rate_percent(
-                                    settings.rock_spawn_rate_percent,
-                                    increase,
-                                    SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::AirRate => {
-                                settings.air_spawn_rate_percent = adjust_rate_percent(
-                                    settings.air_spawn_rate_percent,
-                                    increase,
-                                    SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::StarRate => {
-                                settings.star_spawn_rate_percent = adjust_star_rate_percent(
-                                    settings.star_spawn_rate_percent,
-                                    increase,
-                                );
-                            }
-                            ui::render::SettingsChoice::DiamondRate => {
-                                settings.diamond_spawn_rate_percent = adjust_rate_percent(
-                                    settings.diamond_spawn_rate_percent,
-                                    increase,
-                                    DIAMOND_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ItemClearAboveRate => {
-                                settings.item_clear_above_rate_percent = adjust_rate_percent(
-                                    settings.item_clear_above_rate_percent,
-                                    increase,
-                                    ITEM_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ItemUnifyColorsRate => {
-                                settings.item_unify_colors_rate_percent = adjust_rate_percent(
-                                    settings.item_unify_colors_rate_percent,
-                                    increase,
-                                    ITEM_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ItemStarifyScreenRate => {
-                                settings.item_starify_screen_rate_percent = adjust_rate_percent(
-                                    settings.item_starify_screen_rate_percent,
-                                    increase,
-                                    ITEM_SPAWN_RATE_PERCENT_MIN,
-                                );
-                            }
-                            ui::render::SettingsChoice::ColorCount => {
-                                settings.color_count =
-                                    adjust_color_count(settings.color_count, increase);
-                            }
-                            ui::render::SettingsChoice::ColorClusterRate => {
-                                settings.color_cluster_rate_percent = adjust_rate_percent(
-                                    settings.color_cluster_rate_percent,
-                                    increase,
-                                    COLOR_CLUSTER_RATE_PERCENT_MIN,
-                                );
-                            }
                             ui::render::SettingsChoice::FieldWidth => {
                                 settings.field_width =
                                     adjust_field_width(settings.field_width, increase);
@@ -1057,6 +941,80 @@ fn adjust_star_rate_percent(current: u32, increase: bool) -> u32 {
             .saturating_sub(STAR_SPAWN_RATE_PERCENT_STEP)
             .max(STAR_SPAWN_RATE_PERCENT_MIN)
     }
+}
+
+/// 配分率・色数系の設定項目(岩/AIR/スター/ダイヤ/アイテム3種/色数/色結合率)を
+/// 1ステップぶん調整する(TERM独自拡張。#91、コード重複解消)。タイトルの単独
+/// Settings画面とプレイ中の一時停止オーバーレイの両方で全く同じ調整ロジックが
+/// 必要なため共通化した。`choice`が対象の項目でなければ何もせず`false`を返す
+/// (呼び出し側はそれぞれ固有の項目、例: FieldWidthやBombRate等をこの後で
+/// 個別に処理する)。盤面への反映(`Game::reroll_spawn_rates_from`)・
+/// `Settings::save`は呼び出し側の責務のまま、ここでは行わない。
+fn adjust_spawn_rate_setting(
+    settings: &mut Settings,
+    choice: ui::render::SettingsChoice,
+    increase: bool,
+) -> bool {
+    match choice {
+        ui::render::SettingsChoice::RockRate => {
+            settings.rock_spawn_rate_percent = adjust_rate_percent(
+                settings.rock_spawn_rate_percent,
+                increase,
+                SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::SettingsChoice::AirRate => {
+            settings.air_spawn_rate_percent = adjust_rate_percent(
+                settings.air_spawn_rate_percent,
+                increase,
+                SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::SettingsChoice::StarRate => {
+            settings.star_spawn_rate_percent =
+                adjust_star_rate_percent(settings.star_spawn_rate_percent, increase);
+        }
+        ui::render::SettingsChoice::DiamondRate => {
+            settings.diamond_spawn_rate_percent = adjust_rate_percent(
+                settings.diamond_spawn_rate_percent,
+                increase,
+                DIAMOND_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::SettingsChoice::ItemClearAboveRate => {
+            settings.item_clear_above_rate_percent = adjust_rate_percent(
+                settings.item_clear_above_rate_percent,
+                increase,
+                ITEM_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::SettingsChoice::ItemUnifyColorsRate => {
+            settings.item_unify_colors_rate_percent = adjust_rate_percent(
+                settings.item_unify_colors_rate_percent,
+                increase,
+                ITEM_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::SettingsChoice::ItemStarifyScreenRate => {
+            settings.item_starify_screen_rate_percent = adjust_rate_percent(
+                settings.item_starify_screen_rate_percent,
+                increase,
+                ITEM_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::SettingsChoice::ColorCount => {
+            settings.color_count = adjust_color_count(settings.color_count, increase);
+        }
+        ui::render::SettingsChoice::ColorClusterRate => {
+            settings.color_cluster_rate_percent = adjust_rate_percent(
+                settings.color_cluster_rate_percent,
+                increase,
+                COLOR_CLUSTER_RATE_PERCENT_MIN,
+            );
+        }
+        _ => return false,
+    }
+    true
 }
 
 /// 出現する色ブロックの色数(`COLOR_COUNT_MIN`〜`COLOR_COUNT_MAX`)を1ずつ増減する
