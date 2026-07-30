@@ -1231,7 +1231,7 @@ fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
 const BOMB_BODY_FLASH_PERIOD_MS: u32 = 100;
 
 /// 画面外のボム警告(縦列の赤ピカピカ)の点滅周期(ms、TERM独自拡張。#175)。
-const OFF_SCREEN_BOMB_WARNING_BLINK_MS: u32 = 400;
+const OFF_SCREEN_BOMB_WARNING_BLINK_MS: u32 = 50;
 
 fn bomb_body_color(remaining_ms: u32) -> Color {
     if remaining_ms > BOMB_DANGER_MS {
