@@ -309,6 +309,15 @@ fn fix_isolated_cells(base: &mut [Vec<Option<ColorKind>>]) {
 }
 
 /// 岩・酸素・ダイヤの上書き配置(spec.md 3.5)。マスごとに独立抽選する。
+///
+/// アイテムブロック3種は常に配分率0(生成しない)で呼ぶ(事故: 「C/R/K
+/// 0%なのにアイテムが出てくる」)。`reroll_overlays_from_row`は既に確定した
+/// アイテムブロックを上書きしない(#109、既存アイテムを保護する仕様)ため、この
+/// 初期生成の時点で既定率(100%)のままアイテムを置いてしまうと、新規ゲーム開始
+/// 直後に必ず1回かかる本番の設定値reroll(main.rs)が0%を指定しても、既に置かれた
+/// アイテムは保護対象として残り続けてしまう。新規ゲーム開始時は必ずこの直後に
+/// 実際の設定値でreroll_spawn_rates_fromが呼ばれるため、ここでアイテムを一切
+/// 置かなくても実害はない。
 fn overlay_rock_oxygen_diamond(
     rng: &mut ChaCha8Rng,
     base_color: ColorKind,
@@ -323,9 +332,9 @@ fn overlay_rock_oxygen_diamond(
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
         crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
-        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
-        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
-        crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+        0,
+        0,
+        0,
         0.0,
         true, // 初期生成の候補は常に「まだ色ブロック」なのでスター抽選の対象
         item_caps,
@@ -1785,8 +1794,12 @@ mod tests {
     }
 
     #[test]
-    fn board_generate_never_exceeds_the_per_item_type_cap() {
-        // 新規生成(`Board::generate`)でも同じ上限が効くことを確認する。
+    fn board_generate_never_places_any_item_blocks() {
+        // 事故: 「C/R/K配分0%なのにアイテムが出てくる」。reroll_overlays_from_rowは
+        // 既に確定したアイテムブロックを上書きしない(#109)ため、Board::generateの
+        // 時点でアイテムを置いてしまうと、新規ゲーム開始直後の設定値reroll(0%指定)
+        // でも除去できず残ってしまう。Board::generateはアイテムを一切置かないのが
+        // 正しい仕様(実際の配分率は必ず直後のrerollで反映される)。
         let board = Board::generate(1, 5000, FIELD_WIDTH);
 
         for effect in [
@@ -1795,10 +1808,39 @@ mod tests {
             ItemEffect::StarifyScreen,
         ] {
             let count = board.count_item(effect);
-            assert!(
-                count <= crate::constants::ITEM_MAX_COUNT_ON_BOARD,
-                "{effect:?}は上限{}個を超えてはいけないはず(実際={count})",
-                crate::constants::ITEM_MAX_COUNT_ON_BOARD
+            assert_eq!(count, 0, "{effect:?}はBoard::generateの時点で0個のはず");
+        }
+    }
+
+    #[test]
+    fn item_rate_zero_at_new_game_start_removes_items_generated_by_board_generate() {
+        // 事故の再現テスト: Board::generate直後に、新規ゲーム開始時と同じ
+        // reroll_overlays_from_row(from_row=2, item rate=0,0,0, ...)を適用しても
+        // アイテムブロックが残らないことを確認する。
+        let mut board = Board::generate(1, 2000, FIELD_WIDTH);
+        board.reroll_overlays_from_row(
+            2,
+            100,
+            100,
+            100,
+            100,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
+
+        for effect in [
+            ItemEffect::ClearAbove,
+            ItemEffect::UnifyColors,
+            ItemEffect::StarifyScreen,
+        ] {
+            let count = board.count_item(effect);
+            assert_eq!(
+                count, 0,
+                "{effect:?}は配分0%でのreroll後は0個のはず(実際={count})"
             );
         }
     }
