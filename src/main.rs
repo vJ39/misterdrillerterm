@@ -701,6 +701,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::AirRate
                                 | ui::render::SettingsChoice::StarRate
                                 | ui::render::SettingsChoice::DiamondRate
+                                | ui::render::SettingsChoice::ItemClearAboveRate
+                                | ui::render::SettingsChoice::ItemUnifyColorsRate
+                                | ui::render::SettingsChoice::ItemStarifyScreenRate
                                 | ui::render::SettingsChoice::ColorCount
                                 | ui::render::SettingsChoice::ColorClusterRate
                                 | ui::render::SettingsChoice::FieldWidth
