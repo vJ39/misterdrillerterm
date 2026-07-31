@@ -12,8 +12,19 @@ pub const FIELD_WIDTH_MIN: usize = 6;
 pub const FIELD_WIDTH_MAX: usize = 20;
 pub const FIELD_WIDTH_STEP: usize = 1;
 
-/// フィールド深さ(行数、m)。現在の実装対象はノーマルコース(1000m)。
+/// フィールド深さ(行数、m)。ノーマルコースのゴール深度であり、難易度カーブ
+/// (`depth_fraction`)の正規化基準でもある。選択したコースに関わらずこの値を
+/// 基準に難易度が上がるため、イージーコースは前半のカーブしか体験しない。
 pub const FIELD_DEPTH_M: usize = 1000;
+
+/// ノーマルコースのゴール深度(m、`FIELD_DEPTH_M`の別名。spec.md 1章・13章の
+/// 確定事実「コースは2種類: 500m(イージー)と1000m(ノーマル)」に対応)。
+pub const COURSE_NORMAL_DEPTH_M: usize = FIELD_DEPTH_M;
+
+/// イージーコースのゴール深度(m、TERM独自拡張。#112。ユーザー指摘: 「起動
+/// フローにモードセレクト画面を追加」)。spec.md 1章の確定事実に対応する
+/// 選択可能な値。
+pub const COURSE_EASY_DEPTH_M: usize = 500;
 
 /// レベル区切り(spec.md 7章。確定事実「100フィートごとに1レベル」を30mに丸めた値)
 pub const LEVEL_STEP_M: usize = 30;

@@ -490,6 +490,112 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
 }
 
 // ---------------------------------------------------------------------------
+// モードセレクト画面(TERM独自拡張。#112。ユーザー指摘: 「起動フローに
+// モードセレクト画面を追加」)。タイトルでEnterを押した直後に経由し、ここで
+// 選んだコースのゴール深度で新しいゲームが始まる。
+// ---------------------------------------------------------------------------
+
+/// モードセレクト画面での選択(spec.md 1章の確定事実「コースは2種類: 500m
+/// (イージー)と1000m(ノーマル)」に対応)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CourseChoice {
+    Easy,
+    Normal,
+}
+
+impl CourseChoice {
+    /// ↑/↓・←/→どちらでも切り替える(TERM独自拡張)。選択肢が2つだけなので
+    /// 方向を問わず反転すればよい。
+    pub fn toggle(self) -> Self {
+        match self {
+            CourseChoice::Easy => CourseChoice::Normal,
+            CourseChoice::Normal => CourseChoice::Easy,
+        }
+    }
+
+    /// この選択に対応するコースのゴール深度(m)。
+    pub fn depth_goal_m(self) -> usize {
+        match self {
+            CourseChoice::Easy => crate::constants::COURSE_EASY_DEPTH_M,
+            CourseChoice::Normal => crate::constants::COURSE_NORMAL_DEPTH_M,
+        }
+    }
+
+    /// 保存済みのゴール深度から選択を復元する(TERM独自拡張。前回選んだコースを
+    /// 次回起動時のモードセレクト画面の初期選択として引き継ぐ)。
+    /// `COURSE_EASY_DEPTH_M`以下ならイージー、それより大きければノーマルとみなす。
+    pub fn from_depth_goal_m(depth_goal_m: usize) -> Self {
+        if depth_goal_m <= crate::constants::COURSE_EASY_DEPTH_M {
+            CourseChoice::Easy
+        } else {
+            CourseChoice::Normal
+        }
+    }
+}
+
+/// モードセレクト画面を描画する。`selection`が現在カーソルの当たっている選択肢。
+pub fn draw_mode_select(frame: &mut Frame, selection: CourseChoice) {
+    let area = frame.area();
+
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
+
+    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+    let mode_select_area = centered_rect(70, 40, frame_rect);
+    frame.render_widget(Clear, mode_select_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default()
+        .fg(colors::PANEL_BORDER)
+        .bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default()
+        .fg(colors::STAR_FG)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let option_line = |label: &str, is_selected: bool| {
+        let marker = if is_selected { "> " } else { "  " };
+        let style = if is_selected {
+            selected_style
+        } else {
+            text_style
+        };
+        Line::from(Span::styled(format!("{marker}{label}"), style))
+    };
+
+    let lines = vec![
+        Line::from(Span::styled("== コース選択 ==", heading_style)),
+        Line::from(""),
+        option_line("500m (イージー)", selection == CourseChoice::Easy),
+        option_line("1000m (ノーマル)", selection == CourseChoice::Normal),
+        Line::from(""),
+        Line::from(Span::styled(
+            "↑↓/←→で選択 / Enterで決定 / Escでタイトルへ",
+            text_style,
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, mode_select_area);
+}
+
+// ---------------------------------------------------------------------------
 // 設定画面(TERM独自拡張。ユーザー指摘: 「サウンドON/OFFではなくMUSIC/SEを
 // それぞれトグルできるように。設定画面つくって、カーソルで選んでスペースで
 // トグルできるように」)
@@ -2632,6 +2738,31 @@ mod tests {
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);
             assert_eq!(choice.cycle_back().cycle(), choice);
+        }
+    }
+
+    // --- モードセレクト画面(TERM独自拡張。#112) ---
+
+    #[test]
+    fn course_choice_toggle_swaps_between_easy_and_normal() {
+        assert_eq!(CourseChoice::Easy.toggle(), CourseChoice::Normal);
+        assert_eq!(CourseChoice::Normal.toggle(), CourseChoice::Easy);
+    }
+
+    #[test]
+    fn course_choice_depth_goal_m_matches_the_documented_course_lengths() {
+        // spec.md 1章の確定事実「コースは2種類: 500m(イージー)と1000m(ノーマル)」。
+        assert_eq!(CourseChoice::Easy.depth_goal_m(), 500);
+        assert_eq!(CourseChoice::Normal.depth_goal_m(), 1000);
+    }
+
+    #[test]
+    fn course_choice_from_depth_goal_m_round_trips_through_depth_goal_m() {
+        for choice in [CourseChoice::Easy, CourseChoice::Normal] {
+            assert_eq!(
+                CourseChoice::from_depth_goal_m(choice.depth_goal_m()),
+                choice
+            );
         }
     }
 

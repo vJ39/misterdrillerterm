@@ -125,6 +125,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 全てリセットされる)。
     let mut screen = Screen::Title;
     let mut last_tick = Instant::now();
+    // モードセレクト画面(TERM独自拡張。#112)での現在の選択(イージー/ノーマル)。
+    // タイトルから開くたびに、前回選んだコース(`settings.last_course_depth_m`)を
+    // 初期選択として引き継ぐ。
+    let mut mode_select_choice =
+        ui::render::CourseChoice::from_depth_goal_m(settings.last_course_depth_m);
     // 設定画面(TERM独自拡張)での現在の選択項目。
     let mut settings_selection = ui::render::SettingsChoice::Music;
     // 一時停止中にオーバーレイ表示する設定/ヘルプ画面(TERM独自拡張。ユーザー指摘:
@@ -758,19 +763,30 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     _ => {}
                 }
             }
-        } else {
-            terminal.draw(ui::render::draw_title)?;
+        } else if let Screen::ModeSelect = screen {
+            terminal.draw(|frame| ui::render::draw_mode_select(frame, mode_select_choice))?;
 
-            if let Some(action) = input::poll_any_key(FRAME_INTERVAL_MS)? {
+            // モードセレクト画面(TERM独自拡張。#112。ユーザー指摘: 「起動フローに
+            // モードセレクト画面を追加」)。↑/↓・←/→どちらでもイージー/ノーマルを
+            // 切り替えられるようにする(設定画面の選択操作と揃える)。
+            for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 match action {
-                    input::AnyKeyAction::Quit => break,
-                    input::AnyKeyAction::OpenSettings => screen = Screen::Settings,
-                    input::AnyKeyAction::OpenHelp => screen = Screen::Help,
-                    input::AnyKeyAction::Advance => {
+                    InputAction::Quit => screen = Screen::Title,
+                    InputAction::FaceUp
+                    | InputAction::FaceDown
+                    | InputAction::MoveLeft
+                    | InputAction::MoveRight => {
+                        mode_select_choice = mode_select_choice.toggle();
+                    }
+                    InputAction::Confirm => {
+                        let depth_goal_m = mode_select_choice.depth_goal_m();
+                        settings.last_course_depth_m = depth_goal_m;
+                        settings.save();
                         let seed: u64 = rng.random();
                         // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される(TERM独自
                         // 拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
-                        let mut game = Game::new_with_width(seed, settings.field_width);
+                        let mut game =
+                            Game::new_with_width(seed, settings.field_width, depth_goal_m);
                         // #85調査用のブロック状態遷移ログをタイトルからのゲーム開始時に
                         // 毎回作り直す(TERM独自拡張。ユーザー指摘: 「タイトルからゲーム
                         // スタートした時点でログdbは毎回リフレッシュするものとする」)。
@@ -801,6 +817,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         );
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            terminal.draw(ui::render::draw_title)?;
+
+            if let Some(action) = input::poll_any_key(FRAME_INTERVAL_MS)? {
+                match action {
+                    input::AnyKeyAction::Quit => break,
+                    input::AnyKeyAction::OpenSettings => screen = Screen::Settings,
+                    input::AnyKeyAction::OpenHelp => screen = Screen::Help,
+                    input::AnyKeyAction::Advance => {
+                        mode_select_choice = ui::render::CourseChoice::from_depth_goal_m(
+                            settings.last_course_depth_m,
+                        );
+                        screen = Screen::ModeSelect;
                     }
                 }
             }
@@ -843,7 +876,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 /// (TERM独自拡張。#146。ユーザー指摘: 「タイトル画面は、これで!」)。タイトル画面に
 /// いる間だけ鳴らす。
 fn effective_title_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
-    settings_music_enabled && matches!(screen, Screen::Title)
+    // モードセレクト画面(TERM独自拡張。#112)はタイトルから直接つながる短い
+    // 経由画面のため、タイトルBGMをそのまま鳴らし続ける(往復で途切れさせない)。
+    settings_music_enabled && matches!(screen, Screen::Title | Screen::ModeSelect)
 }
 
 /// MUSIC設定・現在の画面から、実際にプレイ中BGM(交代制プレイリスト、#145)を
@@ -856,7 +891,7 @@ fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen)
         return false;
     }
     match screen {
-        Screen::Title => false,
+        Screen::Title | Screen::ModeSelect => false,
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
         Screen::Settings => true,
         // タイトルから開く独立画面としてのヘルプ(Screen::Help)は、#151で曲を選んで
@@ -890,11 +925,16 @@ fn cycle_jukebox_selection(selection: usize, len: usize, forward: bool) -> usize
     }
 }
 
-/// アプリ全体の画面状態。タイトル画面・設定画面・プレイ中(Gameを保持)の3値
-/// (spec.md 1章、設定画面はTERM独自拡張)。`Game`は演出・補間用の状態が増え
-/// バリアント間のサイズ差が大きくなったため`Box`で包む。
+/// アプリ全体の画面状態。タイトル画面・モードセレクト画面・設定画面・
+/// プレイ中(Gameを保持)の4値(spec.md 1章、モードセレクト・設定画面はTERM独自
+/// 拡張)。`Game`は演出・補間用の状態が増えバリアント間のサイズ差が大きくなった
+/// ため`Box`で包む。
 enum Screen {
     Title,
+    /// コース選択画面(TERM独自拡張。#112。ユーザー指摘: 「起動フローにモード
+    /// セレクト画面を追加」)。タイトルでEnterを押した直後に経由し、ここで
+    /// Enterを押すと実際にゲームが始まる。
+    ModeSelect,
     Settings,
     Help,
     Playing(Box<Game>),
@@ -1166,6 +1206,16 @@ mod tests {
         // 専用曲の担当になったため、プレイ中BGM側は常に鳴らないはず)。
         assert!(!effective_gameplay_bgm_enabled(true, &Screen::Title));
         assert!(!effective_gameplay_bgm_enabled(false, &Screen::Title));
+    }
+
+    #[test]
+    fn mode_select_screen_keeps_the_title_bgm_playing_and_never_the_gameplay_bgm() {
+        // TERM独自拡張(#112)。モードセレクト画面はタイトルから直接つながる短い
+        // 経由画面のため、タイトルBGMを途切れさせずそのまま鳴らし続ける。
+        assert!(effective_title_bgm_enabled(true, &Screen::ModeSelect));
+        assert!(!effective_title_bgm_enabled(false, &Screen::ModeSelect));
+        assert!(!effective_gameplay_bgm_enabled(true, &Screen::ModeSelect));
+        assert!(!effective_gameplay_bgm_enabled(false, &Screen::ModeSelect));
     }
 
     #[test]

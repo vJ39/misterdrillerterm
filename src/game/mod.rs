@@ -26,12 +26,11 @@ use crate::constants::{
     DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
     DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
     DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
-    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_DEPTH_M, FIELD_WIDTH_MAX,
-    FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS,
-    LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT,
-    MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER,
-    OXYGEN_WARNING_THRESHOLD, PLAYER_SCREEN_ROWS_ABOVE, SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS,
-    depth_fraction,
+    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
+    INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT,
+    LIVES_MAX, MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX,
+    MOVE_COOLDOWN_MS_MIN, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD,
+    PLAYER_SCREEN_ROWS_ABOVE, SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
 use board::{
     BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
@@ -45,7 +44,7 @@ use crate::debug_log::DebugLog;
 // `Game::new`/`new_with_lives`(テスト専用)のみが参照するため、通常ビルドでは
 // unused import警告になる。
 #[cfg(test)]
-use crate::constants::FIELD_WIDTH_DEFAULT;
+use crate::constants::{FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT};
 
 /// 深度(m)から、直近で到達済みのチェックポイント区切り番号を計算する(TERM独自
 /// 拡張。#178/#190)。地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点
@@ -430,34 +429,57 @@ pub struct Game {
     /// 派生させるため、同じシードなら同じ出現パターンが再現できる(既存の盤面生成と
     /// 同じ決定性の考え方)。
     rng: ChaCha8Rng,
+    /// 選択したコースのゴール深度(m、TERM独自拡張。#112。ユーザー指摘: 「起動
+    /// フローにモードセレクト画面を追加」)。`Board::generate`の深さそのもの
+    /// (=盤面の行数)でもある。難易度カーブ(`depth_fraction`)は選択したコースに
+    /// 関わらず`FIELD_DEPTH_M`(ノーマルコース基準)で正規化するため、イージー
+    /// コースはカーブの前半しか体験しない。
+    depth_goal_m: usize,
 }
 
 impl Game {
-    /// 指定シードで、既定ライフ数・既定フィールド幅の新しいゲームを開始する。
-    /// 実行時は常に`new_with_width`(設定のフィールド幅を反映)経由で生成される
-    /// ため、これはテストの簡便用ヘルパー。
+    /// 指定シードで、既定ライフ数・既定フィールド幅・ノーマルコースの新しいゲームを
+    /// 開始する。実行時は常に`new_with_width`(設定のフィールド幅を反映)経由で
+    /// 生成されるため、これはテストの簡便用ヘルパー。
     #[cfg(test)]
     pub fn new(seed: u64) -> Self {
         Self::new_with_lives(seed, LIVES_DEFAULT)
     }
 
-    /// 指定シード・ライフ数で、既定フィールド幅の新しいゲームを開始する
-    /// (spec.md 8章「1〜5機から選べる」)。テスト専用ヘルパー(上記`new`と同じ理由)。
+    /// 指定シード・ライフ数で、既定フィールド幅・ノーマルコースの新しいゲームを
+    /// 開始する(spec.md 8章「1〜5機から選べる」)。テスト専用ヘルパー(上記`new`と
+    /// 同じ理由)。
     #[cfg(test)]
     pub fn new_with_lives(seed: u64, lives: u8) -> Self {
         Self::new_with_lives_and_width(seed, lives, FIELD_WIDTH_DEFAULT)
     }
 
-    /// 指定シード・フィールド幅で、既定ライフ数の新しいゲームを開始する(TERM独自拡張。
-    /// ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
-    pub fn new_with_width(seed: u64, width: usize) -> Self {
-        Self::new_with_lives_and_width(seed, LIVES_DEFAULT, width)
+    /// 指定シード・フィールド幅・コースのゴール深度で、既定ライフ数の新しいゲームを
+    /// 開始する(TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」
+    /// 「起動フローにモードセレクト画面を追加」)。
+    pub fn new_with_width(seed: u64, width: usize, depth_goal_m: usize) -> Self {
+        Self::new_with_lives_and_width_and_depth_goal(seed, LIVES_DEFAULT, width, depth_goal_m)
     }
 
-    /// 指定シード・ライフ数・フィールド幅で新しいゲームを開始する(TERM独自拡張。
-    /// ユーザー指摘: 「設定値に列の数を変更できるようにして」)。範囲外の値は
-    /// `FIELD_WIDTH_MIN`〜`MAX`にクランプする。
+    /// 指定シード・ライフ数・フィールド幅で、ノーマルコースの新しいゲームを開始する
+    /// (TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+    /// テスト専用ヘルパー(上記`new`と同じ理由。プレイ中に実際に使うコース選択は
+    /// `new_with_width`が担う)。範囲外の幅は`FIELD_WIDTH_MIN`〜`MAX`にクランプする。
+    #[cfg(test)]
     pub fn new_with_lives_and_width(seed: u64, lives: u8, width: usize) -> Self {
+        Self::new_with_lives_and_width_and_depth_goal(seed, lives, width, FIELD_DEPTH_M)
+    }
+
+    /// 指定シード・ライフ数・フィールド幅・コースのゴール深度で新しいゲームを開始する
+    /// (TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」「起動
+    /// フローにモードセレクト画面を追加」)。範囲外の幅は`FIELD_WIDTH_MIN`〜`MAX`に
+    /// クランプする。
+    fn new_with_lives_and_width_and_depth_goal(
+        seed: u64,
+        lives: u8,
+        width: usize,
+        depth_goal_m: usize,
+    ) -> Self {
         let width = width.clamp(FIELD_WIDTH_MIN, FIELD_WIDTH_MAX);
         let mut player = Player::with_lives(lives);
         player.recenter_for_width(width);
@@ -465,7 +487,7 @@ impl Game {
         let last_checkpoint_reported = checkpoint_index_for_depth(player.depth_m());
         let start_position = player.position();
         let gravity_state = GravityState::new();
-        let board = Board::generate(seed, FIELD_DEPTH_M, width);
+        let board = Board::generate(seed, depth_goal_m, width);
         Game {
             board,
             player,
@@ -521,6 +543,7 @@ impl Game {
             // ビット反転して使う(TERM独自拡張。#96)。同じゲームシードなら同じボム
             // 出現パターンが再現される。
             rng: ChaCha8Rng::seed_from_u64(!seed),
+            depth_goal_m,
         }
     }
 
@@ -979,8 +1002,9 @@ impl Game {
         // ついたら次、じゃなくて」)。地面部分はもう強制的にくり抜かない(#189までは
         // 先行くり抜きしていたが、通常のドリル移動でプレイヤー自身が掘り進む対象に
         // した)ため、ここでのくり抜きはスキマ(`CHECKPOINT_ZONE_GAP_M`)のみが対象。
-        // 最終ゴール(FIELD_DEPTH_M)ちょうどは、Clearedイベント自体が同じ役割の演出を
-        // 持つため、ここでは二重に発火させない。
+        // 最終ゴール(depth_goal_m)ちょうどは、Clearedイベント自体が同じ役割の演出を
+        // 持つため、ここでは二重に発火させない(イージーコースでは500mがゴールに
+        // なるため、500mのボーナスフロア処理も自動的にここでスキップされる)。
         //
         // 通常のプレイでは`check_level_and_clear`は行が1つ変化するたびに呼ばれるため、
         // ここでのチェックポイント区切りの増分は常に高々1のはず。2つ以上一気に
@@ -992,7 +1016,7 @@ impl Game {
             let skipped_ahead = checkpoint > self.last_checkpoint_reported + 1;
             self.last_checkpoint_reported = checkpoint;
             let at_m = checkpoint * CHECKPOINT_STEP_M;
-            if !skipped_ahead && self.status == GameStatus::Playing && at_m < FIELD_DEPTH_M {
+            if !skipped_ahead && self.status == GameStatus::Playing && at_m < self.depth_goal_m {
                 self.debug_clear_above_player();
                 self.apply_checkpoint_safe_zone(at_m);
                 self.checkpoint_flash_remaining = Duration::from_millis(CHECKPOINT_FLASH_MS);
@@ -1001,7 +1025,7 @@ impl Game {
             }
         }
 
-        if self.status == GameStatus::Playing && self.player.depth_m() >= FIELD_DEPTH_M {
+        if self.status == GameStatus::Playing && self.player.depth_m() >= self.depth_goal_m {
             self.status = GameStatus::Cleared;
             events.push(GameEvent::Cleared);
         }
@@ -2507,6 +2531,36 @@ mod tests {
         let events = game.update(Duration::from_millis(FALL_TICK_MS)); // 自由落下で最深行へ進む
 
         assert_eq!(game.status, GameStatus::Cleared);
+        assert!(events.iter().any(|e| matches!(e, GameEvent::Cleared)));
+    }
+
+    #[test]
+    fn a_custom_depth_goal_clears_the_game_there_instead_of_at_field_depth_m() {
+        // TERM独自拡張(#112)。ユーザー指摘: 「起動フローにモードセレクト画面を
+        // 追加」。コース長は`new_with_width`の`depth_goal_m`で選べるため、ノーマル
+        // コース既定の1000mより短いゴールでもそのゴールで正しくクリアすることを
+        // 確認する(テスト時間短縮のため、実際の500mではなく20mの短いコースで検証)。
+        let depth_goal_m = 20;
+        let mut game = Game::new_with_width(1, FIELD_WIDTH_DEFAULT, depth_goal_m);
+        assert_eq!(
+            game.board.depth_rows(),
+            depth_goal_m,
+            "盤面の行数も選んだゴール深度と一致するはず"
+        );
+
+        game.player.row = depth_goal_m - 2;
+        game.player.facing = Direction::Down;
+        let last_row = depth_goal_m - 1;
+        game.board.rows[last_row][game.player.col] = Cell::Empty;
+
+        game.try_drill();
+        let events = game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert_eq!(
+            game.status,
+            GameStatus::Cleared,
+            "1000mではなく選んだゴール深度({depth_goal_m}m)でクリアするはず"
+        );
         assert!(events.iter().any(|e| matches!(e, GameEvent::Cleared)));
     }
 
@@ -4819,7 +4873,7 @@ mod tests {
     fn new_with_width_generates_a_board_of_the_requested_width_and_centers_the_player() {
         // ユーザー指摘: 「設定値に列の数を変更できるようにして」。指定した列数で
         // 盤面が生成され、プレイヤーの開始列もその幅の中央に合わせ直されることを確認する。
-        let game = Game::new_with_width(33, 8);
+        let game = Game::new_with_width(33, 8, FIELD_DEPTH_M);
         assert_eq!(game.board.width(), 8);
         for row in &game.board.rows {
             assert_eq!(row.len(), 8, "各行の長さも指定した列数と一致するはず");
@@ -4829,10 +4883,10 @@ mod tests {
 
     #[test]
     fn new_with_width_clamps_out_of_range_values() {
-        let too_narrow = Game::new_with_width(34, 1);
+        let too_narrow = Game::new_with_width(34, 1, FIELD_DEPTH_M);
         assert_eq!(too_narrow.board.width(), crate::constants::FIELD_WIDTH_MIN);
 
-        let too_wide = Game::new_with_width(34, 999);
+        let too_wide = Game::new_with_width(34, 999, FIELD_DEPTH_M);
         assert_eq!(too_wide.board.width(), crate::constants::FIELD_WIDTH_MAX);
     }
 
