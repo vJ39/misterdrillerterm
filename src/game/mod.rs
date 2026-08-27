@@ -1841,11 +1841,11 @@ impl Game {
 
     /// ボム出現頻度を直接指定する(起動時、Settingsから読み込んだ値を適用する用途。
     /// TERM独自拡張。#96)。範囲外の値は`BOMB_SPAWN_RATE_PERCENT_MIN`〜
-    /// `SPAWN_RATE_PERCENT_MAX`にクランプする。
+    /// `BOMB_SPAWN_RATE_PERCENT_MAX`にクランプする。
     pub fn set_bomb_spawn_rate_percent(&mut self, percent: u32) {
         self.bomb_spawn_rate_percent = percent.clamp(
             crate::constants::BOMB_SPAWN_RATE_PERCENT_MIN,
-            crate::constants::SPAWN_RATE_PERCENT_MAX,
+            crate::constants::BOMB_SPAWN_RATE_PERCENT_MAX,
         );
     }
 

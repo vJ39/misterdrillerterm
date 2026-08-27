@@ -23,12 +23,13 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    BOMB_SPAWN_RATE_PERCENT_MIN, CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP,
-    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
-    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
-    FIELD_WIDTH_STEP, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
-    MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
+    BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN, BOMB_SPAWN_RATE_PERCENT_STEP,
+    CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP, COLOR_CLUSTER_RATE_PERCENT_MIN,
+    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
+    DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX,
+    DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP,
+    ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP,
+    SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
     SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN,
     STAR_SPAWN_RATE_PERCENT_STEP,
 };
@@ -346,10 +347,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
                             }
                             ui::render::SettingsChoice::BombRate => {
-                                settings.bomb_spawn_rate_percent = adjust_rate_percent(
+                                settings.bomb_spawn_rate_percent = adjust_bomb_rate_percent(
                                     settings.bomb_spawn_rate_percent,
                                     increase,
-                                    BOMB_SPAWN_RATE_PERCENT_MIN,
                                 );
                                 game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
                             }
@@ -686,10 +686,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
                             }
                             ui::render::SettingsChoice::BombRate => {
-                                settings.bomb_spawn_rate_percent = adjust_rate_percent(
+                                settings.bomb_spawn_rate_percent = adjust_bomb_rate_percent(
                                     settings.bomb_spawn_rate_percent,
                                     increase,
-                                    BOMB_SPAWN_RATE_PERCENT_MIN,
                                 );
                             }
                             ui::render::SettingsChoice::ChainVanishInterval => {
@@ -1057,6 +1056,26 @@ fn adjust_spawn_rate_setting(
     true
 }
 
+/// ボム出現頻度設定(%)を1ステップぶん増減する(TERM独自拡張。#212。ユーザー
+/// 指摘: 「ボム300%の基準をもっと増量してほしい」)。他の配分率と共通の
+/// `adjust_rate_percent`とは上限・刻み幅が異なる専用の上限
+/// (`BOMB_SPAWN_RATE_PERCENT_MAX`)・刻み幅(`BOMB_SPAWN_RATE_PERCENT_STEP`)を使う。
+fn adjust_bomb_rate_percent(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(BOMB_SPAWN_RATE_PERCENT_STEP)
+            .min(BOMB_SPAWN_RATE_PERCENT_MAX)
+    } else {
+        // 現在BOMB_SPAWN_RATE_PERCENT_MIN=0のためu32のsaturating_sub結果への
+        // .max()は無意味と判定されるが(clippy::unnecessary_min_or_max)、下限を
+        // 明示するための記述として意図的に残す(将来0以外に変える場合の安全策)。
+        #[allow(clippy::unnecessary_min_or_max)]
+        current
+            .saturating_sub(BOMB_SPAWN_RATE_PERCENT_STEP)
+            .max(BOMB_SPAWN_RATE_PERCENT_MIN)
+    }
+}
+
 /// 出現する色ブロックの色数(`COLOR_COUNT_MIN`〜`COLOR_COUNT_MAX`)を1ずつ増減する
 /// (TERM独自拡張。ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい
 /// (1〜4)」)。
@@ -1347,6 +1366,21 @@ mod tests {
         assert_eq!(
             adjust_star_rate_percent(0, false),
             STAR_SPAWN_RATE_PERCENT_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_bomb_rate_percent_can_reach_the_higher_bomb_specific_max() {
+        // ユーザー指摘: 「ボム300%の基準をもっと増量してほしい」。他ブロックと共通の
+        // SPAWN_RATE_PERCENT_MAX(300%)より大きい、ボム専用の上限まで増やせるはず。
+        assert_eq!(
+            adjust_bomb_rate_percent(u32::MAX, true),
+            BOMB_SPAWN_RATE_PERCENT_MAX,
+            "破損データでのオーバーフローpanicもせず上限へ飽和するはず"
+        );
+        assert_eq!(
+            adjust_bomb_rate_percent(0, false),
+            BOMB_SPAWN_RATE_PERCENT_MIN
         );
     }
 

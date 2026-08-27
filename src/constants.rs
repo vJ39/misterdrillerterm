@@ -365,6 +365,22 @@ pub const BOMB_SPAWN_DEPTH_MAX_BONUS: f32 = 0.10;
 /// ボム出現頻度設定の下限(%)。他の出現率設定と同様、0%で完全に出現しなくもできる。
 pub const BOMB_SPAWN_RATE_PERCENT_MIN: u32 = 0;
 
+/// ボム出現頻度設定の上限(%、TERM独自拡張。#212)。ユーザー指摘: 「ボム300%の
+/// 基準をもっと増量してほしい」。他の配分率と共通の`SPAWN_RATE_PERCENT_MAX`
+/// (300%)では、判定確率`(BOMB_SPAWN_BASE_PROB + BOMB_SPAWN_DEPTH_MAX_BONUS
+/// × depth_fraction) × rate/100`が深度0mでは0.15止まりで実感が薄い。
+/// 深度に関わらず判定確率が1.0(毎秒の判定に必ず当たる)に飽和する値は
+/// `1.0 / BOMB_SPAWN_BASE_PROB = 20倍`(=2000%)。これ以上にしても、盤面上に
+/// 同時に存在できるボム数自体は`BOMB_MAX_COUNT_ON_BOARD`で頭打ちになるため、
+/// 「出現が遅い」という不満に対して意味を持つ上限として2000%を採用した
+/// (スター配分の上限拡張(`STAR_SPAWN_RATE_PERCENT_MAX`)と同じ考え方)。
+pub const BOMB_SPAWN_RATE_PERCENT_MAX: u32 = 2000;
+/// ボム出現頻度設定の調整刻み幅(%、TERM独自拡張。#212)。上限が2000%と大きい
+/// ため、他の配分率と共通の刻み幅(20)のままだと最大まで100回の操作が必要に
+/// なってしまう。0→2000まで20ステップになるよう100刻みにした
+/// (`STAR_SPAWN_RATE_PERCENT_STEP`と同じ考え方)。
+pub const BOMB_SPAWN_RATE_PERCENT_STEP: u32 = 100;
+
 /// ボム爆発時、爆風が届いたセルに炎の演出を表示する時間(ms、TERM独自拡張。#126。
 /// ユーザー指摘: 「爆弾が爆発するときは、ボンバーマンTERMのように炎アニメーション
 /// ほしい」)。この時間が経過するまでスター変換後の見た目を炎の色で覆い、既存の
