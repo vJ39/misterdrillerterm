@@ -42,13 +42,9 @@ const FRAME_INTERVAL_MS: u64 = 33;
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
 
-    // Kittyキーボードプロトコル(対応ターミナルのみ)を有効化する(TERM独自拡張。
-    // ユーザー指摘: 「z/xとカーソルキー同時押しできるようにして」)。レガシーの
-    // ANSIエスケープシーケンスでは、矢印キー(複数バイトのエスケープシーケンス)と
-    // 単純な1文字キーがほぼ同時に押された場合、ターミナル側の生バイト列の解釈が
-    // 曖昧になり得るため、対応ターミナル(kitty/WezTerm/Alacritty/foot等)では
-    // DISAMBIGUATE_ESCAPE_CODESで曖昧さを解消する。非対応ターミナルでは何もしない
-    // (`supports_keyboard_enhancement`がfalse/Errの場合は従来通り)。
+    // Kittyキーボードプロトコル(対応ターミナルのみ)を有効化する。レガシーANSIでは
+    // 矢印キーと1文字キーの同時押しで生バイト列の解釈が曖昧になり得るため、
+    // DISAMBIGUATE_ESCAPE_CODESで解消する。非対応ターミナルでは何もしない。
     let keyboard_enhancement_enabled = crossterm::terminal::supports_keyboard_enhancement()
         .unwrap_or(false)
         && execute!(
@@ -73,14 +69,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     let sink_handle = rodio::DeviceSinkBuilder::open_default_sink().ok();
     let mixer: Option<Mixer> = sink_handle.as_ref().map(|handle| handle.mixer().clone());
 
-    // MUSIC/SE個別ON/OFF設定(TERM独自拡張、spec.md 10章)。前回終了時の状態を復元し、
+    // MUSIC/SE個別ON/OFF設定(spec.md 10章)。前回終了時の状態を復元し、
     // BGMスレッド・SE再生の双方から参照できるよう`Arc<AtomicBool>`で共有する。
     let mut settings = Settings::load();
-    // タイトル画面用・プレイ中用でBGMを別トラックにする(TERM独自拡張。#145/#146。
-    // ユーザー指摘: 「タイトル画面は、これで!」「プレイ中はこの２つを交互に鳴らす
-    // ことにする」)。同時に両方鳴らないよう、`effective_title_bgm_enabled`/
-    // `effective_gameplay_bgm_enabled`は排他的になるよう設計している。起動直後は
-    // タイトル画面から始まる。
+    // タイトル画面用・プレイ中用でBGMを別トラックにする。同時に両方鳴らないよう
+    // `effective_title_bgm_enabled`/`effective_gameplay_bgm_enabled`は排他的になるよう
+    // 設計している。起動直後はタイトル画面から始まる。
     let title_music_enabled = Arc::new(AtomicBool::new(effective_title_bgm_enabled(
         settings.music_enabled,
         &Screen::Title,
@@ -90,15 +84,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         &Screen::Title,
     )));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
-    // タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ
-    // (TERM独自拡張。#150。ユーザー指摘: 「タイトルに戻ったら最初から再生ね」)。
+    // タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ。
     // 起動直後の初回表示は「戻ってきた」わけではないので、ここではまだ立てない。
     let title_bgm_restart = Arc::new(AtomicBool::new(false));
     let mut was_title_bgm_enabled = title_music_enabled.load(Ordering::Relaxed);
-    // タイトル画面へ戻るたびにプレイ中BGMも先頭の曲・先頭位置からリセットする
-    // フラグ(TERM独自拡張。#177)。タイトルBGMの`title_bgm_restart`と役割は同じだが、
-    // トリガー条件が異なる(タイトルBGMは「無効→有効」の切り替わりで判定するが、
-    // こちらは単に「タイトル画面へ戻った瞬間」でよい)ため、別フラグとして扱う。
+    // タイトル画面へ戻るたびにプレイ中BGMも先頭の曲・先頭位置からリセットするフラグ。
+    // `title_bgm_restart`とはトリガー条件が異なる(あちらは「無効→有効」の切り替わり、
+    // こちらは「タイトル画面へ戻った瞬間」)ため、別フラグとして扱う。
     let gameplay_bgm_restart = Arc::new(AtomicBool::new(false));
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
@@ -120,30 +112,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 通常プレイはOS乱数から生成したシードを使う(spec.md 3章)。
     let mut rng = rand::rng();
 
-    // アプリの画面状態(spec.md 1章末尾「Escキーはタイトルへ戻る」)。タイトル画面自体で
-    // Escが押された場合のみアプリを終了する。ゲームプレイ中・ポーズ中・ゲームオーバー・
-    // クリア画面でのEscは、Gameを作り直してタイトルへ戻す(酸素・スコア・深度等が
-    // 全てリセットされる)。
+    // アプリの画面状態(spec.md 1章)。タイトル画面でのEscのみアプリを終了し、それ以外の
+    // 画面でのEscはGameを作り直してタイトルへ戻す(酸素・スコア・深度等が全てリセットされる)。
     let mut screen = Screen::Title;
     let mut last_tick = Instant::now();
-    // モードセレクト画面(TERM独自拡張。#112)での現在の選択(イージー/ノーマル)。
-    // タイトルから開くたびに、前回選んだコース(`settings.last_course_depth_m`)を
-    // 初期選択として引き継ぐ。
+    // モードセレクト画面での現在の選択(イージー/ノーマル)。タイトルから開くたびに、
+    // 前回選んだコース(`settings.last_course_depth_m`)を初期選択として引き継ぐ。
     let mut mode_select_choice =
         ui::render::CourseChoice::from_depth_goal_m(settings.last_course_depth_m);
-    // 設定画面(TERM独自拡張)での現在の選択項目。
+    // 設定画面での現在の選択項目。
     let mut settings_selection = ui::render::SettingsChoice::Music;
-    // 一時停止中にオーバーレイ表示する設定/ヘルプ画面(TERM独自拡張。ユーザー指摘:
-    // 「一時停止中にもヘルプページを開けるようにする」「プレイ中に設定画面を呼び出せる
-    // ようにし、ファイルに保存されている設定をいじれるものとする」)。Gameを作り直さず
-    // Screen::Playingのまま上に重ねて描画するだけなので、画面遷移ではなくこのローカルな
-    // 状態フラグで管理する。
+    // 一時停止中にオーバーレイ表示する設定/ヘルプ画面。Gameを作り直さずScreen::Playingの
+    // まま上に重ねて描画するだけなので、画面遷移ではなくこのローカルな状態フラグで管理する。
     let mut pause_overlay = PauseOverlay::None;
 
-    // ヘルプ画面(タイトルから開く独立画面)のジュークボックス状態(TERM独自拡張。
-    // #151。ユーザー指摘: 「ヘルプページミュージック選んで再生する機能ほしい」)。
-    // カーソル位置は画面を離れても保持する。再生中の曲は、その曲の再生を
-    // 制御するハンドル(stop/finishedフラグ)とセットで持つ。
+    // ヘルプ画面(タイトルから開く独立画面)のジュークボックス状態。カーソル位置は画面を
+    // 離れても保持する。再生中の曲は、その再生を制御するハンドル(stop/finishedフラグ)と
+    // セットで持つ。
     let mut help_jukebox_selection: usize = 0;
     let mut help_jukebox_playing: Option<(usize, audio::bgm::JukeboxPreview)> = None;
 
@@ -154,17 +139,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         let mut back_to_title = false;
 
         if let Screen::Playing(game) = &mut screen {
-            // poll_input_batch: 1フレーム内にキューされた全キーイベントを処理する
-            // (TERM独自拡張)。矢印キー(移動・向き変更)とスペースキー(掘削)を
-            // ほぼ同時に押した場合でも、同一フレームに届いた両方のイベントを
-            // 取りこぼさず反映できるようにするため。
+            // poll_input_batch: 1フレーム内にキューされた全キーイベントを処理する。
+            // 移動・向き変更と掘削をほぼ同時に押しても、同一フレームに届いた
+            // 両方のイベントを取りこぼさず反映するため。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 if back_to_title {
                     break; // Quit済みなら以降のキューされたアクションは処理しない
                 }
                 match action {
                     // オーバーレイ(設定/ヘルプ)が開いている間のQはタイトルへ戻らず、
-                    // オーバーレイを閉じるだけにする(TERM独自拡張)。
+                    // オーバーレイを閉じるだけにする。
                     InputAction::Quit if pause_overlay != PauseOverlay::None => {
                         pause_overlay = PauseOverlay::None;
                     }
@@ -173,9 +157,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.toggle_pause();
                         pause_overlay = PauseOverlay::None;
                     }
-                    // ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、ショートカット設定
-                    // されていない任意のキー入力でも解除されるように」。オーバーレイ
-                    // (設定/ヘルプ)表示中は対象外にする(そちらはQ/S/Hで明示的に閉じる)。
+                    // ポーズ解除はPだけでなく、ショートカット未割り当ての任意キーでも行える。
+                    // オーバーレイ(設定/ヘルプ)表示中は対象外(そちらはQ/S/Hで明示的に閉じる)。
                     InputAction::UnboundKey
                         if game.status == GameStatus::Paused
                             && pause_overlay == PauseOverlay::None =>
@@ -184,13 +167,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     }
                     InputAction::UnboundKey => {}
                     // M/EキーでのMUSIC/SE切り替えは、一時停止画面でのみ意味を持つ
-                    // (spec.md 1章・10章、TERM独自拡張)。プレイ中(Paused以外)は無視する。
+                    // (spec.md 1章・10章)。プレイ中(Paused以外)は無視する。
                     InputAction::ToggleMusic => {
                         if game.status == GameStatus::Paused {
                             settings.music_enabled = !settings.music_enabled;
                             // ここはScreen::Playing(かつPaused)確定なので、タイトル用
-                            // BGMは触れず(既に無音のはず)、プレイ中BGMのみ即時反映する
-                            // (TERM独自拡張。#145/#146)。
+                            // BGMは触れず(既に無音のはず)、プレイ中BGMのみ即時反映する。
                             gameplay_music_enabled.store(settings.music_enabled, Ordering::Relaxed);
                             settings.save();
                         }
@@ -202,10 +184,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.save();
                         }
                     }
-                    // S/Hキーでの設定/ヘルプ画面オーバーレイ表示(TERM独自拡張。ユーザー指摘:
-                    // 「一時停止中にもヘルプページを開けるようにする」「プレイ中に設定画面を
-                    // 呼び出せるようにし、ファイルに保存されている設定をいじれるものとする」
-                    // 「設定(S)はポーズ(P)せずに出せるように」)。プレイ中に押した場合は
+                    // S/Hキーでの設定/ヘルプ画面オーバーレイ表示。プレイ中に押した場合は
                     // 自動的に一時停止してからオーバーレイを開く。同じキーの再入力で閉じる
                     // (閉じても一時停止状態はそのまま、Pキーで別途再開する)。
                     InputAction::OpenSettings => {
@@ -253,8 +232,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                                 settings.save();
                             }
-                            // #85調査用のブロック状態遷移ログのON/OFF(TERM独自拡張。#167)。
-                            // 一時停止中のオーバーレイからは、稼働中のgameへも即座に反映する
+                            // 調査用のブロック状態遷移ログのON/OFF。一時停止中の
+                            // オーバーレイからは、稼働中のgameへも即座に反映する
                             // (無効化時は記録を止め、有効化時は新規にログを開き直す)。
                             ui::render::SettingsChoice::DebugLogEnabled => {
                                 settings.debug_log_enabled = !settings.debug_log_enabled;
@@ -280,9 +259,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::ChainVanishInterval => {}
                         }
                     }
-                    // MUSIC/SEのトグルは←→キーでも行える(TERM独自拡張。ユーザー指摘:
-                    // 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで切り替えできる
-                    // ように」)。トグルなので方向は問わず、押されたら反転する。
+                    // MUSIC/SEのトグルは←→キーでも行える。トグルなので方向は問わず、
+                    // 押されたら反転する。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
                             && matches!(
@@ -310,7 +288,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         }
                         settings.save();
                     }
-                    // ブロック落下速度・キャラ落下速度・回避硬直時間の調整(TERM独自拡張)。
+                    // ブロック落下速度・キャラ落下速度・回避硬直時間の調整。
                     // 配分率・色数と異なり盤面の書き換えを伴わないため、即座にgameへ反映してよい。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
@@ -366,9 +344,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         }
                         settings.save();
                     }
-                    // フィールド幅(列数、TERM独自拡張)の調整。盤面の列数そのものを変えるため
-                    // 現在の盤面には反映できず、次回の新規ゲーム開始時にのみ適用される
-                    // (ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+                    // フィールド幅(列数)の調整。盤面の列数そのものを変えるため
+                    // 現在の盤面には反映できず、次回の新規ゲーム開始時にのみ適用される。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
                             && settings_selection == ui::render::SettingsChoice::FieldWidth =>
@@ -377,9 +354,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         settings.field_width = adjust_field_width(settings.field_width, increase);
                         settings.save();
                     }
-                    // Xブロック/AIR/スター/ダイヤの配分率・色数調整(TERM独自拡張)。プレイ中なので、
-                    // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映
-                    // する(ユーザー指摘: 「プレイ中でもその数値をいじれるようにしたい」)。
+                    // Xブロック/AIR/スター/ダイヤの配分率・色数調整。プレイ中なので、
+                    // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する。
                     InputAction::MoveLeft | InputAction::MoveRight
                         if pause_overlay == PauseOverlay::Settings
                             && matches!(
@@ -413,8 +389,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         );
                     }
                     // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
-                    // (TERM独自拡張。ユーザー指摘: 「タイトルに戻るか、その場から復活して
-                    // 再開するか、ダイアログ表示してカーソルで選べるように」)。
+                    // (タイトルへ戻るか、その場から復活して再開するかを選ぶ)。
                     InputAction::FaceUp | InputAction::FaceDown
                         if game.status == GameStatus::GameOver =>
                     {
@@ -495,8 +470,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 let se_on = se_enabled.load(Ordering::Relaxed);
                 terminal.draw(|frame| {
                     ui::render::draw(frame, game, music_on, se_on);
-                    // 一時停止中の設定/ヘルプオーバーレイ(TERM独自拡張)。Screen::Playingの
-                    // ままGameを手放さずに上へ重ね描きするだけで、専用のScreen遷移は行わない。
+                    // 一時停止中の設定/ヘルプオーバーレイ。Screen::Playingのまま
+                    // Gameを手放さずに上へ重ね描きするだけで、専用のScreen遷移は行わない。
                     match pause_overlay {
                         PauseOverlay::None => {}
                         PauseOverlay::Settings => ui::render::draw_settings(
@@ -558,9 +533,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             })?;
 
             // 設定画面もpoll_input_batchを使う(FaceUp/FaceDown=選択切替、Drill=トグル、
-            // MoveLeft/MoveRight=配分率調整、Quit=タイトルへ戻る、を既存のInputActionそのまま
-            // 再利用できるため。TERM独自拡張。ユーザー指摘: 「カーソルで選んでスペースで
-            // トグル」「設定でXブロックの配分量・AIRの配分量をいじれるようにしたい」)。
+            // MoveLeft/MoveRight=配分率調整、Quit=タイトルへ戻る、と既存のInputActionを
+            // そのまま再利用できるため)。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 match action {
                     InputAction::Quit => screen = Screen::Title,
@@ -581,10 +555,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             se_enabled.store(settings.se_enabled, Ordering::Relaxed);
                             settings.save();
                         }
-                        // #85調査用のブロック状態遷移ログのON/OFF(TERM独自拡張。#167)。
-                        // このScreen::Settings(タイトルから開く独立画面)にはgameが
-                        // 無いため、次回のゲーム開始時(refresh_debug_log呼び出し時)に
-                        // 反映される。
+                        // 調査用のブロック状態遷移ログのON/OFF。このScreen::Settings
+                        // (タイトルから開く独立画面)にはgameが無いため、次回のゲーム
+                        // 開始時(refresh_debug_log呼び出し時)に反映される。
                         ui::render::SettingsChoice::DebugLogEnabled => {
                             settings.debug_log_enabled = !settings.debug_log_enabled;
                             settings.save();
@@ -606,13 +579,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::BombRate
                         | ui::render::SettingsChoice::ChainVanishInterval => {}
                     },
-                    // MUSIC/SEのトグルはSpace(TogglePause)・←→キーでも行える(TERM独自拡張。
-                    // ユーザー指摘: 「設定画面のMUSIC, SEのトグルをカーソル左右ボタンで
-                    // 切り替えできるように」。ヘルプ表示「MUSIC・SEはSpaceか←→でトグル」
-                    // (draw_settings)と一致させるため、Spaceも同じ扱いにする。#152。
-                    // このScreen::Settingsは一時停止中のオーバーレイ(PauseOverlay::Settings)
-                    // とは別物で、そちらのSpaceは別途「オーバーレイを閉じて再開する」処理を
-                    // 持つため触れない。トグルなので方向は問わず、押されたら反転する。
+                    // MUSIC/SEのトグルはSpace(TogglePause)・←→キーでも行える(ヘルプ表示
+                    // 「Spaceか←→でトグル」と一致させるため)。一時停止中のオーバーレイの
+                    // Spaceは別途「閉じて再開する」処理を持つため対象外。方向は問わず反転する。
                     InputAction::TogglePause | InputAction::MoveLeft | InputAction::MoveRight
                         if matches!(
                             settings_selection,
@@ -705,7 +674,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 }
             }
         } else if let Screen::Help = screen {
-            // 曲が最後まで自然に終わっていたら、再生中表示を消す(TERM独自拡張。#151)。
+            // 曲が最後まで自然に終わっていたら、再生中表示を消す。
             if help_jukebox_playing
                 .as_ref()
                 .is_some_and(|(_, preview)| preview.is_finished())
@@ -719,9 +688,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             };
             terminal.draw(|frame| ui::render::draw_help(frame, Some(&jukebox_state), true))?;
 
-            // ヘルプ画面はEscキーでタイトルへ戻る(TERM独自拡張。ユーザー指摘:
-            // 「ショートカットのヘルプページも必要」)。↑/↓で曲を選び、X/Zで
-            // 再生・停止するジュークボックス操作を追加した(#151)。
+            // ヘルプ画面はEscキーでタイトルへ戻る。↑/↓で曲を選び、
+            // X/Zで再生・停止するジュークボックス操作を持つ。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 match action {
                     InputAction::Quit => {
@@ -765,8 +733,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         } else if let Screen::ModeSelect = screen {
             terminal.draw(|frame| ui::render::draw_mode_select(frame, mode_select_choice))?;
 
-            // モードセレクト画面(TERM独自拡張。#112。ユーザー指摘: 「起動フローに
-            // モードセレクト画面を追加」)。↑/↓・←/→どちらでもイージー/ノーマルを
+            // モードセレクト画面。↑/↓・←/→どちらでもイージー/ノーマルを
             // 切り替えられるようにする(設定画面の選択操作と揃える)。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 match action {
@@ -782,17 +749,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         settings.last_course_depth_m = depth_goal_m;
                         settings.save();
                         let seed: u64 = rng.random();
-                        // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される(TERM独自
-                        // 拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
+                        // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される。
                         let mut game =
                             Game::new_with_width(seed, settings.field_width, depth_goal_m);
-                        // #85調査用のブロック状態遷移ログをタイトルからのゲーム開始時に
-                        // 毎回作り直す(TERM独自拡張。ユーザー指摘: 「タイトルからゲーム
-                        // スタートした時点でログdbは毎回リフレッシュするものとする」)。
-                        // 設定画面のトグルで無効化していれば記録自体を行わない(#167)。
+                        // 調査用のブロック状態遷移ログをタイトルからのゲーム開始時に毎回
+                        // 作り直す。設定画面のトグルで無効化していれば記録自体を行わない。
                         game.refresh_debug_log(settings.debug_log_enabled);
                         // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
-                        // (settings.rs)、新しいゲーム開始時にも引き継ぐ(TERM独自拡張)。
+                        // (settings.rs)、新しいゲーム開始時にも引き継ぐ。
                         game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
                         game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
                         game.set_shake_duration_ms(settings.shake_duration_ms);
@@ -801,7 +765,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
                         game.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
                         // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
-                        // 安全地帯明け(行2)以降の全体へ反映する(TERM独自拡張)。
+                        // 安全地帯明け(行2)以降の全体へ反映する。
                         game.reroll_spawn_rates_from(
                             2,
                             settings.rock_spawn_rate_percent,
@@ -841,16 +805,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         if back_to_title {
             screen = Screen::Title;
             pause_overlay = PauseOverlay::None;
-            // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする(TERM独自拡張。
-            // #177)。次にプレイを始めたとき、前回の再生位置・曲順を引きずらず
-            // 必ず1曲目の先頭から鳴るようにする。
+            // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする。次にプレイを始めた
+            // とき、前回の再生位置・曲順を引きずらず必ず1曲目の先頭から鳴るようにする。
             gameplay_bgm_restart.store(true, Ordering::Relaxed);
         }
 
-        // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが
-        // 参照する実効MUSIC状態を毎フレーム同期する(TERM独自拡張。ユーザー指摘:
-        // 「タイトル画面ではMUSIC無し」→のちに#146で「タイトル画面は専用曲を鳴らす」
-        // へ変更)。タイトル用・プレイ中用のいずれか一方だけがtrueになる。
+        // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが参照する
+        // 実効MUSIC状態を毎フレーム同期する。タイトル用・プレイ中用のいずれか一方だけがtrueになる。
         let title_bgm_now_enabled = effective_title_bgm_enabled(settings.music_enabled, &screen);
         title_music_enabled.store(title_bgm_now_enabled, Ordering::Relaxed);
         gameplay_music_enabled.store(
@@ -858,8 +819,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Ordering::Relaxed,
         );
         // タイトル画面へ戻ってきた(無効→有効に転じた)瞬間に、タイトルBGMを
-        // 先頭から再生し直す(TERM独自拡張。#150。ユーザー指摘: 「タイトルに戻ったら
-        // 最初から再生ね」)。
+        // 先頭から再生し直す。
         if should_restart_title_bgm(was_title_bgm_enabled, title_bgm_now_enabled) {
             title_bgm_restart.store(true, Ordering::Relaxed);
         }
@@ -871,19 +831,16 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     Ok(())
 }
 
-/// MUSIC設定・現在の画面から、実際にタイトル画面用BGMを鳴らすべきかを判定する
-/// (TERM独自拡張。#146。ユーザー指摘: 「タイトル画面は、これで!」)。タイトル画面に
-/// いる間だけ鳴らす。
+/// MUSIC設定・現在の画面から、実際にタイトル画面用BGMを鳴らすべきかを判定する。
+/// タイトル画面にいる間だけ鳴らす。
 fn effective_title_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
-    // モードセレクト画面(TERM独自拡張。#112)はタイトルから直接つながる短い
-    // 経由画面のため、タイトルBGMをそのまま鳴らし続ける(往復で途切れさせない)。
+    // モードセレクト画面はタイトルから直接つながる短い経由画面のため、
+    // タイトルBGMをそのまま鳴らし続ける(往復で途切れさせない)。
     settings_music_enabled && matches!(screen, Screen::Title | Screen::ModeSelect)
 }
 
-/// MUSIC設定・現在の画面から、実際にプレイ中BGM(交代制プレイリスト、#145)を
-/// 鳴らすべきかを判定する(TERM独自拡張。ユーザー指摘: 「ゲームオーバーになったら、
-/// ゲームオーバーの短いミス音の後、MUSIC停止」「ゴールしたらMUSICとめてファンファーレ
-/// でしょう」)。タイトル画面・ゲームオーバー中・ゴールクリア後はMUSIC設定のON/OFFに
+/// MUSIC設定・現在の画面から、実際にプレイ中BGM(交代制プレイリスト)を鳴らすべきかを
+/// 判定する。タイトル画面・ゲームオーバー中・ゴールクリア後はMUSIC設定のON/OFFに
 /// 関わらず常に無音にする(クリアファンファーレはBGMと別にSEとして再生される)。
 fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
     if !settings_music_enabled {
@@ -893,29 +850,22 @@ fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Screen)
         Screen::Title | Screen::ModeSelect => false,
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
         Screen::Settings => true,
-        // タイトルから開く独立画面としてのヘルプ(Screen::Help)は、#151で曲を選んで
-        // 試聴できるジュークボックスの置き場になったため、以前のように自動で
-        // プレイ中BGMのローテーションを流し続けると、ジュークボックスの試聴と
-        // 二重に聞こえてしまう。そのため常に無音にし、聞こえる音は選んだ曲の
-        // プレビューだけにする(TERM独自拡張。ユーザー指摘: 「ヘルプページ
-        // ミュージック選んで再生する機能ほしい」)。プレイ中に一時停止して開く
-        // ヘルプオーバーレイは`screen`自体は`Screen::Playing`のままなのでこの
-        // 分岐には来ず、影響を受けない。
+        // 独立画面としてのヘルプはジュークボックス試聴の置き場のため、プレイ中BGMを
+        // 流すと試聴と二重に聞こえてしまう。常に無音にし、聞こえる音は選んだ曲のプレビュー
+        // だけにする。一時停止中のヘルプオーバーレイは`Screen::Playing`のままなので対象外。
         Screen::Help => false,
     }
 }
 
-/// タイトルBGMを先頭から再生し直すべきかを、直前フレームの有効状態
-/// (`was_enabled`)と現在の有効状態(`now_enabled`)から判定する(TERM独自拡張。
-/// #150。ユーザー指摘: 「タイトルに戻ったら最初から再生ね」)。無効→有効に
-/// 転じた瞬間だけtrueを返す(有効のまま/無効のままでは巻き戻さない)。
+/// タイトルBGMを先頭から再生し直すべきかを、直前フレームの有効状態(`was_enabled`)と
+/// 現在の有効状態(`now_enabled`)から判定する。無効→有効に転じた瞬間だけtrueを返す
+/// (有効のまま/無効のままでは巻き戻さない)。
 fn should_restart_title_bgm(was_enabled: bool, now_enabled: bool) -> bool {
     now_enabled && !was_enabled
 }
 
-/// ヘルプ画面のジュークボックスの選択カーソルを`len`個の巡回範囲内で動かす
-/// (TERM独自拡張。#151)。`forward`がtrueなら次へ、falseなら前へ進み、
-/// 端では反対の端へ巡回する。
+/// ヘルプ画面のジュークボックスの選択カーソルを`len`個の巡回範囲内で動かす。
+/// `forward`がtrueなら次へ、falseなら前へ進み、端では反対の端へ巡回する。
 fn cycle_jukebox_selection(selection: usize, len: usize, forward: bool) -> usize {
     if forward {
         (selection + 1) % len
@@ -924,22 +874,19 @@ fn cycle_jukebox_selection(selection: usize, len: usize, forward: bool) -> usize
     }
 }
 
-/// アプリ全体の画面状態。タイトル画面・モードセレクト画面・設定画面・
-/// プレイ中(Gameを保持)の4値(spec.md 1章、モードセレクト・設定画面はTERM独自
-/// 拡張)。`Game`は演出・補間用の状態が増えバリアント間のサイズ差が大きくなった
-/// ため`Box`で包む。
+/// アプリ全体の画面状態(spec.md 1章)。`Game`は演出・補間用の状態が増え
+/// バリアント間のサイズ差が大きくなったため`Box`で包む。
 enum Screen {
     Title,
-    /// コース選択画面(TERM独自拡張。#112。ユーザー指摘: 「起動フローにモード
-    /// セレクト画面を追加」)。タイトルでEnterを押した直後に経由し、ここで
-    /// Enterを押すと実際にゲームが始まる。
+    /// コース選択画面。タイトルでEnterを押した直後に経由し、
+    /// ここでEnterを押すと実際にゲームが始まる。
     ModeSelect,
     Settings,
     Help,
     Playing(Box<Game>),
 }
 
-/// 一時停止中にオーバーレイ表示する画面(TERM独自拡張)。`Screen::Playing`のまま
+/// 一時停止中にオーバーレイ表示する画面。`Screen::Playing`のまま
 /// (Gameを手放さず)上に重ねて描画するだけなので、独立した状態として持つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PauseOverlay {
@@ -949,9 +896,8 @@ enum PauseOverlay {
 }
 
 /// Xブロック/AIR等の出現率設定(%)を1ステップぶん増減し、指定した下限〜
-/// `SPAWN_RATE_PERCENT_MAX`にクランプする(TERM独自拡張。ユーザー指摘: 「設定で
-/// Xブロックの配分量・AIRの配分量をいじれるようにしたい」)。スターは上限・
-/// 刻み幅が異なるため`adjust_star_rate_percent`を別に使う。
+/// `SPAWN_RATE_PERCENT_MAX`にクランプする。スターは上限・刻み幅が異なるため
+/// `adjust_star_rate_percent`を別に使う。
 fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
     if increase {
         current
@@ -962,10 +908,9 @@ fn adjust_rate_percent(current: u32, increase: bool, min: u32) -> u32 {
     }
 }
 
-/// スターブロックの出現率設定(%)を1ステップぶん増減する(TERM独自拡張。ユーザー
-/// 指摘: 「スター配分300%もっと増やしてよ大量に」)。他ブロックと共通の
-/// `adjust_rate_percent`とは上限・刻み幅が異なる専用の上限
-/// (`STAR_SPAWN_RATE_PERCENT_MAX`)・刻み幅(`STAR_SPAWN_RATE_PERCENT_STEP`)を使う。
+/// スターブロックの出現率設定(%)を1ステップぶん増減する。他ブロックと共通の
+/// `adjust_rate_percent`とは異なる、スター専用の上限(`STAR_SPAWN_RATE_PERCENT_MAX`)・
+/// 刻み幅(`STAR_SPAWN_RATE_PERCENT_STEP`)を使う。
 fn adjust_star_rate_percent(current: u32, increase: bool) -> u32 {
     if increase {
         current
@@ -982,13 +927,9 @@ fn adjust_star_rate_percent(current: u32, increase: bool) -> u32 {
     }
 }
 
-/// 配分率・色数系の設定項目(岩/AIR/スター/ダイヤ/アイテム3種/色数/色結合率)を
-/// 1ステップぶん調整する(TERM独自拡張。#91、コード重複解消)。タイトルの単独
-/// Settings画面とプレイ中の一時停止オーバーレイの両方で全く同じ調整ロジックが
-/// 必要なため共通化した。`choice`が対象の項目でなければ何もせず`false`を返す
-/// (呼び出し側はそれぞれ固有の項目、例: FieldWidthやBombRate等をこの後で
-/// 個別に処理する)。盤面への反映(`Game::reroll_spawn_rates_from`)・
-/// `Settings::save`は呼び出し側の責務のまま、ここでは行わない。
+/// 配分率・色数系の設定項目(岩/AIR/スター/ダイヤ/アイテム3種/色数/色結合率)を1ステップ
+/// ぶん調整する。タイトルのSettings画面と一時停止オーバーレイで同じロジックが要るため共通化。
+/// `choice`が対象外なら何もせず`false`を返す。盤面への反映・`Settings::save`は呼び出し側の責務。
 fn adjust_spawn_rate_setting(
     settings: &mut Settings,
     choice: ui::render::SettingsChoice,
@@ -1056,10 +997,9 @@ fn adjust_spawn_rate_setting(
     true
 }
 
-/// ボム出現頻度設定(%)を1ステップぶん増減する(TERM独自拡張。#212。ユーザー
-/// 指摘: 「ボム300%の基準をもっと増量してほしい」)。他の配分率と共通の
-/// `adjust_rate_percent`とは上限・刻み幅が異なる専用の上限
-/// (`BOMB_SPAWN_RATE_PERCENT_MAX`)・刻み幅(`BOMB_SPAWN_RATE_PERCENT_STEP`)を使う。
+/// ボム出現頻度設定(%)を1ステップぶん増減する。他の配分率と共通の
+/// `adjust_rate_percent`とは異なる、ボム専用の上限(`BOMB_SPAWN_RATE_PERCENT_MAX`)・
+/// 刻み幅(`BOMB_SPAWN_RATE_PERCENT_STEP`)を使う。
 fn adjust_bomb_rate_percent(current: u32, increase: bool) -> u32 {
     if increase {
         current
@@ -1076,9 +1016,7 @@ fn adjust_bomb_rate_percent(current: u32, increase: bool) -> u32 {
     }
 }
 
-/// 出現する色ブロックの色数(`COLOR_COUNT_MIN`〜`COLOR_COUNT_MAX`)を1ずつ増減する
-/// (TERM独自拡張。ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい
-/// (1〜4)」)。
+/// 出現する色ブロックの色数(`COLOR_COUNT_MIN`〜`COLOR_COUNT_MAX`)を1ずつ増減する。
 fn adjust_color_count(current: u8, increase: bool) -> u8 {
     if increase {
         current.saturating_add(1).min(COLOR_COUNT_MAX)
@@ -1087,8 +1025,7 @@ fn adjust_color_count(current: u8, increase: bool) -> u8 {
     }
 }
 
-/// ブロック落下速度(tick間隔, ms)を`DEBUG_FALL_TICK_STEP_MS`ぶん増減する
-/// (TERM独自拡張。ユーザー指摘: 「ブロックが落ちるスピードの設定値がないよね」)。
+/// ブロック落下速度(tick間隔, ms)を`DEBUG_FALL_TICK_STEP_MS`ぶん増減する。
 /// `increase`はms値そのものの増減方向(true=ms増加=遅くなる)を表す。
 fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
     if increase {
@@ -1102,9 +1039,8 @@ fn adjust_fall_speed_ms(current: u64, increase: bool) -> u64 {
     }
 }
 
-/// 横移動のクールダウン間隔(ms)を`MOVE_COOLDOWN_MS_STEP`ぶん増減する(TERM独自拡張。
-/// ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。`increase`はms値
-/// そのものの増減方向(true=ms増加=遅くなる)を表す。
+/// 横移動のクールダウン間隔(ms)を`MOVE_COOLDOWN_MS_STEP`ぶん増減する。
+/// `increase`はms値そのものの増減方向(true=ms増加=遅くなる)を表す。
 fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
     if increase {
         current
@@ -1117,8 +1053,7 @@ fn adjust_move_cooldown_ms(current: u64, increase: bool) -> u64 {
     }
 }
 
-/// フィールド幅(列数)を`FIELD_WIDTH_STEP`ぶん増減する(TERM独自拡張。ユーザー指摘:
-/// 「設定値に列の数を変更できるようにして」)。新規ゲーム開始時にのみ反映される。
+/// フィールド幅(列数)を`FIELD_WIDTH_STEP`ぶん増減する。新規ゲーム開始時にのみ反映される。
 fn adjust_field_width(current: usize, increase: bool) -> usize {
     if increase {
         current
@@ -1131,9 +1066,7 @@ fn adjust_field_width(current: usize, increase: bool) -> usize {
     }
 }
 
-/// ヒヤリ回避スライダー後の硬直時間(ms)を`DODGE_RECOVERY_MS_STEP`ぶん増減する
-/// (TERM独自拡張。ユーザー指摘: 「スライダー直後その状態で起き上がるまでに1秒
-/// インターバル=この設定値も作る」)。
+/// ヒヤリ回避スライダー後の硬直時間(ms)を`DODGE_RECOVERY_MS_STEP`ぶん増減する。
 fn adjust_dodge_recovery_ms(current: u64, increase: bool) -> u64 {
     if increase {
         current
@@ -1146,9 +1079,8 @@ fn adjust_dodge_recovery_ms(current: u64, increase: bool) -> u64 {
     }
 }
 
-/// 自動消滅の連鎖インターバル(ms)を`CHAIN_VANISH_INTERVAL_MS_STEP`ぶん増減する
-/// (TERM独自拡張。#187。ユーザー指摘: 「ブロックが消えて、連鎖的に次ブロックが
-/// 消えるとき、0msで連続するのではなく一定のインターバルで連鎖するように」)。
+/// 自動消滅の連鎖インターバル(ms)を`CHAIN_VANISH_INTERVAL_MS_STEP`ぶん増減する。
+/// 連鎖消滅を0ms連続でなく一定間隔で進めるための設定。
 fn adjust_chain_vanish_interval_ms(current: u64, increase: bool) -> u64 {
     if increase {
         current
@@ -1191,9 +1123,7 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer),
             GameEvent::BombFuseWarning => audio::sfx::play_bomb_fuse_warning(mixer),
             GameEvent::BombFuseTick => audio::sfx::play_bomb_fuse_tick(mixer),
-            // 100mごとのチェックポイント到達(TERM独自拡張。#178)。「ゴールSEと演出」
-            // というユーザー指摘の通り、最終ゴール(Cleared)と同じファンファーレを
-            // 使い回す。
+            // 100mごとのチェックポイント到達。最終ゴール(Cleared)と同じファンファーレを使い回す。
             GameEvent::Checkpoint100m { .. } => audio::sfx::play_clear_fanfare(mixer),
         }
     }
@@ -1205,8 +1135,7 @@ mod tests {
 
     #[test]
     fn effective_title_bgm_enabled_is_true_only_on_title() {
-        // ユーザー指摘: 「タイトル画面は、これで!」(#146)。タイトル画面にいる間
-        // だけタイトル用BGMを鳴らす。
+        // タイトル画面にいる間だけタイトル用BGMを鳴らす。
         assert!(effective_title_bgm_enabled(true, &Screen::Title));
         assert!(!effective_title_bgm_enabled(false, &Screen::Title));
         assert!(!effective_title_bgm_enabled(true, &Screen::Settings));
@@ -1221,16 +1150,15 @@ mod tests {
 
     #[test]
     fn effective_gameplay_bgm_enabled_is_always_false_on_title_regardless_of_setting() {
-        // ユーザー指摘: 「タイトル画面ではMUSIC無し」(#86。タイトル画面は#146の
-        // 専用曲の担当になったため、プレイ中BGM側は常に鳴らないはず)。
+        // タイトル画面は専用曲(タイトルBGM)の担当のため、プレイ中BGM側は常に鳴らないはず。
         assert!(!effective_gameplay_bgm_enabled(true, &Screen::Title));
         assert!(!effective_gameplay_bgm_enabled(false, &Screen::Title));
     }
 
     #[test]
     fn mode_select_screen_keeps_the_title_bgm_playing_and_never_the_gameplay_bgm() {
-        // TERM独自拡張(#112)。モードセレクト画面はタイトルから直接つながる短い
-        // 経由画面のため、タイトルBGMを途切れさせずそのまま鳴らし続ける。
+        // モードセレクト画面はタイトルから直接つながる短い経由画面のため、
+        // タイトルBGMを途切れさせずそのまま鳴らし続ける。
         assert!(effective_title_bgm_enabled(true, &Screen::ModeSelect));
         assert!(!effective_title_bgm_enabled(false, &Screen::ModeSelect));
         assert!(!effective_gameplay_bgm_enabled(true, &Screen::ModeSelect));
@@ -1245,9 +1173,8 @@ mod tests {
 
     #[test]
     fn effective_gameplay_bgm_enabled_is_always_false_on_the_standalone_help_screen() {
-        // #151でヘルプ画面(タイトルから開く独立画面)はジュークボックスの
-        // 置き場になったため、自動でプレイ中BGMを流し続けると試聴と二重に
-        // 聞こえてしまう。常に無音にする。
+        // ヘルプ画面(タイトルから開く独立画面)はジュークボックスの置き場のため、
+        // 自動でプレイ中BGMを流し続けると試聴と二重に聞こえてしまう。常に無音にする。
         assert!(!effective_gameplay_bgm_enabled(true, &Screen::Help));
         assert!(!effective_gameplay_bgm_enabled(false, &Screen::Help));
     }
@@ -1270,8 +1197,7 @@ mod tests {
 
     #[test]
     fn effective_gameplay_bgm_enabled_is_false_on_game_over() {
-        // ユーザー指摘: 「ゲームオーバーになったら、ゲームオーバーの短いミス音の後、
-        // MUSIC停止」。
+        // ゲームオーバー時は短いミス音の後、BGMを停止する。
         let mut game = Game::new(1);
         game.status = GameStatus::GameOver;
         assert!(!effective_gameplay_bgm_enabled(
@@ -1282,7 +1208,6 @@ mod tests {
 
     #[test]
     fn effective_gameplay_bgm_enabled_is_false_on_cleared() {
-        // ユーザー指摘: 「ゴールしたらMUSICとめてファンファーレでしょう」。
         // クリア時はBGMを止め、ファンファーレはSEとして別途再生する。
         let mut game = Game::new(1);
         game.status = GameStatus::Cleared;
@@ -1294,7 +1219,7 @@ mod tests {
 
     #[test]
     fn title_and_gameplay_bgm_are_never_both_enabled_at_once() {
-        // #145/#146でBGMを2系統に分けた際、同時に両方鳴ってしまうと不自然なので、
+        // BGMは2系統(タイトル用・プレイ中用)あり、同時に両方鳴ると不自然なので、
         // どの画面状態でも排他的であることを確認する。
         let labeled_screens: Vec<(&str, Screen)> = vec![
             ("Title", Screen::Title),
@@ -1314,8 +1239,7 @@ mod tests {
 
     #[test]
     fn should_restart_title_bgm_only_on_the_disabled_to_enabled_transition() {
-        // ユーザー指摘: 「タイトルに戻ったら最初から再生ね」(#150)。無効→有効に
-        // 転じた瞬間だけ巻き戻すべきで、有効のまま/無効のままでは巻き戻さない。
+        // 無効→有効に転じた瞬間だけ巻き戻すべきで、有効のまま/無効のままでは巻き戻さない。
         assert!(
             should_restart_title_bgm(false, true),
             "無効→有効の遷移では巻き戻すはず"
@@ -1336,7 +1260,6 @@ mod tests {
 
     #[test]
     fn cycle_jukebox_selection_wraps_around_at_both_ends() {
-        // ユーザー指摘: 「ヘルプページミュージック選んで再生する機能ほしい」(#151)。
         // ↑/↓での選択移動が両端で正しく巡回することを確認する。
         assert_eq!(cycle_jukebox_selection(0, 4, true), 1);
         assert_eq!(cycle_jukebox_selection(3, 4, true), 0, "末尾の次は先頭へ");
@@ -1347,7 +1270,7 @@ mod tests {
     #[test]
     fn adjust_rate_percent_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
         // 破損したsettings.jsonでcurrentがu32::MAX付近になっていても、raw加算での
-        // オーバーフローpanicはせず、上限へ飽和するだけのはず(TERM独自拡張。#153)。
+        // オーバーフローpanicはせず、上限へ飽和するだけのはず。
         assert_eq!(
             adjust_rate_percent(u32::MAX, true, SPAWN_RATE_PERCENT_MIN),
             SPAWN_RATE_PERCENT_MAX
@@ -1356,8 +1279,8 @@ mod tests {
 
     #[test]
     fn adjust_star_rate_percent_can_reach_the_higher_star_specific_max() {
-        // ユーザー指摘: 「スター配分300%もっと増やしてよ大量に」。他ブロックと共通の
-        // SPAWN_RATE_PERCENT_MAX(300%)より大きい、スター専用の上限まで増やせるはず。
+        // 他ブロックと共通のSPAWN_RATE_PERCENT_MAX(300%)より大きい、
+        // スター専用の上限まで増やせるはず。
         assert_eq!(
             adjust_star_rate_percent(u32::MAX, true),
             STAR_SPAWN_RATE_PERCENT_MAX,
@@ -1371,8 +1294,8 @@ mod tests {
 
     #[test]
     fn adjust_bomb_rate_percent_can_reach_the_higher_bomb_specific_max() {
-        // ユーザー指摘: 「ボム300%の基準をもっと増量してほしい」。他ブロックと共通の
-        // SPAWN_RATE_PERCENT_MAX(300%)より大きい、ボム専用の上限まで増やせるはず。
+        // 他ブロックと共通のSPAWN_RATE_PERCENT_MAX(300%)より大きい、
+        // ボム専用の上限まで増やせるはず。
         assert_eq!(
             adjust_bomb_rate_percent(u32::MAX, true),
             BOMB_SPAWN_RATE_PERCENT_MAX,
