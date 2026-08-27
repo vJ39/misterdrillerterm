@@ -5714,6 +5714,9 @@ mod tests {
             BOMB_MAX_COUNT_ON_BOARD,
             "上限を超えてボムが設置されてはいけない"
         );
+        // ユーザー指摘: 「BOMB_MAX_COUNT_ON_BOARD = 10にして」(#216)。3のままに
+        // 戻ってしまう回帰を防ぐため、定数への参照だけでなく実際の値も固定する。
+        assert_eq!(BOMB_MAX_COUNT_ON_BOARD, 10);
     }
 
     #[test]
