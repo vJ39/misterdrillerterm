@@ -2195,7 +2195,8 @@ impl Game {
     }
 
     /// 1個のボムの爆風を盤面へ適用する(炎フラッシュ・岩/ダイヤのスター化・色ブロック
-    /// の一色統一・新たに4連結以上になったグループの自動消滅)。プレイヤーが爆風に
+    /// の一色統一・アイテムブロックの破壊・新たに4連結以上になったグループの自動消滅)。
+    /// プレイヤーが爆風に
     /// 巻き込まれたかどうかを返すのみで、ミス処理自体は呼び出し側の責務とする
     /// (TERM独自拡張。通常の起爆カウントダウン完了時`detonate_bomb`と、死亡時の
     /// 即時全爆発`detonate_all_bombs_immediately`(#176)の両方から共通で使う)。
@@ -2220,6 +2221,8 @@ impl Game {
         let all_colors = ColorKind::ALL;
         let unify_color = all_colors[self.rng.random_range(0..all_colors.len())];
         let mut unified_positions = Vec::new();
+        // 爆風で破壊したアイテムブロック(消滅ログ用にループ後まとめて記録する)。
+        let mut destroyed_items: Vec<(board::Pos, Cell)> = Vec::new();
         for &(row, col) in &blast_cells {
             if (row, col) == self.player.position() {
                 hit_player = true;
@@ -2242,7 +2245,24 @@ impl Game {
             } else if matches!(self.board.cell(row, col), Cell::Color(_)) {
                 self.board.set(row, col, Cell::Color(unify_color));
                 unified_positions.push((row, col));
+            } else if matches!(self.board.cell(row, col), Cell::Item(_)) {
+                // アイテムブロック(C/R/K)は爆風で破壊する(TERM独自拡張。#213。
+                // ユーザー指摘: 「ボムはアイテムも消し飛ばす仕様に変更したい」)。
+                // #110では頭上一括クリア系の効果に対してアイテムをAIRと同じ保護
+                // 対象にしたが、その保護はボムの爆風には及ばせない(AIR自体の
+                // 扱いは従来通り無変更)。効果は発動させず、価値物(スター)も
+                // 生まずにただ消す。取得(プレイヤーが触れる)と破壊(爆風に
+                // 巻き込まれる)は別物として扱う。
+                let old = self.board.cell(row, col);
+                self.board.set(row, col, Cell::Empty);
+                destroyed_items.push(((row, col), old));
             }
+        }
+
+        // 消滅ログ・消滅フラッシュの記録は、下の色ブロック4連結消滅と同じように
+        // ループ後にまとめて1回で行う。
+        if !destroyed_items.is_empty() {
+            self.note_vanished_cells(destroyed_items);
         }
 
         // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅
@@ -5697,8 +5717,12 @@ mod tests {
     }
 
     #[test]
-    fn bomb_explosion_converts_rock_and_diamond_within_blast_range_to_star_but_leaves_air_and_items_untouched()
+    fn bomb_explosion_converts_rock_and_diamond_within_blast_range_to_star_and_destroys_items_but_leaves_air_untouched()
      {
+        // ユーザー指摘: 「ボムはアイテムも消し飛ばす仕様に変更したい」(#213)。
+        // #110で「頭上一括クリア系の効果ではアイテムをAIRと同じ保護対象にする」と
+        // 決めたが、その保護をボムの爆風に限って解除する。AIRの扱いは従来通り
+        // (爆風の影響を受けない)で変更しない。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -5715,6 +5739,8 @@ mod tests {
         game.board.rows[521][5] = Cell::Diamond;
         game.board.rows[520][4] = Cell::Oxygen;
         game.board.rows[519][5] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[520][8] = Cell::Item(ItemEffect::UnifyColors);
+        game.board.rows[520][9] = Cell::Item(ItemEffect::StarifyScreen);
 
         let events = game.update(Duration::from_millis(60));
 
@@ -5734,10 +5760,250 @@ mod tests {
         );
         assert_eq!(
             game.board.cell(519, 5),
-            Cell::Item(ItemEffect::ClearAbove),
-            "アイテムブロックは爆風の影響を受けないはず"
+            Cell::Empty,
+            "爆風内のRアイテムは破壊されて空になるはず"
+        );
+        assert_eq!(
+            game.board.cell(520, 8),
+            Cell::Empty,
+            "爆風内のCアイテムは破壊されて空になるはず"
+        );
+        assert_eq!(
+            game.board.cell(520, 9),
+            Cell::Empty,
+            "爆風内のKアイテムは破壊されて空になるはず"
         );
         assert!(events.contains(&GameEvent::BombExploded));
+    }
+
+    #[test]
+    fn bomb_destroying_an_item_does_not_trigger_the_item_effect() {
+        // #213。爆風でのアイテム破壊は「取得」ではないため、C/R/Kいずれの効果も
+        // 発動させない。爆風範囲外に置いた各効果の痕跡確認用セルが、爆発後も
+        // 元のままであることで確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        // 爆風(ボムの行全体+ボムの列の上下)に入るアイテム3種
+        game.board.rows[520][2] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[520][8] = Cell::Item(ItemEffect::UnifyColors);
+        game.board.rows[520][9] = Cell::Item(ItemEffect::StarifyScreen);
+        // Rアイテム(頭上クリア)が発動したら消える位置の岩。同時に
+        // Kアイテム(画面内スター化)が発動したらスターに変わる位置でもある。
+        game.board.rows[490][8] = Cell::Rock { hits: 0 };
+        // Kアイテム(画面内スター化)が発動したらスターに変わる位置のダイヤ
+        game.board.rows[505][9] = Cell::Diamond;
+        // Cアイテム(近傍色統一)が発動したら2色に塗り替えられる4色の色ブロック
+        game.board.rows[495][10] = Cell::Color(ColorKind::Red);
+        game.board.rows[495][11] = Cell::Color(ColorKind::Blue);
+        game.board.rows[496][10] = Cell::Color(ColorKind::Green);
+        game.board.rows[496][11] = Cell::Color(ColorKind::Yellow);
+
+        let events = game.update(Duration::from_millis(60));
+
+        assert_eq!(game.board.cell(520, 2), Cell::Empty);
+        assert_eq!(game.board.cell(520, 8), Cell::Empty);
+        assert_eq!(game.board.cell(520, 9), Cell::Empty);
+        assert_eq!(
+            game.board.cell(490, 8),
+            Cell::Rock { hits: 0 },
+            "Rアイテムの頭上クリアもKアイテムのスター化も発動していないはず"
+        );
+        assert_eq!(
+            game.board.cell(505, 9),
+            Cell::Diamond,
+            "Kアイテムの画面内スター化は発動していないはず"
+        );
+        assert_eq!(game.board.cell(495, 10), Cell::Color(ColorKind::Red));
+        assert_eq!(game.board.cell(495, 11), Cell::Color(ColorKind::Blue));
+        assert_eq!(game.board.cell(496, 10), Cell::Color(ColorKind::Green));
+        assert_eq!(
+            game.board.cell(496, 11),
+            Cell::Color(ColorKind::Yellow),
+            "Cアイテムの色統一は発動していないはず(発動していれば4色は2色に減る)"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemCollected(_))),
+            "破壊は取得ではないのでItemCollectedは発生しないはず"
+        );
+    }
+
+    #[test]
+    fn bomb_destroying_an_item_does_not_change_the_score() {
+        // #213。ボムは現状スコアを一切生まない(岩のスター化・色統一・その後の
+        // 4連結自動消滅すら加点しない)ため、アイテム破壊も加点・減点しない。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[520][2] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[520][8] = Cell::Item(ItemEffect::UnifyColors);
+        game.board.rows[520][9] = Cell::Item(ItemEffect::StarifyScreen);
+        let score_before = game.player.score;
+
+        game.update(Duration::from_millis(60));
+
+        assert_eq!(game.board.cell(520, 2), Cell::Empty);
+        assert_eq!(
+            game.player.score, score_before,
+            "アイテムの破壊はスコア対象外"
+        );
+    }
+
+    #[test]
+    fn bomb_explosion_leaves_item_blocks_outside_the_blast_untouched() {
+        // #213。破壊されるのはあくまで爆風の届いたマスのアイテムだけで、
+        // 範囲外のアイテムは無傷のまま残る。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5; // 爆風範囲外の位置
+        game.bombs.push(Bomb {
+            pos: (520, 5),
+            origin: (520, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[520][8] = Cell::Item(ItemEffect::ClearAbove); // 爆風内
+        game.board.rows[540][8] = Cell::Item(ItemEffect::UnifyColors); // 行も列も外れる
+        game.board.rows[560][5] = Cell::Item(ItemEffect::StarifyScreen); // 同じ列だが縦の射程外
+
+        game.update(Duration::from_millis(60));
+
+        assert_eq!(
+            game.board.cell(520, 8),
+            Cell::Empty,
+            "爆風内のアイテムは破壊されるはず"
+        );
+        assert_eq!(
+            game.board.cell(540, 8),
+            Cell::Item(ItemEffect::UnifyColors),
+            "爆風範囲外のアイテムは無傷のはず"
+        );
+        assert_eq!(
+            game.board.cell(560, 5),
+            Cell::Item(ItemEffect::StarifyScreen),
+            "同じ列でも縦の射程外のアイテムは無傷のはず"
+        );
+    }
+
+    #[test]
+    fn blocks_resting_on_an_item_destroyed_by_a_bomb_fall_afterwards() {
+        // #213。アイテムがEmptyになることで支えを失った上のブロックは、通常の
+        // 重力(揺れ→落下)でそのまま落ちてくる。
+        let last_row = FIELD_DEPTH_M - 1;
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 950;
+        game.player.col = 11; // 爆風範囲外の位置
+        game.set_bomb_spawn_rate_percent(0);
+        game.bombs.push(Bomb {
+            pos: (last_row, 5),
+            origin: (last_row, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        // 最深行のアイテム(常に支持されている)と、その上に乗ったダイヤ
+        game.board.rows[last_row][8] = Cell::Item(ItemEffect::ClearAbove);
+        game.board.rows[last_row - 1][8] = Cell::Diamond;
+
+        game.update(Duration::from_millis(60));
+        assert_eq!(
+            game.board.cell(last_row, 8),
+            Cell::Empty,
+            "爆風内のアイテムは破壊されるはず"
+        );
+        assert_eq!(
+            game.board.cell(last_row - 1, 8),
+            Cell::Diamond,
+            "この時点ではダイヤはまだ落ちていないはず"
+        );
+
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+
+        assert_eq!(
+            game.board.cell(last_row - 1, 8),
+            Cell::Empty,
+            "支えを失ったダイヤは元の位置から落ちるはず"
+        );
+        assert_eq!(
+            game.board.cell(last_row, 8),
+            Cell::Diamond,
+            "アイテムが消えた跡へダイヤが落ちてくるはず"
+        );
+    }
+
+    #[test]
+    fn destroyed_items_free_up_the_window_top_up_capacity() {
+        // #213の副作用確認。アイテム出現数の窓単位補充(#210/#211)は現存個数を
+        // 都度数え直す方式なので、爆風でアイテムがEmptyになれば補充枠も自動的に
+        // 回復する(補充側のコードは変更していない)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let count_clear_above = |game: &Game, from: usize, to: usize| {
+            game.board.rows[from..to]
+                .iter()
+                .flatten()
+                .filter(|c| matches!(c, Cell::Item(ItemEffect::ClearAbove)))
+                .count()
+        };
+
+        // 窓[100, 200)を上限いっぱいのRアイテムで埋め、その先の未抽選territory
+        // (200..260)は抽選対象になる未掘削マスで埋めておく。
+        for i in 0..crate::constants::ITEM_MAX_COUNT_ON_BOARD {
+            game.board.rows[100 + i][0] = Cell::Item(ItemEffect::ClearAbove);
+        }
+        for row in 200..260 {
+            for col in 0..game.board.width() {
+                game.board.rows[row][col] = Cell::Color(ColorKind::Red);
+            }
+        }
+
+        game.board.top_up_items(100, 200, 260, 2000, 0, 0);
+        assert_eq!(
+            count_clear_above(&game, 200, 260),
+            0,
+            "窓内が上限に達している間は新しいRアイテムを補充しないはず"
+        );
+
+        // 爆風で窓内のアイテムが全て破壊された状態にして、同じ条件で再度補充する。
+        for i in 0..crate::constants::ITEM_MAX_COUNT_ON_BOARD {
+            game.board.rows[100 + i][0] = Cell::Empty;
+        }
+        game.board.top_up_items(100, 200, 260, 2000, 0, 0);
+
+        assert!(
+            count_clear_above(&game, 200, 260) > 0,
+            "破壊されたぶんだけ補充枠が回復し、新しいRアイテムが出現するはず"
+        );
     }
 
     #[test]
@@ -6202,8 +6468,9 @@ mod tests {
         // ユーザー指摘: 「爆打の火柱が描画されていない!」(#166)。#159で爆風が
         // Rock/Diamondで止まらず遠くまで貫通するようになった結果、爆風経路の大半を
         // 占めるEmpty(既に掘削済みの空間)には炎フラッシュが一切付かず、炎の柱が
-        // ほとんど見えなくなっていた。Empty/Oxygen/Item等、内容を書き換えない
-        // セルでも炎演出自体は他のセルと同じように発火するはず。
+        // ほとんど見えなくなっていた。Empty/Oxygen等、内容を書き換えないセルでも
+        // 炎演出自体は他のセルと同じように発火するはず(アイテムブロックは#213で
+        // 破壊対象になったため、この「内容を書き換えないセル」からは外れた)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
