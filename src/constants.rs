@@ -365,3 +365,38 @@ pub const BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER: usize = 40;
 
 /// 盤面スナップショットで記録する、プレイヤーより深い(画面上で下にある)側の行数。
 pub const BOARD_SNAPSHOT_ROWS_BELOW_PLAYER: usize = 5;
+
+// ---------------------------------------------------------------------------
+// オートプレイ(#218)。長時間プレイでしか出ない稀なバグを再現・検出するソークテスト
+// 用のデバッグ機能。無敵(`Game::set_invincible`)と、盤面から次の一手を決める
+// 貪欲AI(`autoplay::Autopilot`)の2つを独立したトグルとして持つ。
+// ---------------------------------------------------------------------------
+
+/// メインループの目安フレーム間隔(ms。spec.md 9章 ポーリング間隔目安16〜33ms=
+/// 30〜60fps相当)。オートプレイ側が「何フレーム待ったか」を実時間へ換算する際にも
+/// 参照するため、main.rsのローカル定数ではなくここで一元管理する。
+pub const FRAME_INTERVAL_MS: u64 = 33;
+
+/// オートプレイがAIR(酸素カプセル)探索へ切り替える残量。これを下回ると、通常の
+/// 下降より近傍のAIR確保を優先する。
+pub const AUTOPLAY_OXYGEN_SEEK_THRESHOLD: f32 = 50.0;
+
+/// 岩ブロックを掘る(5回ヒット・酸素を消費する)ことを許容する酸素残量の下限。
+/// これを下回っている間は、迂回できる岩は掘らずに横へ回り込む。
+pub const AUTOPLAY_OXYGEN_ROCK_BUDGET: f32 = 40.0;
+
+/// AIR探索で見る、プレイヤーより深い側の行数。
+pub const AUTOPLAY_LOOKAHEAD_ROWS: usize = 14;
+
+/// ボムの起爆残り時間がこれ以下になったら回避行動へ移る(ms)。
+pub const AUTOPLAY_BOMB_EVADE_MS: u32 = 2500;
+
+/// 位置が変わらないままこのフレーム数が過ぎたら、行動の段階(escalation)を1つ上げる。
+pub const AUTOPLAY_STUCK_FRAMES: u32 = 90;
+
+/// 無敵OFFのままGameOverになった場合、自動でReviveするまでの待ち時間(ms)。
+pub const AUTOPLAY_REVIVE_DELAY_MS: u64 = 1500;
+
+/// タイトル画面で無操作のままこの時間が過ぎたら、アトラクトモード(自動デモプレイ)を
+/// 開始する(ms)。
+pub const ATTRACT_MODE_IDLE_MS: u64 = 30000;

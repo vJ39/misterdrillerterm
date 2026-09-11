@@ -51,6 +51,10 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Char('k') | KeyCode::Char('K') => InputAction::DebugStarifyVisibleScreen,
         // ボム(Bomb)の頭文字。#96。ユーザー指摘: 「ショートカットキーもくれ」。
         KeyCode::Char('b') | KeyCode::Char('B') => InputAction::DebugPlaceBomb,
+        // オートプレイ(#218)。T=auTopilot、G=God mode(無敵)。
+        // TはONにすると無敵も同時にONになり、Gは無敵だけを単独で切り替える。
+        KeyCode::Char('t') | KeyCode::Char('T') => InputAction::DebugToggleAutopilot,
+        KeyCode::Char('g') | KeyCode::Char('G') => InputAction::DebugToggleInvincible,
         KeyCode::Char('[') => InputAction::DebugBlockFallSlower,
         KeyCode::Char(']') => InputAction::DebugBlockFallFaster,
         KeyCode::Char('-') => InputAction::DebugPlayerFallSlower,
@@ -92,7 +96,9 @@ pub fn poll_input_batch(poll_ms: u64) -> std::io::Result<Vec<InputAction>> {
 /// 「メニューから進むのEnter」「他のボタンで進んではいけない」。以前はEsc/S/H以外の
 /// 任意のキーで進めたが、誤操作防止のためEnter専用にした。終了キーは元Qだったが
 /// 「すべてのQキーをESCに変更」の指摘でEscへ変更)。それ以外のキーは
-/// `None`(無視)を返す。
+/// それ以外のキーは`Ignored`を返す(画面遷移は起こさないが「キーが押された」ことは
+/// 呼び出し側へ伝える。アトラクトモードのアイドルタイマーをどのキーでもリセット
+/// できるようにするため。TERM独自拡張。#218)。キー入力自体が無ければ`None`。
 pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
     if !event::poll(Duration::from_millis(poll_ms))? {
         return Ok(None);
@@ -111,7 +117,7 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
         KeyCode::Char('s') | KeyCode::Char('S') => AnyKeyAction::OpenSettings,
         KeyCode::Char('h') | KeyCode::Char('H') => AnyKeyAction::OpenHelp,
         KeyCode::Enter => AnyKeyAction::Advance,
-        _ => return Ok(None),
+        _ => AnyKeyAction::Ignored,
     }))
 }
 
@@ -128,6 +134,9 @@ pub enum AnyKeyAction {
     /// Hキー。タイトル画面でのショートカット一覧ヘルプ画面オープンとして扱う
     /// (TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)。
     OpenHelp,
+    /// 上記いずれにも当てはまらないキー(TERM独自拡張。#218)。画面遷移は起こさないが、
+    /// アトラクトモードのアイドルタイマーはリセットする。
+    Ignored,
 }
 
 #[cfg(test)]
@@ -172,6 +181,27 @@ mod tests {
         );
         // ユーザー指摘: 「メニューから進むのEnter」「他のボタンで進んではいけない」。
         assert_eq!(action_from_key_code(KeyCode::Enter), InputAction::Confirm);
+    }
+
+    #[test]
+    fn action_from_key_code_maps_the_autoplay_and_invincible_shortcuts() {
+        // #218: T=オートプレイ(無敵も同時にON)、G=無敵単独。
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('t')),
+            InputAction::DebugToggleAutopilot
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('T')),
+            InputAction::DebugToggleAutopilot
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('g')),
+            InputAction::DebugToggleInvincible
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('G')),
+            InputAction::DebugToggleInvincible
+        );
     }
 
     #[test]

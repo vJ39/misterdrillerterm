@@ -69,6 +69,13 @@ impl DebugLog {
                  col INTEGER NOT NULL,
                  cell_kind TEXT NOT NULL
              );
+             CREATE TABLE miss_events (
+                 frame INTEGER NOT NULL,
+                 cause TEXT NOT NULL,
+                 averted INTEGER NOT NULL,
+                 row INTEGER NOT NULL,
+                 col INTEGER NOT NULL
+             );
              CREATE TABLE render_fallback_events (
                  frame INTEGER NOT NULL,
                  row INTEGER NOT NULL,
@@ -123,6 +130,28 @@ impl DebugLog {
         ).and_then(|mut stmt| {
             stmt.execute(rusqlite::params![frame as i64, cell_kind, pos.0 as i64, pos.1 as i64])
         });
+        let _ = result;
+    }
+
+    /// ミスの発生を記録する(TERM独自拡張。#218)。`cause`は死因
+    /// (`MissCause::as_str`)、`averted`は無敵によって回避されたかどうか。
+    /// ソークテスト(長時間のオートプレイ)後に「どの死因が何回・どの座標で起きたか」を
+    /// 後から集計するために使う。
+    pub fn log_miss(&self, frame: u64, cause: &str, averted: bool, row: usize, col: usize) {
+        let result = self
+            .conn
+            .prepare_cached(
+                "INSERT INTO miss_events (frame, cause, averted, row, col) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .and_then(|mut stmt| {
+                stmt.execute(rusqlite::params![
+                    frame as i64,
+                    cause,
+                    averted as i64,
+                    row as i64,
+                    col as i64
+                ])
+            });
         let _ = result;
     }
 
@@ -350,6 +379,43 @@ mod tests {
         assert_eq!(resolved_kind, None);
         assert_eq!(fallback_used, 0);
         assert_eq!(flash_remaining_ms, None);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn log_miss_records_the_cause_position_and_whether_it_was_averted() {
+        // #218: 無敵ONのソークテストで「どの死因が何回起きたか」を後から集計できるよう、
+        // 実際にミス処理した行と、無敵で回避した行の両方が区別して残ることを確認する。
+        let path = temp_log_path("miss-events");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let log = DebugLog::open_fresh_at(&path).unwrap();
+        log.log_miss(5, "OxygenOut", true, 120, 3);
+        log.log_miss(9, "CrushedByFallingBlock", false, 130, 4);
+
+        let (cause, averted, row, col): (String, i64, i64, i64) = log
+            .conn
+            .query_row(
+                "SELECT cause, averted, row, col FROM miss_events WHERE frame = 5",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (cause.as_str(), averted, row, col),
+            ("OxygenOut", 1, 120, 3)
+        );
+
+        let averted_count: i64 = log
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM miss_events WHERE averted = 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(averted_count, 1, "回避しなかったミスも1行残るはず");
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

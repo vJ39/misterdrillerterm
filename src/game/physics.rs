@@ -231,29 +231,71 @@ fn is_overhead_unstable(
     target: (usize, usize),
     player_pos: (usize, usize),
 ) -> bool {
+    fall_hazard_status(board, gravity, target, player_pos)
+        .is_some_and(|status| status.unsupported && !status.shaking)
+}
+
+/// セル`target`が「いずれ落ちてくる可能性がある」かどうか(TERM独自拡張。#218)。
+/// `is_overhead_unstable`が「今まさに落下中で押し潰す」だけを見るのに対し、こちらは
+/// 揺れ中(これから落ちる予告状態)も危険として含める。オートプレイ(`autoplay.rs`)が
+/// 頭上・移動先の安全確認に使う。
+pub(crate) fn is_falling_hazard(
+    board: &Board,
+    gravity: &GravityState,
+    target: (usize, usize),
+    player_pos: (usize, usize),
+) -> bool {
+    fall_hazard_status(board, gravity, target, player_pos)
+        .is_some_and(|status| status.unsupported || status.shaking)
+}
+
+/// `fall_hazard_status`の戻り値(TERM独自拡張。#218)。支持判定と揺れ判定を
+/// 分けて返すことで、呼び出し側が「落下中のみ」「落ちる予告も含む」を選べるようにする。
+struct FallHazardStatus {
+    /// 支えを失っている(この塊は落下対象)。
+    unsupported: bool,
+    /// 揺れの猶予期間中(まだ静止しているが、明ければ落下する)。
+    shaking: bool,
+}
+
+/// セル`target`の落下に関する状態を求める(TERM独自拡張。#218)。色ブロック・岩
+/// ブロックは連結している塊全体で、ダイヤ・スターは単独セルで判定する(spec.md 4章
+/// 「同色ブロックが隣接したら必ず結合する」と同じ考え方)。落下の脅威になり得ない
+/// セル種別では`None`を返す。
+///
+/// AIR(酸素カプセル)は押し潰しの脅威にはならない(ユーザー指摘: 「AIRだったら、
+/// 掘れはしないけどちゃんと取れてほしい。AIRに対しては掘っても無効化しておけば
+/// いいだけ」)。不安定でも上向き掘削はdrill_cellのOxygenUntouchedByDrillへ
+/// そのまま流れ、押し潰しにはならない。取得は歩み寄り・自由落下・重力ティックでの
+/// 自動取得を通じて行われる。アイテムブロックもAIRと同じ扱いにする(TERM独自
+/// 拡張。ユーザー指摘: 「アイテムはAIRと同じ用に…上から振ってきても死なない
+/// ように」)。
+fn fall_hazard_status(
+    board: &Board,
+    gravity: &GravityState,
+    target: (usize, usize),
+    player_pos: (usize, usize),
+) -> Option<FallHazardStatus> {
     match board.cell(target.0, target.1) {
-        Cell::Empty => false,
+        Cell::Empty | Cell::Oxygen | Cell::Item(_) => None,
         Cell::Color(color) => {
             let group = connected_same_color(board, target, color);
-            !is_group_supported(board, &group, player_pos)
-                && !group.iter().any(|&p| gravity.is_shaking(p))
+            Some(FallHazardStatus {
+                unsupported: !is_group_supported(board, &group, player_pos),
+                shaking: group.iter().any(|&p| gravity.is_shaking(p)),
+            })
         }
         Cell::Rock { .. } => {
             let group = connected_rock_group(board, target);
-            !is_group_supported(board, &group, player_pos)
-                && !group.iter().any(|&p| gravity.is_shaking(p))
+            Some(FallHazardStatus {
+                unsupported: !is_group_supported(board, &group, player_pos),
+                shaking: group.iter().any(|&p| gravity.is_shaking(p)),
+            })
         }
-        // AIR(酸素カプセル)は押し潰しの脅威にはならない(ユーザー指摘: 「AIRだったら、
-        // 掘れはしないけどちゃんと取れてほしい。AIRに対しては掘っても無効化しておけば
-        // いいだけ」)。不安定でも上向き掘削はdrill_cellのOxygenUntouchedByDrillへ
-        // そのまま流れ、押し潰しにはならない。取得は歩み寄り・自由落下・重力ティックでの
-        // 自動取得を通じて行われる。アイテムブロックもAIRと同じ扱いにする(TERM独自
-        // 拡張。ユーザー指摘: 「アイテムはAIRと同じ用に…上から振ってきても死なない
-        // ように」)。
-        Cell::Oxygen | Cell::Item(_) => false,
-        Cell::Diamond | Cell::Star { .. } => {
-            !is_supported(board, target, player_pos) && !gravity.is_shaking(target)
-        }
+        Cell::Diamond | Cell::Star { .. } => Some(FallHazardStatus {
+            unsupported: !is_supported(board, target, player_pos),
+            shaking: gravity.is_shaking(target),
+        }),
     }
 }
 

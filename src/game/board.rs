@@ -542,6 +542,12 @@ impl Board {
         self.rows[row][col]
     }
 
+    /// `cell`の、盤面外なら`None`を返す版(TERM独自拡張。#218)。オートプレイが
+    /// 最深行の直下や盤面端の外側を見る際、毎回境界チェックを書かずに済ませる。
+    pub fn cell_or_none(&self, row: usize, col: usize) -> Option<Cell> {
+        (row < self.depth_rows() && col < self.width()).then(|| self.cell(row, col))
+    }
+
     pub fn set(&mut self, row: usize, col: usize, cell: Cell) {
         self.rows[row][col] = cell;
     }

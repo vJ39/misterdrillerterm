@@ -184,7 +184,16 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 // エントリポイント
 // ---------------------------------------------------------------------------
 
-pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: bool) {
+/// `autoplay_enabled`はオートプレイ(TERM独自拡張。#218)が動作中かどうか。AIの実体は
+/// `Game`の外(`autoplay::Autopilot`)にあるためgameからは判定できず、main.rsから渡す。
+/// 無敵状態・回避したミス数は`Game`自身が持っているのでここでは受け取らない。
+pub fn draw(
+    frame: &mut Frame,
+    game: &Game,
+    music_enabled: bool,
+    se_enabled: bool,
+    autoplay_enabled: bool,
+) {
     let area = frame.area();
 
     // 9.6実装上の注意: まずフレーム全体を明示的な背景色で塗りつぶしてから、その上に
@@ -203,7 +212,7 @@ pub fn draw(frame: &mut Frame, game: &Game, music_enabled: bool, se_enabled: boo
 
     let plan = compute_layout(area, game.board.width());
     draw_field(frame, plan.field_rect, plan.visible_rows, game);
-    draw_status(frame, plan.hud_rect, game);
+    draw_status(frame, plan.hud_rect, game, autoplay_enabled);
 
     // チェックポイント(100mごと)到達演出(TERM独自拡張。#178)。短時間のバナー表示
     // だけで、盤面(draw_field)自体は裏で通常通り動き続けている。
@@ -450,6 +459,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         line("C: 周辺ブロックを2色に統一   L: ライフ+1   A: AIRを100%に回復"),
         line("R: 自分より上のブロックを全削除   K: 画面内のX/ダイヤを全てスターに"),
         line("B: ボムを画面内のランダムな位置に設置"),
+        line("T: オートプレイ ON/OFF(無敵も同時にON)   G: 無敵(ミス無効) ON/OFF"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
         line(", / .: 揺れ時間 長く/短く"),
@@ -1944,7 +1954,7 @@ fn draw_crushed_sprite(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
 // 9.7 ステータスパネル(HUD)
 // ---------------------------------------------------------------------------
 
-fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
+fn draw_status(frame: &mut Frame, area: Rect, game: &Game, autoplay_enabled: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -2032,6 +2042,27 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game) {
         &format!("  {}", game.debug_frame()),
         label_style,
     );
+
+    // オートプレイ・無敵の状態表示(TERM独自拡張。#218)。どちらもデバッグ機能なので、
+    // 有効な間だけ行を足す(通常プレイのHUDは今まで通りの見た目のまま)。
+    if autoplay_enabled || game.is_invincible() {
+        write_line(buf, inner, &mut row, "", label_style);
+        let debug_style = Style::default()
+            .fg(colors::STAR_FG)
+            .bg(colors::LETTERBOX_BG);
+        if autoplay_enabled {
+            write_line(buf, inner, &mut row, "AUTO", debug_style);
+        }
+        if game.is_invincible() {
+            write_line(
+                buf,
+                inner,
+                &mut row,
+                &format!("GOD x{}", game.misses_averted()),
+                debug_style,
+            );
+        }
+    }
 }
 
 /// `inner`の`*row`行目(0始まり)へ、幅いっぱいにパディングした1行を明示スタイルで書く。

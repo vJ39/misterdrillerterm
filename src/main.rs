@@ -2,6 +2,7 @@
 //! Phase1(ノーマルコース シングルプレイ)のみを実装する。
 
 mod audio;
+mod autoplay;
 mod constants;
 mod debug_log;
 mod game;
@@ -23,21 +24,18 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN, BOMB_SPAWN_RATE_PERCENT_STEP,
-    CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP, COLOR_CLUSTER_RATE_PERCENT_MIN,
-    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
-    DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX,
-    DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP,
-    ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP,
-    SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP,
-    SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN,
-    STAR_SPAWN_RATE_PERCENT_STEP,
+    ATTRACT_MODE_IDLE_MS, BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN,
+    BOMB_SPAWN_RATE_PERCENT_STEP, CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP,
+    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
+    FIELD_WIDTH_STEP, FRAME_INTERVAL_MS, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
+    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX,
+    STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
-
-/// メインループの目安フレーム間隔(spec.md 9章 ポーリング間隔目安16〜33ms=30〜60fps相当)。
-const FRAME_INTERVAL_MS: u64 = 33;
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -132,6 +130,18 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     let mut help_jukebox_selection: usize = 0;
     let mut help_jukebox_playing: Option<(usize, audio::bgm::JukeboxPreview)> = None;
 
+    // オートプレイ(TERM独自拡張。#218)。Tキーで生成・破棄する。`Some`の間、
+    // 毎フレーム`decide`が返す仮想入力を人間の操作と同じ経路(`Game::apply_input`)へ
+    // 流し込む。Gameを作り直す場面(タイトルへ戻る)では必ずNoneへ戻す。
+    let mut autopilot: Option<autoplay::Autopilot> = None;
+    // 現在のオートプレイが、タイトル画面放置による自動デモ(アトラクトモード)として
+    // 始まったものかどうか。手動でTキーを押した場合(=操作を引き継ぎたい)と、デモを
+    // 見ていた人が割り込んだ場合(=タイトルへ戻す)で挙動を分けるために区別する。
+    let mut autopilot_is_attract_demo = false;
+    // タイトル画面で最後にキーが押されてからの経過時間。`ATTRACT_MODE_IDLE_MS`を
+    // 超えるとアトラクトモードを自動開始する。
+    let mut title_idle = Duration::ZERO;
+
     loop {
         // Playing→Titleへの遷移フラグ。`screen`自体への再代入は、`game`(screenを
         // 借用したバインディング)の生存期間が終わった後、if/else全体を抜けてから
@@ -145,6 +155,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 if back_to_title {
                     break; // Quit済みなら以降のキューされたアクションは処理しない
+                }
+                // アトラクトモード(タイトル放置から始まった自動デモ)中に人が何か
+                // 操作したら、そこから引き継ぐのではなくタイトルへ戻す(TERM独自拡張。
+                // #218。デモを見ていた人の割り込みは「やめる」意思表示とみなす)。
+                if autopilot_is_attract_demo {
+                    back_to_title = true;
+                    break;
                 }
                 match action {
                     // オーバーレイ(設定/ヘルプ)が開いている間のQはタイトルへ戻らず、
@@ -402,19 +419,33 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         }
                     }
                     InputAction::Confirm => {}
-                    InputAction::MoveLeft => {
-                        let events = game.try_move_left();
+                    // 移動・向き・掘削の5操作は`apply_input`へ統一する(TERM独自拡張。
+                    // #218)。オートプレイの仮想入力と全く同じ経路を通ることで、
+                    // AIだけが使える裏口が生まれないようにする。人が実際に操作した
+                    // 時点でオートプレイは解除し、無敵も開始前の状態へ戻す。
+                    InputAction::MoveLeft
+                    | InputAction::MoveRight
+                    | InputAction::FaceUp
+                    | InputAction::FaceDown
+                    | InputAction::Drill => {
+                        if let Some(pilot) = autopilot.take() {
+                            game.set_invincible(pilot.restore_invincible());
+                        }
+                        let events = game.apply_input(action);
                         handle_events(&events, mixer.as_ref(), &se_enabled);
                     }
-                    InputAction::MoveRight => {
-                        let events = game.try_move_right();
-                        handle_events(&events, mixer.as_ref(), &se_enabled);
-                    }
-                    InputAction::FaceUp => game.face_up(),
-                    InputAction::FaceDown => game.face_down(),
-                    InputAction::Drill => {
-                        let events = game.try_drill();
-                        handle_events(&events, mixer.as_ref(), &se_enabled);
+                    // T: オートプレイのON/OFF。ONにするときは現在の無敵状態を覚えて
+                    // おいてから無敵もONにし、OFFに戻すときは覚えておいた状態へ戻す。
+                    InputAction::DebugToggleAutopilot => match autopilot.take() {
+                        Some(pilot) => game.set_invincible(pilot.restore_invincible()),
+                        None => {
+                            autopilot = Some(autoplay::Autopilot::new(game.is_invincible()));
+                            game.set_invincible(true);
+                        }
+                    },
+                    // G: 無敵の単独トグル。オートプレイとは独立して切り替えられる。
+                    InputAction::DebugToggleInvincible => {
+                        game.set_invincible(!game.is_invincible());
                     }
                     InputAction::DebugUnifyNearbyColors => {
                         let events = game.debug_unify_nearby_colors();
@@ -459,6 +490,22 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             }
 
             if !back_to_title {
+                // オートプレイ(TERM独自拡張。#218)。盤面から決めた仮想入力を、人の
+                // 操作と同じ経路へ流し込む。GameOverからの自動復活だけはダイアログの
+                // 選択操作にあたるため、Confirmをrevive()の呼び出しへ読み替える。
+                if let Some(pilot) = autopilot.as_mut() {
+                    for action in pilot.decide(game) {
+                        let events = match action {
+                            InputAction::Confirm => {
+                                game.revive();
+                                Vec::new()
+                            }
+                            other => game.apply_input(other),
+                        };
+                        handle_events(&events, mixer.as_ref(), &se_enabled);
+                    }
+                }
+
                 let now = Instant::now();
                 let delta = now.duration_since(last_tick);
                 last_tick = now;
@@ -468,8 +515,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
                 let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
                 let se_on = se_enabled.load(Ordering::Relaxed);
+                let autoplay_on = autopilot.is_some();
                 terminal.draw(|frame| {
-                    ui::render::draw(frame, game, music_on, se_on);
+                    ui::render::draw(frame, game, music_on, se_on, autoplay_on);
                     // 一時停止中の設定/ヘルプオーバーレイ。Screen::Playingのまま
                     // Gameを手放さずに上へ重ね描きするだけで、専用のScreen遷移は行わない。
                     match pause_overlay {
@@ -748,36 +796,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         let depth_goal_m = mode_select_choice.depth_goal_m();
                         settings.last_course_depth_m = depth_goal_m;
                         settings.save();
-                        let seed: u64 = rng.random();
-                        // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される。
-                        let mut game =
-                            Game::new_with_width(seed, settings.field_width, depth_goal_m);
-                        // 調査用のブロック状態遷移ログをタイトルからのゲーム開始時に毎回
-                        // 作り直す。設定画面のトグルで無効化していれば記録自体を行わない。
-                        game.refresh_debug_log(settings.debug_log_enabled);
-                        // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
-                        // (settings.rs)、新しいゲーム開始時にも引き継ぐ。
-                        game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
-                        game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
-                        game.set_shake_duration_ms(settings.shake_duration_ms);
-                        game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
-                        game.set_move_cooldown_ms(settings.move_cooldown_ms);
-                        game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
-                        game.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
-                        // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
-                        // 安全地帯明け(行2)以降の全体へ反映する。
-                        game.reroll_spawn_rates_from(
-                            2,
-                            settings.rock_spawn_rate_percent,
-                            settings.air_spawn_rate_percent,
-                            settings.star_spawn_rate_percent,
-                            settings.diamond_spawn_rate_percent,
-                            settings.item_clear_above_rate_percent,
-                            settings.item_unify_colors_rate_percent,
-                            settings.item_starify_screen_rate_percent,
-                            settings.color_count,
-                            settings.color_cluster_rate_percent,
-                        );
+                        let game = start_new_game(rng.random(), &settings, depth_goal_m);
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
                     }
@@ -787,7 +806,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         } else {
             terminal.draw(ui::render::draw_title)?;
 
-            if let Some(action) = input::poll_any_key(FRAME_INTERVAL_MS)? {
+            let title_frame_started = Instant::now();
+            let key = input::poll_any_key(FRAME_INTERVAL_MS)?;
+            // アトラクトモード(TERM独自拡張。#218)のアイドル計測。`poll_any_key`は
+            // 最大FRAME_INTERVAL_MSだけ待つが、キーが来れば早く返るため、実際の
+            // 経過時間で数える。どのキーであっても(画面遷移しないキーでも)
+            // 押された時点でタイマーは0へ戻す。
+            if key.is_some() {
+                title_idle = Duration::ZERO;
+            } else {
+                title_idle += title_frame_started.elapsed();
+            }
+
+            if let Some(action) = key {
                 match action {
                     input::AnyKeyAction::Quit => break,
                     input::AnyKeyAction::OpenSettings => screen = Screen::Settings,
@@ -798,13 +829,33 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         );
                         screen = Screen::ModeSelect;
                     }
+                    // 画面遷移は起こさないが、アイドルタイマーのリセットは上で済んでいる。
+                    input::AnyKeyAction::Ignored => {}
                 }
+            } else if title_idle >= Duration::from_millis(ATTRACT_MODE_IDLE_MS) {
+                // 放置されたので自動デモを始める。モードセレクトは挟まず、前回選んだ
+                // コースでそのまま開始し、無敵ONのオートプレイに操作を任せる。
+                let mut game =
+                    start_new_game(rng.random(), &settings, settings.last_course_depth_m);
+                game.set_invincible(true);
+                // デモ終了時に無敵を戻す先は「無敵OFF」。デモ用に作ったゲームは
+                // どのみち破棄されるが、解除経路を手動時と揃えておく。
+                autopilot = Some(autoplay::Autopilot::new(false));
+                autopilot_is_attract_demo = true;
+                title_idle = Duration::ZERO;
+                screen = Screen::Playing(Box::new(game));
+                last_tick = Instant::now();
             }
         }
 
         if back_to_title {
             screen = Screen::Title;
             pause_overlay = PauseOverlay::None;
+            // タイトルへ戻るとGameごと破棄されるため、オートプレイも必ず手放す
+            // (TERM独自拡張。#218)。アイドルタイマーも0から数え直す。
+            autopilot = None;
+            autopilot_is_attract_demo = false;
+            title_idle = Duration::ZERO;
             // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする。次にプレイを始めた
             // とき、前回の再生位置・曲順を引きずらず必ず1曲目の先頭から鳴るようにする。
             gameplay_bgm_restart.store(true, Ordering::Relaxed);
@@ -829,6 +880,41 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     bgm_stop.store(true, Ordering::Relaxed);
 
     Ok(())
+}
+
+/// 新規ゲームを1つ作り、永続化された設定を全て反映して返す。モードセレクトでEnterを
+/// 押した場合と、タイトル画面の放置から始まるアトラクトモード(TERM独自拡張。#218)の
+/// どちらからも同じ経路を通すため、共通の関数として切り出している。
+fn start_new_game(seed: u64, settings: &Settings, depth_goal_m: usize) -> Game {
+    // フィールド幅(列数)設定は新規ゲーム開始時にのみ反映される。
+    let mut game = Game::new_with_width(seed, settings.field_width, depth_goal_m);
+    // 調査用のブロック状態遷移ログをタイトルからのゲーム開始時に毎回作り直す。
+    // 設定画面のトグルで無効化していれば記録自体を行わない。
+    game.refresh_debug_log(settings.debug_log_enabled);
+    // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
+    // (settings.rs)、新しいゲーム開始時にも引き継ぐ。
+    game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
+    game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
+    game.set_shake_duration_ms(settings.shake_duration_ms);
+    game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
+    game.set_move_cooldown_ms(settings.move_cooldown_ms);
+    game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
+    game.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
+    // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
+    // 安全地帯明け(行2)以降の全体へ反映する。
+    game.reroll_spawn_rates_from(
+        2,
+        settings.rock_spawn_rate_percent,
+        settings.air_spawn_rate_percent,
+        settings.star_spawn_rate_percent,
+        settings.diamond_spawn_rate_percent,
+        settings.item_clear_above_rate_percent,
+        settings.item_unify_colors_rate_percent,
+        settings.item_starify_screen_rate_percent,
+        settings.color_count,
+        settings.color_cluster_rate_percent,
+    );
+    game
 }
 
 /// MUSIC設定・現在の画面から、実際にタイトル画面用BGMを鳴らすべきかを判定する。
@@ -1125,6 +1211,9 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::BombFuseTick => audio::sfx::play_bomb_fuse_tick(mixer),
             // 100mごとのチェックポイント到達。最終ゴール(Cleared)と同じファンファーレを使い回す。
             GameEvent::Checkpoint100m { .. } => audio::sfx::play_clear_fanfare(mixer),
+            // 無敵によるミス回避(TERM独自拡張。#218)。デバッグ用の記録専用イベントで、
+            // 演出もSEも伴わない(回数はHUDのGOD表示とデバッグログに残る)。
+            GameEvent::MissAverted { .. } => {}
         }
     }
 }

@@ -159,6 +159,14 @@ pub enum InputAction {
     DebugShakeDurationLonger,
     /// デバッグ: 揺れ時間(落下開始までの時間)を短くする(TERM独自拡張、動作確認用ショートカット)
     DebugShakeDurationShorter,
+    /// デバッグ: オートプレイ(自動操作)のON/OFFを切り替える(TERM独自拡張。#218)。
+    /// ONにすると無敵も同時にONになる。`Game`自身は自動操作を持たず、AIの実体は
+    /// `autoplay::Autopilot`(Gameの外の仮想キーボード)なので、この解釈もGameの
+    /// 外側=main.rsが担う
+    DebugToggleAutopilot,
+    /// デバッグ: 無敵(ミス無効)のON/OFFを切り替える(TERM独自拡張。#218)。
+    /// オートプレイとは独立したトグルで、手動プレイのまま無敵にもできる
+    DebugToggleInvincible,
     /// 設定画面(MUSIC/SE)をオーバーレイ表示する(TERM独自拡張)。一時停止画面でのみ
     /// 意味を持つ。Gameの内部状態には影響しないため、この解釈もGameの外側=main.rsが担う
     OpenSettings,
@@ -269,6 +277,38 @@ pub enum GameEvent {
     /// 「100mすすむごとにそれより上部のオブジェクトを全クリア、100mごとのゴールSEと
     /// 演出、アニメーションする」)。到達した深度(m、100の倍数)を伴う。
     Checkpoint100m { at_m: usize },
+    /// 無敵(`Game::set_invincible`)が有効なため、本来のミスが回避された(TERM独自
+    /// 拡張。#218)。ライフ減少・「天に召される」演出・GameOver判定のいずれも
+    /// 発生していない。ソークテストでどの死因が何回起きたかを数えるための記録用で、
+    /// 演出・SEは伴わない。
+    MissAverted { cause: MissCause },
+}
+
+/// ミスの原因(TERM独自拡張。#218)。`Game::apply_miss`の各呼び出し元がそれぞれ渡す。
+/// 無敵中はこの原因ごとに異なる後始末(酸素の回復・押し潰したブロックの除去)が要る
+/// ため、単なる記録用の区分ではなく処理の分岐にも使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissCause {
+    /// 酸素切れ(`update`の自然減少、または岩掘削の消費による`check_oxygen_zero`)
+    OxygenOut,
+    /// 落下してきたブロックに押し潰された(重力ティックの`life_lost_to_crush`)
+    CrushedByFallingBlock,
+    /// 落下中の頭上ブロックへ上向き掘削した(`push_drill_outcome_events`)
+    DrilledIntoFallingBlock,
+    /// ボムの爆風に巻き込まれた(`detonate_bombs`)
+    BombBlast,
+}
+
+impl MissCause {
+    /// デバッグログ(`miss_events`テーブル)へ記録する際の原因名(TERM独自拡張。#218)。
+    fn as_str(self) -> &'static str {
+        match self {
+            MissCause::OxygenOut => "OxygenOut",
+            MissCause::CrushedByFallingBlock => "CrushedByFallingBlock",
+            MissCause::DrilledIntoFallingBlock => "DrilledIntoFallingBlock",
+            MissCause::BombBlast => "BombBlast",
+        }
+    }
 }
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
@@ -435,6 +475,15 @@ pub struct Game {
     /// 関わらず`FIELD_DEPTH_M`(ノーマルコース基準)で正規化するため、イージー
     /// コースはカーブの前半しか体験しない。
     depth_goal_m: usize,
+    /// 無敵(ミス無効)かどうか(TERM独自拡張。#218)。`true`の間、`apply_miss`は
+    /// ライフを減らさず`avert_miss`(回避イベントの記録と最小限の後始末)へ振り替える。
+    /// ライフ喪失直後の一時的な無敵時間(`invulnerability_ticks_remaining`)とは
+    /// 別物で、そちらは押し潰し判定自体を抑止するためミスの発生件数を数えられなく
+    /// なる。両者は混ぜずに独立して扱う。
+    invincible: bool,
+    /// 無敵によって回避されたミスの累計回数(TERM独自拡張。#218)。ソークテストで
+    /// 「長時間プレイ中に何回死ぬ場面があったか」を数えるための指標。
+    misses_averted: u32,
 }
 
 impl Game {
@@ -544,6 +593,8 @@ impl Game {
             // 出現パターンが再現される。
             rng: ChaCha8Rng::seed_from_u64(!seed),
             depth_goal_m,
+            invincible: false,
+            misses_averted: 0,
         }
     }
 
@@ -855,7 +906,9 @@ impl Game {
                 events.push(GameEvent::DrillImpact);
                 events.push(GameEvent::BlockDestroyed { blocks: 1 });
             }
-            DrillOutcome::CrushedByUnstableOverhead => self.apply_miss(events),
+            DrillOutcome::CrushedByUnstableOverhead => {
+                self.apply_miss(MissCause::DrilledIntoFallingBlock, events)
+            }
             DrillOutcome::ItemUntouchedByDrill => {}
         }
     }
@@ -881,7 +934,7 @@ impl Game {
             return;
         }
         if self.player.is_out_of_oxygen() {
-            self.apply_miss(events);
+            self.apply_miss(MissCause::OxygenOut, events);
         }
     }
 
@@ -896,7 +949,16 @@ impl Game {
     /// 召される演出をして、ブロックが消える処理されてから、元の位置に復活」)。ライフが
     /// 0になる場合はこの演出を行わず、従来通り即座にGameOverダイアログへ進む
     /// (ユーザー指摘: 「livesが0になったときはただちにゲームオーバーのダイアログ出てOK」)。
-    fn apply_miss(&mut self, events: &mut Vec<GameEvent>) {
+    ///
+    /// 無敵(`set_invincible`)が有効な場合は、ライフ処理・演出を一切行わず
+    /// `avert_miss`(回避として記録するだけ)へ振り替える(TERM独自拡張。#218)。
+    fn apply_miss(&mut self, cause: MissCause, events: &mut Vec<GameEvent>) {
+        self.log_miss(cause, self.invincible);
+
+        if self.invincible {
+            return self.avert_miss(cause, events);
+        }
+
         self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
 
         if self.player.lives <= 1 {
@@ -915,6 +977,101 @@ impl Game {
         // ほしい」。演出完了まで3秒近く無音だったバグの修正)。
         events.push(GameEvent::LifeLost);
         self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
+    }
+
+    /// 無敵中にミスが起きた場合の処理(TERM独自拡張。#218)。ライフ・ステータス・
+    /// 演出には一切触れず、回避したことを記録した上で、そのまま放置すると同じミスが
+    /// 毎フレーム再発してしまう原因についてだけ最小限の後始末を行う。
+    fn avert_miss(&mut self, cause: MissCause, events: &mut Vec<GameEvent>) {
+        self.misses_averted = self.misses_averted.saturating_add(1);
+
+        match cause {
+            // 酸素0のまま放置すると毎フレーム再検出されるので満タンに戻し、
+            // 以後の自然減衰・警告は通常通り回す。
+            MissCause::OxygenOut => self.player.oxygen = crate::constants::OXYGEN_MAX,
+            // 押し潰したブロックはプレイヤーのマスに書き込まれたまま残る仕様
+            // (通常は「天に召される」演出の完了時に消える)。無敵ではその演出を
+            // 行わないため、ここで即座に消して消滅フラッシュを出す。
+            MissCause::CrushedByFallingBlock => {
+                let pos = self.player.position();
+                let cell = self.board.cell(pos.0, pos.1);
+                // 押し潰したブロックが同じtickで4連結自動消滅していた場合は既にEmpty。
+                // その場合は消滅フラッシュを二重に積まない。
+                if cell != Cell::Empty {
+                    self.board.set(pos.0, pos.1, Cell::Empty);
+                    self.note_vanished_cells([(pos, cell)]);
+                }
+            }
+            // 上向き掘削が押し潰しに終わった場合は盤面が変化していない(掘削自体が
+            // 行われていない)。ボム爆風は爆風処理側が既に盤面を書き換え済み。
+            // どちらも追加の後始末は不要。
+            MissCause::DrilledIntoFallingBlock | MissCause::BombBlast => {}
+        }
+
+        events.push(GameEvent::MissAverted { cause });
+    }
+
+    /// ミスの発生(および無敵による回避)をデバッグログへ1行記録する(TERM独自拡張。
+    /// #218)。ログが無効(`debug_log`が`None`)なら何もしない。
+    fn log_miss(&self, cause: MissCause, averted: bool) {
+        if let Some(log) = &self.debug_log {
+            let (row, col) = self.player.position();
+            log.log_miss(self.frame_counter, cause.as_str(), averted, row, col);
+        }
+    }
+
+    /// 無敵(ミス無効)を切り替える(TERM独自拡張。#218)。ソークテストや動作確認で、
+    /// 死なずに長時間プレイし続けるためのデバッグ機能。
+    pub fn set_invincible(&mut self, on: bool) {
+        self.invincible = on;
+    }
+
+    /// 現在、無敵(ミス無効)かどうか(TERM独自拡張。#218)。
+    pub fn is_invincible(&self) -> bool {
+        self.invincible
+    }
+
+    /// 無敵によって回避されたミスの累計回数(TERM独自拡張。#218)。
+    pub fn misses_averted(&self) -> u32 {
+        self.misses_averted
+    }
+
+    /// 移動・向き・掘削の5操作を1つの入口へまとめたもの(TERM独自拡張。#218)。
+    /// main.rsの手入力処理と、オートプレイ(`autoplay::Autopilot`)が返す仮想入力の
+    /// 両方がこれを通ることで、AIが人間と同じ経路でしかゲームを動かせないことを
+    /// 保証する。上記5つ以外の`InputAction`は`Game`の内部状態を変えない(一時停止・
+    /// 画面遷移・設定変更等はmain.rsが解釈する)ため、ここでは何もしない。
+    pub fn apply_input(&mut self, action: InputAction) -> Vec<GameEvent> {
+        match action {
+            InputAction::MoveLeft => self.try_move_left(),
+            InputAction::MoveRight => self.try_move_right(),
+            InputAction::FaceUp => {
+                self.face_up();
+                Vec::new()
+            }
+            InputAction::FaceDown => {
+                self.face_down();
+                Vec::new()
+            }
+            InputAction::Drill => self.try_drill(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// セル`(row, col)`が「落ちてくる可能性がある」かどうか(TERM独自拡張。#218)。
+    /// 支えを失っている塊、または揺れの猶予期間中(これから落ちる予告状態)の塊に
+    /// 属していれば`true`。Empty/AIR/アイテムは落下の脅威にならないため常に`false`。
+    /// オートプレイが頭上・移動先の安全確認に使う。
+    pub fn is_cell_unstable(&self, row: usize, col: usize) -> bool {
+        if row >= self.board.depth_rows() || col >= self.board.width() {
+            return false;
+        }
+        physics::is_falling_hazard(
+            &self.board,
+            &self.gravity_state,
+            (row, col),
+            self.player.position(),
+        )
     }
 
     /// 「天に召される」演出(TERM独自拡張)の進行を1フレームぶん進める。演出中は
@@ -1143,7 +1300,7 @@ impl Game {
         }
 
         if !self.is_dying() && self.player.is_out_of_oxygen() {
-            self.apply_miss(&mut events);
+            self.apply_miss(MissCause::OxygenOut, &mut events);
             if self.status != GameStatus::Playing {
                 return events;
             }
@@ -1251,7 +1408,7 @@ impl Game {
             }
 
             if result.life_lost_to_crush {
-                self.apply_miss(&mut events);
+                self.apply_miss(MissCause::CrushedByFallingBlock, &mut events);
             }
 
             if self.status != GameStatus::Playing {
@@ -1454,7 +1611,10 @@ impl Game {
     /// その間は横移動を受け付けない(TERM独自拡張。ユーザー指摘: 「必ず落ちてから
     /// 横移動が前提」)。直下が酸素カプセルの場合も自由落下でそのまま通過するため、
     /// 支持されているとはみなさない。
-    fn player_is_grounded(&self) -> bool {
+    ///
+    /// オートプレイ(`autoplay.rs`)も「今フレームに横移動が通るか」の判定へ使うため
+    /// 公開している(TERM独自拡張。#218)。
+    pub fn player_is_grounded(&self) -> bool {
         let below = self.player.row + 1;
         if below >= self.board.depth_rows() {
             return true;
@@ -1852,6 +2012,14 @@ impl Game {
     /// 現在盤面上にあるボムの一覧(TERM独自拡張。#96)。描画側(render.rs)が参照する。
     pub fn bombs(&self) -> &[Bomb] {
         &self.bombs
+    }
+
+    /// テスト専用: ボムを直接配置するための可変参照(TERM独自拡張。#218)。
+    /// `debug_place_bomb`は配置先がランダムなため、オートプレイの判断テストのように
+    /// 「この座標にボムがある盤面」を組み立てたい場合に使う。
+    #[cfg(test)]
+    pub(crate) fn bombs_mut(&mut self) -> &mut Vec<Bomb> {
+        &mut self.bombs
     }
 
     /// `from_row`以降の岩(X)/AIR/スター/ダイヤブロック出現率を、指定の配分率(%、
@@ -2338,7 +2506,7 @@ impl Game {
             && !self.is_dying()
             && self.status == GameStatus::Playing
         {
-            self.apply_miss(events);
+            self.apply_miss(MissCause::BombBlast, events);
         }
     }
 
@@ -2835,6 +3003,331 @@ mod tests {
 
         assert_eq!(game.status, GameStatus::GameOver);
         assert!(events.iter().any(|e| matches!(e, GameEvent::GameOverMiss)));
+    }
+
+    // --- 無敵(ミス無効) / オートプレイの土台(TERM独自拡張。#218) ---
+
+    #[test]
+    fn invincible_is_off_by_default_so_existing_behaviour_is_unchanged() {
+        let game = Game::new(1);
+        assert!(!game.is_invincible());
+        assert_eq!(game.misses_averted(), 0);
+    }
+
+    #[test]
+    fn invincible_turns_oxygen_death_into_an_averted_miss_and_refills_the_tank() {
+        // 酸素0のまま放置すると毎フレーム再検出されてしまうため、回避時は満タンに
+        // 戻して以後の減衰・警告を通常通り回す。
+        let mut game = Game::new(2);
+        game.set_invincible(true);
+        let lives_before = game.player.lives;
+        game.player.oxygen = 1.0;
+
+        let events = game.update(Duration::from_secs(1));
+
+        assert_eq!(game.status, GameStatus::Playing);
+        assert!(!game.is_dying(), "天に召される演出は始まらないはず");
+        assert_eq!(game.player.lives, lives_before, "ライフは減らないはず");
+        assert_eq!(game.player.oxygen, crate::constants::OXYGEN_MAX);
+        assert_eq!(game.misses_averted(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| **e
+                    == GameEvent::MissAverted {
+                        cause: MissCause::OxygenOut
+                    })
+                .count(),
+            1,
+            "回避イベントはちょうど1回のはず: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                GameEvent::LifeLost | GameEvent::GameOverMiss | GameEvent::Revived
+            )),
+            "ミス関連の既存イベントは一切発生しないはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn invincible_keeps_playing_even_on_the_last_life() {
+        // ライフ1(次のミスでGameOver)でも、無敵中はGameOverにならない。
+        let mut game = Game::new_with_lives(3, 1);
+        game.set_invincible(true);
+        game.player.oxygen = 1.0;
+
+        game.update(Duration::from_secs(1));
+
+        assert_eq!(game.status, GameStatus::Playing);
+        assert_eq!(game.player.lives, 1);
+    }
+
+    #[test]
+    fn invincible_clears_the_block_that_crushed_the_player_and_flashes_it() {
+        // 押し潰したブロックはプレイヤーのマスに残る仕様(通常は復活処理が消す)。
+        // 無敵では復活処理が走らないため、その場で消して消滅フラッシュを出す。
+        let mut game = Game::new(34);
+        game.set_invincible(true);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        let lives_before = game.player.lives;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+
+        assert_eq!(game.player.lives, lives_before);
+        assert_eq!(game.status, GameStatus::Playing);
+        assert!(events.contains(&GameEvent::MissAverted {
+            cause: MissCause::CrushedByFallingBlock
+        }));
+        assert_eq!(
+            game.board.cell(999, 5),
+            Cell::Empty,
+            "押し潰したブロックはその場で消えるはず"
+        );
+        assert!(
+            game.vanish_flash_progress((999, 5)).is_some(),
+            "消滅フラッシュが記録されているはず"
+        );
+    }
+
+    #[test]
+    fn invincible_averts_the_crush_from_drilling_into_a_falling_block() {
+        let mut game = Game::new(36);
+        game.set_invincible(true);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.facing = Direction::Up;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        // 頭上のブロックは支えが無く、かつ揺れ状態の記録も無い(=まだupdateを
+        // 一度も回していないので猶予期間ではない)。上向き掘削は押し潰しになる。
+        game.board.rows[499][5] = Cell::Color(ColorKind::Red);
+        let misses_before = game.misses_averted();
+
+        let events = game.try_drill();
+
+        assert!(
+            events.contains(&GameEvent::MissAverted {
+                cause: MissCause::DrilledIntoFallingBlock
+            }),
+            "掘削中落下として回避されるはず: {events:?}"
+        );
+        assert_eq!(game.misses_averted(), misses_before + 1);
+        assert_eq!(game.status, GameStatus::Playing);
+    }
+
+    #[test]
+    fn invincible_averts_being_caught_in_a_bomb_blast() {
+        let mut game = Game::new(1);
+        game.set_invincible(true);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        let lives_before = game.player.lives;
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: 50,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[501][6] = Cell::Rock { hits: 0 }; // ボムの支え
+
+        let events = game.update(Duration::from_millis(60));
+
+        assert!(events.contains(&GameEvent::BombExploded));
+        assert!(
+            events.contains(&GameEvent::MissAverted {
+                cause: MissCause::BombBlast
+            }),
+            "爆風はBombBlastとして回避されるはず: {events:?}"
+        );
+        assert_eq!(game.player.lives, lives_before);
+        assert!(!events.contains(&GameEvent::LifeLost));
+    }
+
+    #[test]
+    fn misses_averted_counts_every_averted_miss() {
+        let mut game = Game::new(4);
+        game.set_invincible(true);
+
+        for expected in 1..=3 {
+            game.player.oxygen = 1.0;
+            game.update(Duration::from_secs(1));
+            assert_eq!(game.misses_averted(), expected);
+        }
+    }
+
+    #[test]
+    fn turning_invincible_back_off_restores_the_normal_miss_handling() {
+        let mut game = Game::new(5);
+        game.set_invincible(true);
+        game.player.oxygen = 1.0;
+        game.update(Duration::from_secs(1));
+        assert_eq!(game.player.lives, LIVES_DEFAULT);
+
+        game.set_invincible(false);
+        assert!(!game.is_invincible());
+        game.player.oxygen = 1.0;
+        let events = game.update(Duration::from_secs(1));
+
+        assert!(
+            events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
+            "無敵を切れば通常どおりミスするはず: {events:?}"
+        );
+        assert!(game.is_dying());
+    }
+
+    // --- apply_input(手入力とオートプレイの共通入口。#218) ---
+
+    #[test]
+    fn apply_input_routes_the_five_gameplay_actions_to_their_handlers() {
+        // 横移動はクールダウンを1スロットしか持たないため、MoveLeft/MoveRightは
+        // それぞれ新しいGameで確認する(同じGameで連続して出すと2回目が弾かれる)。
+        fn grounded_game(seed: u64) -> Game {
+            let mut game = Game::new(seed);
+            clear_board(&mut game);
+            game.player.row = 500;
+            game.player.col = 5;
+            for col in 4..=6 {
+                game.board.rows[501][col] = Cell::Rock { hits: 0 }; // 足場
+            }
+            game
+        }
+
+        let mut game = grounded_game(40);
+        game.apply_input(InputAction::FaceUp);
+        assert_eq!(game.player.facing, Direction::Up);
+        game.apply_input(InputAction::FaceDown);
+        assert_eq!(game.player.facing, Direction::Down);
+
+        let mut game = grounded_game(41);
+        game.apply_input(InputAction::MoveLeft);
+        assert_eq!(game.player.col, 4);
+        assert_eq!(game.player.facing, Direction::Left);
+
+        let mut game = grounded_game(42);
+        game.apply_input(InputAction::MoveRight);
+        assert_eq!(game.player.col, 6);
+        assert_eq!(game.player.facing, Direction::Right);
+
+        // Drillはfacing方向(Down)のブロックを掘る。
+        let mut game = grounded_game(43);
+        game.player.facing = Direction::Down;
+        game.board.rows[501][5] = Cell::Color(ColorKind::Red);
+        let events = game.apply_input(InputAction::Drill);
+        assert!(
+            events.contains(&GameEvent::DrillImpact),
+            "掘削が実行されるはず: {events:?}"
+        );
+    }
+
+    #[test]
+    fn apply_input_ignores_actions_that_are_not_gameplay_operations() {
+        // 一時停止・画面遷移・設定変更・デバッグトグルはmain.rsが解釈するもので、
+        // apply_inputはGameの状態を一切変えない。
+        let mut game = Game::new(41);
+        let before = (
+            game.player.position(),
+            game.player.facing,
+            game.status,
+            game.player.lives,
+            game.is_invincible(),
+        );
+
+        for action in [
+            InputAction::TogglePause,
+            InputAction::Quit,
+            InputAction::Confirm,
+            InputAction::ToggleMusic,
+            InputAction::ToggleSe,
+            InputAction::OpenSettings,
+            InputAction::OpenHelp,
+            InputAction::UnboundKey,
+            InputAction::DebugToggleAutopilot,
+            InputAction::DebugToggleInvincible,
+            InputAction::DebugAddLife,
+        ] {
+            assert_eq!(
+                game.apply_input(action),
+                Vec::new(),
+                "{action:?}はno-opのはず"
+            );
+        }
+
+        assert_eq!(
+            (
+                game.player.position(),
+                game.player.facing,
+                game.status,
+                game.player.lives,
+                game.is_invincible()
+            ),
+            before
+        );
+    }
+
+    // --- is_cell_unstable(オートプレイの安全判定。#218) ---
+
+    #[test]
+    fn is_cell_unstable_is_false_for_cells_that_can_never_fall_on_you() {
+        let mut game = Game::new(42);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[400][1] = Cell::Oxygen;
+        game.board.rows[400][2] = Cell::Item(ItemEffect::ClearAbove);
+
+        assert!(!game.is_cell_unstable(400, 0), "Emptyは常にfalse");
+        assert!(!game.is_cell_unstable(400, 1), "AIRは常にfalse");
+        assert!(!game.is_cell_unstable(400, 2), "アイテムは常にfalse");
+    }
+
+    #[test]
+    fn is_cell_unstable_is_true_for_an_unsupported_block_and_false_for_a_supported_one() {
+        let mut game = Game::new(43);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        // 支えなし(直下がEmpty)
+        game.board.rows[400][3] = Cell::Color(ColorKind::Red);
+        // 支えあり(最深行に接している)
+        game.board.rows[999][7] = Cell::Color(ColorKind::Blue);
+
+        assert!(game.is_cell_unstable(400, 3), "未支持の塊は不安定");
+        assert!(!game.is_cell_unstable(999, 7), "支えのある塊は安定");
+    }
+
+    #[test]
+    fn is_cell_unstable_is_true_while_a_block_is_still_shaking() {
+        // 揺れ中(これから落ちる予告状態)も「落ちてくる可能性がある」に含める。
+        // 上向き掘削の可否判定(is_overhead_unstable)は揺れ中を除外するが、
+        // オートプレイの回避判断は落ちる前に逃げる必要があるため含める。
+        let mut game = Game::new(44);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[500][3] = Cell::Color(ColorKind::Red); // 支えなし
+
+        game.update(Duration::from_millis(FALL_TICK_MS + 10)); // 1tickで揺れ始める
+        assert!(
+            game.gravity_state.is_shaking((500, 3)),
+            "前提: このブロックは揺れ始めているはず"
+        );
+        assert!(game.is_cell_unstable(500, 3));
+    }
+
+    #[test]
+    fn is_cell_unstable_is_false_outside_the_board() {
+        let game = Game::new(45);
+        assert!(!game.is_cell_unstable(game.board.depth_rows(), 0));
+        assert!(!game.is_cell_unstable(0, game.board.width()));
     }
 
     // --- GameOverダイアログ(TERM独自拡張) ---
