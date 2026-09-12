@@ -12,17 +12,28 @@
 
 use std::io::Cursor;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use rodio::mixer::Mixer;
 use rodio::{Decoder, Player};
 
-/// BGM再生音量。SEとのバランス調整(TERM独自拡張。#147。ユーザー指摘: 「SEが
+use crate::constants::SOUND_VOLUME_PERCENT_MAX;
+
+/// BGM再生の基準ゲイン。SEとのバランス調整(TERM独自拡張。#147。ユーザー指摘: 「SEが
 /// うるさくてBGMちいさい」)で0.35→0.55へ引き上げた(SE側は`sfx::SE_VOLUME`を
-/// 0.7→0.45へ引き下げ)。
+/// 0.7→0.45へ引き下げ)。MUSIC音量設定(#224)が100%のときのゲインで、実際に再生へ
+/// 渡すゲインは`bgm_gain`で音量設定を反映して求める。
 const BGM_VOLUME: f32 = 0.55;
+
+/// MUSIC音量設定(%、`SOUND_VOLUME_PERCENT_MIN`〜`SOUND_VOLUME_PERCENT_MAX`)から、
+/// 実際にミキサーへ渡すゲインを求める(TERM独自拡張。#224)。100%で`BGM_VOLUME`
+/// (基準ゲイン)そのもの、0%で無音になる。上限を超える値は`SOUND_VOLUME_PERCENT_MAX`
+/// でクランプする(OS側のシステム音量には触れず、アプリ内部のゲインのみを変える)。
+pub fn bgm_gain(volume_percent: u32) -> f32 {
+    BGM_VOLUME * (volume_percent.min(SOUND_VOLUME_PERCENT_MAX) as f32 / 100.0)
+}
 
 /// タイトル画面用BGM(TERM独自拡張。#146。原曲「Last Coin Standing」)。
 const TITLE_TRACK: &[u8] = include_bytes!("../../assets/bgm-title.mp3");
@@ -53,10 +64,12 @@ fn spawn_playlist_thread(
     music_enabled: Arc<AtomicBool>,
     tracks: &'static [&'static [u8]],
     restart_requested: Option<Arc<AtomicBool>>,
+    volume_percent: Arc<AtomicU32>,
 ) {
     thread::spawn(move || {
         let player = Player::connect_new(&mixer);
-        player.set_volume(BGM_VOLUME);
+        let mut last_gain = bgm_gain(volume_percent.load(Ordering::Relaxed));
+        player.set_volume(last_gain);
         let poll = Duration::from_millis(POLL_MS);
         let mut track_index = 0;
 
@@ -105,6 +118,14 @@ fn spawn_playlist_thread(
                     player.pause();
                 }
 
+                // MUSIC音量設定の変更もこのポーリング周期で拾い、変化があった
+                // ときだけset_volumeを呼び直す(TERM独自拡張。#224)。
+                let gain = bgm_gain(volume_percent.load(Ordering::Relaxed));
+                if gain != last_gain {
+                    player.set_volume(gain);
+                    last_gain = gain;
+                }
+
                 thread::sleep(poll);
             }
         }
@@ -120,6 +141,7 @@ pub fn spawn_title_bgm_thread(
     stop_flag: Arc<AtomicBool>,
     music_enabled: Arc<AtomicBool>,
     restart_requested: Arc<AtomicBool>,
+    volume_percent: Arc<AtomicU32>,
 ) {
     spawn_playlist_thread(
         mixer,
@@ -127,6 +149,7 @@ pub fn spawn_title_bgm_thread(
         music_enabled,
         &[TITLE_TRACK],
         Some(restart_requested),
+        volume_percent,
     );
 }
 
@@ -140,6 +163,7 @@ pub fn spawn_gameplay_bgm_thread(
     stop_flag: Arc<AtomicBool>,
     music_enabled: Arc<AtomicBool>,
     restart_requested: Arc<AtomicBool>,
+    volume_percent: Arc<AtomicU32>,
 ) {
     spawn_playlist_thread(
         mixer,
@@ -147,6 +171,7 @@ pub fn spawn_gameplay_bgm_thread(
         music_enabled,
         &GAMEPLAY_TRACKS,
         Some(restart_requested),
+        volume_percent,
     );
 }
 
@@ -186,10 +211,15 @@ impl JukeboxPreview {
 }
 
 /// 選んだ1曲の再生を開始する(TERM独自拡張。#151)。タイトル用・プレイ中用の
-/// 常駐スレッドとは異なり、専用スレッドは立てない(#154)。
-pub fn start_jukebox_preview(mixer: &Mixer, track: &'static [u8]) -> JukeboxPreview {
+/// 常駐スレッドとは異なり、専用スレッドは立てない(#154)。`volume_percent`は
+/// MUSIC音量設定(#224)で、試聴もタイトル/プレイ中BGMと同じ音量になる。
+pub fn start_jukebox_preview(
+    mixer: &Mixer,
+    track: &'static [u8],
+    volume_percent: u32,
+) -> JukeboxPreview {
     let player = Player::connect_new(mixer);
-    player.set_volume(BGM_VOLUME);
+    player.set_volume(bgm_gain(volume_percent));
     let decoder =
         Decoder::new(Cursor::new(track)).expect("embedded BGM track must be a valid, bundled mp3");
     player.append(decoder);
@@ -212,5 +242,26 @@ mod tests {
             Decoder::new(Cursor::new(track))
                 .expect("each embedded gameplay BGM track must be a valid, decodable mp3");
         }
+    }
+
+    #[test]
+    fn bgm_gain_at_100_percent_equals_the_base_gain() {
+        assert_eq!(bgm_gain(100), BGM_VOLUME);
+    }
+
+    #[test]
+    fn bgm_gain_at_0_percent_is_silent() {
+        assert_eq!(bgm_gain(0), 0.0);
+    }
+
+    #[test]
+    fn bgm_gain_at_50_percent_is_half_the_base_gain() {
+        assert_eq!(bgm_gain(50), BGM_VOLUME * 0.5);
+    }
+
+    #[test]
+    fn bgm_gain_above_100_percent_clamps_to_the_base_gain() {
+        // 150%はSOUND_VOLUME_PERCENT_MAX(100%)でクランプされ、100%相当と同じになる。
+        assert_eq!(bgm_gain(150), BGM_VOLUME);
     }
 }

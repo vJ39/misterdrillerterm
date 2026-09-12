@@ -13,7 +13,7 @@ mod ui;
 use std::io;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -30,9 +30,10 @@ use constants::{
     DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
     DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
     FIELD_WIDTH_STEP, FRAME_INTERVAL_MS, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
-    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
-    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX,
-    STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
+    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SOUND_VOLUME_PERCENT_MAX,
+    SOUND_VOLUME_PERCENT_MIN, SOUND_VOLUME_PERCENT_STEP, SPAWN_RATE_PERCENT_MAX,
+    SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
+    STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -82,6 +83,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         &Screen::Title,
     )));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
+    // MUSIC音量(#224)。タイトル用・プレイ中用の両BGMスレッドで共有する
+    // (MUSIC音量は画面によらず1つ)。
+    let music_volume_percent = Arc::new(AtomicU32::new(settings.music_volume_percent));
     // タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ。
     // 起動直後の初回表示は「戻ってきた」わけではないので、ここではまだ立てない。
     let title_bgm_restart = Arc::new(AtomicBool::new(false));
@@ -98,12 +102,14 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Arc::clone(&bgm_stop),
             Arc::clone(&title_music_enabled),
             Arc::clone(&title_bgm_restart),
+            Arc::clone(&music_volume_percent),
         );
         audio::bgm::spawn_gameplay_bgm_thread(
             m.clone(),
             Arc::clone(&bgm_stop),
             Arc::clone(&gameplay_music_enabled),
             Arc::clone(&gameplay_bgm_restart),
+            Arc::clone(&music_volume_percent),
         );
     }
 
@@ -262,8 +268,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 game.refresh_debug_log(settings.debug_log_enabled);
                                 settings.save();
                             }
-                            // 配分率・色数・落下速度・回避硬直時間は←→で調整するので、Spaceは無効(トグル対象ではない)。
-                            ui::render::SettingsChoice::RockRate
+                            // 配分率・色数・落下速度・回避硬直時間・音量は←→で調整するので、
+                            // Spaceは無効(トグル対象ではない)。
+                            ui::render::SettingsChoice::MusicVolume
+                            | ui::render::SettingsChoice::SeVolume
+                            | ui::render::SettingsChoice::RockRate
                             | ui::render::SettingsChoice::AirRate
                             | ui::render::SettingsChoice::StarRate
                             | ui::render::SettingsChoice::DiamondRate
@@ -305,6 +314,45 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::DebugLogEnabled => {
                                 settings.debug_log_enabled = !settings.debug_log_enabled;
                                 game.refresh_debug_log(settings.debug_log_enabled);
+                            }
+                            _ => {}
+                        }
+                        settings.save();
+                    }
+                    // MUSIC/SEの音量調整(#224)。ON/OFFとは別に、アプリ内部のミックス
+                    // ゲインだけを変える。SE音量は変更のたびに確認用サンプルSE(酸素
+                    // カプセル取得音)を1回鳴らす。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if pause_overlay == PauseOverlay::Settings
+                            && matches!(
+                                settings_selection,
+                                ui::render::SettingsChoice::MusicVolume
+                                    | ui::render::SettingsChoice::SeVolume
+                            ) =>
+                    {
+                        let increase = action == InputAction::MoveRight;
+                        match settings_selection {
+                            ui::render::SettingsChoice::MusicVolume => {
+                                settings.music_volume_percent = adjust_sound_volume_percent(
+                                    settings.music_volume_percent,
+                                    increase,
+                                );
+                                music_volume_percent
+                                    .store(settings.music_volume_percent, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::SeVolume => {
+                                settings.se_volume_percent = adjust_sound_volume_percent(
+                                    settings.se_volume_percent,
+                                    increase,
+                                );
+                                if settings.se_enabled
+                                    && let Some(m) = mixer.as_ref()
+                                {
+                                    audio::sfx::play_oxygen_pickup(
+                                        m,
+                                        audio::sfx::se_gain(settings.se_volume_percent),
+                                    );
+                                }
                             }
                             _ => {}
                         }
@@ -437,7 +485,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         // 単独で管理するため、ここでは変更しない(#221)。
                         autopilot = None;
                         let events = game.apply_input(action);
-                        handle_events(&events, mixer.as_ref(), &se_enabled);
+                        handle_events(
+                            &events,
+                            mixer.as_ref(),
+                            &se_enabled,
+                            settings.se_volume_percent,
+                        );
                     }
                     // T: オートプレイのON/OFF。無敵は連動させず、Gキーの状態をそのまま
                     // 残す(#221。AIが無敵に頼らず生き延びられるかをTだけで試せるように
@@ -454,7 +507,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     }
                     InputAction::DebugUnifyNearbyColors => {
                         let events = game.debug_unify_nearby_colors();
-                        handle_events(&events, mixer.as_ref(), &se_enabled);
+                        handle_events(
+                            &events,
+                            mixer.as_ref(),
+                            &se_enabled,
+                            settings.se_volume_percent,
+                        );
                     }
                     InputAction::DebugAddLife => game.debug_add_life(),
                     InputAction::DebugFillAir => game.debug_fill_air(),
@@ -507,7 +565,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             other => game.apply_input(other),
                         };
-                        handle_events(&events, mixer.as_ref(), &se_enabled);
+                        handle_events(
+                            &events,
+                            mixer.as_ref(),
+                            &se_enabled,
+                            settings.se_volume_percent,
+                        );
                     }
                 }
 
@@ -516,7 +579,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 last_tick = now;
 
                 let events = game.update(delta.min(Duration::from_millis(250)));
-                handle_events(&events, mixer.as_ref(), &se_enabled);
+                handle_events(
+                    &events,
+                    mixer.as_ref(),
+                    &se_enabled,
+                    settings.se_volume_percent,
+                );
 
                 let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
                 let se_on = se_enabled.load(Ordering::Relaxed);
@@ -532,6 +600,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings_selection,
                             music_on,
                             se_on,
+                            settings.music_volume_percent,
+                            settings.se_volume_percent,
                             settings.rock_spawn_rate_percent,
                             settings.air_spawn_rate_percent,
                             settings.star_spawn_rate_percent,
@@ -564,6 +634,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings_selection,
                     music_on,
                     se_on,
+                    settings.music_volume_percent,
+                    settings.se_volume_percent,
                     settings.rock_spawn_rate_percent,
                     settings.air_spawn_rate_percent,
                     settings.star_spawn_rate_percent,
@@ -615,7 +687,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.debug_log_enabled = !settings.debug_log_enabled;
                             settings.save();
                         }
-                        ui::render::SettingsChoice::RockRate
+                        ui::render::SettingsChoice::MusicVolume
+                        | ui::render::SettingsChoice::SeVolume
+                        | ui::render::SettingsChoice::RockRate
                         | ui::render::SettingsChoice::AirRate
                         | ui::render::SettingsChoice::StarRate
                         | ui::render::SettingsChoice::DiamondRate
@@ -655,6 +729,43 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::DebugLogEnabled => {
                                 settings.debug_log_enabled = !settings.debug_log_enabled;
+                            }
+                            _ => {}
+                        }
+                        settings.save();
+                    }
+                    // MUSIC/SEの音量調整(#224)。一時停止オーバーレイと同じ挙動で、
+                    // SE音量は変更のたびに確認用サンプルSEを1回鳴らす。
+                    InputAction::MoveLeft | InputAction::MoveRight
+                        if matches!(
+                            settings_selection,
+                            ui::render::SettingsChoice::MusicVolume
+                                | ui::render::SettingsChoice::SeVolume
+                        ) =>
+                    {
+                        let increase = action == InputAction::MoveRight;
+                        match settings_selection {
+                            ui::render::SettingsChoice::MusicVolume => {
+                                settings.music_volume_percent = adjust_sound_volume_percent(
+                                    settings.music_volume_percent,
+                                    increase,
+                                );
+                                music_volume_percent
+                                    .store(settings.music_volume_percent, Ordering::Relaxed);
+                            }
+                            ui::render::SettingsChoice::SeVolume => {
+                                settings.se_volume_percent = adjust_sound_volume_percent(
+                                    settings.se_volume_percent,
+                                    increase,
+                                );
+                                if settings.se_enabled
+                                    && let Some(m) = mixer.as_ref()
+                                {
+                                    audio::sfx::play_oxygen_pickup(
+                                        m,
+                                        audio::sfx::se_gain(settings.se_volume_percent),
+                                    );
+                                }
                             }
                             _ => {}
                         }
@@ -775,7 +886,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             if !already_playing_selection {
                                 let (_, track) = audio::bgm::JUKEBOX_TRACKS[help_jukebox_selection];
-                                let preview = audio::bgm::start_jukebox_preview(m, track);
+                                let preview = audio::bgm::start_jukebox_preview(
+                                    m,
+                                    track,
+                                    settings.music_volume_percent,
+                                );
                                 help_jukebox_playing = Some((help_jukebox_selection, preview));
                             }
                         }
@@ -1185,39 +1300,62 @@ fn adjust_chain_vanish_interval_ms(current: u64, increase: bool) -> u64 {
     }
 }
 
-/// ゲームイベントを対応する効果音再生へ変換する。SE OFF設定中は何もしない。
-fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<AtomicBool>) {
-    if !se_enabled.load(Ordering::Relaxed) {
+/// SE/MUSIC音量(%)を`SOUND_VOLUME_PERCENT_STEP`ぶん増減する(TERM独自拡張。#224)。
+#[allow(clippy::unnecessary_min_or_max)]
+fn adjust_sound_volume_percent(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(SOUND_VOLUME_PERCENT_STEP)
+            .min(SOUND_VOLUME_PERCENT_MAX)
+    } else {
+        current
+            .saturating_sub(SOUND_VOLUME_PERCENT_STEP)
+            .max(SOUND_VOLUME_PERCENT_MIN)
+    }
+}
+
+/// ゲームイベントを対応する効果音再生へ変換する。SE OFF設定中、またはSE音量が0%の
+/// 間は何もしない。
+fn handle_events(
+    events: &[GameEvent],
+    mixer: Option<&Mixer>,
+    se_enabled: &Arc<AtomicBool>,
+    se_volume_percent: u32,
+) {
+    if !se_enabled.load(Ordering::Relaxed) || se_volume_percent == 0 {
         return;
     }
     let Some(mixer) = mixer else {
         return;
     };
+    let gain = audio::sfx::se_gain(se_volume_percent);
 
     for event in events {
         match event {
-            GameEvent::DrillImpact => audio::sfx::play_dig(mixer),
-            GameEvent::RockHitIntact => audio::sfx::play_rock_hit(mixer),
-            GameEvent::BlockDestroyed { blocks } => audio::sfx::play_destroy(mixer, *blocks),
-            GameEvent::RockDestroyed { blocks } => audio::sfx::play_rock_destroy(mixer, *blocks),
-            GameEvent::DodgeTriggered => audio::sfx::play_dodge(mixer),
-            GameEvent::OxygenCollected => audio::sfx::play_oxygen_pickup(mixer),
+            GameEvent::DrillImpact => audio::sfx::play_dig(mixer, gain),
+            GameEvent::RockHitIntact => audio::sfx::play_rock_hit(mixer, gain),
+            GameEvent::BlockDestroyed { blocks } => audio::sfx::play_destroy(mixer, *blocks, gain),
+            GameEvent::RockDestroyed { blocks } => {
+                audio::sfx::play_rock_destroy(mixer, *blocks, gain)
+            }
+            GameEvent::DodgeTriggered => audio::sfx::play_dodge(mixer, gain),
+            GameEvent::OxygenCollected => audio::sfx::play_oxygen_pickup(mixer, gain),
             // ダイヤ取得の専用SEはspec.md 10章のSE一覧に定義が無いため無音(得点加算のみ)。
             GameEvent::DiamondCollected => {}
-            GameEvent::OxygenWarningTick => audio::sfx::play_oxygen_warning(mixer),
-            GameEvent::LevelUp { .. } => audio::sfx::play_level_up(mixer),
-            GameEvent::ExtraLifeAtLevel { .. } => audio::sfx::play_extra_life(mixer),
+            GameEvent::OxygenWarningTick => audio::sfx::play_oxygen_warning(mixer, gain),
+            GameEvent::LevelUp { .. } => audio::sfx::play_level_up(mixer, gain),
+            GameEvent::ExtraLifeAtLevel { .. } => audio::sfx::play_extra_life(mixer, gain),
             // 死因(cause)はソークテストの集計専用で、SE再生では区別しない。
-            GameEvent::LifeLost { .. } => audio::sfx::play_life_lost(mixer),
-            GameEvent::Revived => audio::sfx::play_revive(mixer),
-            GameEvent::GameOverMiss { .. } => audio::sfx::play_miss(mixer),
-            GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
-            GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
-            GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer),
-            GameEvent::BombFuseWarning => audio::sfx::play_bomb_fuse_warning(mixer),
-            GameEvent::BombFuseTick => audio::sfx::play_bomb_fuse_tick(mixer),
+            GameEvent::LifeLost { .. } => audio::sfx::play_life_lost(mixer, gain),
+            GameEvent::Revived => audio::sfx::play_revive(mixer, gain),
+            GameEvent::GameOverMiss { .. } => audio::sfx::play_miss(mixer, gain),
+            GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer, gain),
+            GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer, gain),
+            GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer, gain),
+            GameEvent::BombFuseWarning => audio::sfx::play_bomb_fuse_warning(mixer, gain),
+            GameEvent::BombFuseTick => audio::sfx::play_bomb_fuse_tick(mixer, gain),
             // 100mごとのチェックポイント到達。最終ゴール(Cleared)と同じファンファーレを使い回す。
-            GameEvent::Checkpoint100m { .. } => audio::sfx::play_clear_fanfare(mixer),
+            GameEvent::Checkpoint100m { .. } => audio::sfx::play_clear_fanfare(mixer, gain),
             // 無敵によるミス回避(TERM独自拡張。#218)。デバッグ用の記録専用イベントで、
             // 演出もSEも伴わない(回数はHUDのGOD表示とデバッグログに残る)。
             GameEvent::MissAverted { .. } => {}
@@ -1432,5 +1570,32 @@ mod tests {
             adjust_dodge_recovery_ms(u64::MAX, true),
             DODGE_RECOVERY_MS_MAX
         );
+    }
+
+    #[test]
+    fn adjust_sound_volume_percent_saturates_at_max_instead_of_panicking_when_current_is_corrupted()
+    {
+        assert_eq!(
+            adjust_sound_volume_percent(u32::MAX, true),
+            SOUND_VOLUME_PERCENT_MAX
+        );
+    }
+
+    #[test]
+    fn adjust_sound_volume_percent_saturates_at_min() {
+        assert_eq!(
+            adjust_sound_volume_percent(0, false),
+            SOUND_VOLUME_PERCENT_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_sound_volume_percent_decreases_by_one_step() {
+        assert_eq!(adjust_sound_volume_percent(100, false), 90);
+    }
+
+    #[test]
+    fn adjust_sound_volume_percent_increases_by_one_step() {
+        assert_eq!(adjust_sound_volume_percent(90, true), 100);
     }
 }

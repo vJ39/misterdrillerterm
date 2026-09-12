@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use crate::constants::{
     CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M,
     DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT,
-    SHAKE_DURATION_MS, SPAWN_RATE_PERCENT_DEFAULT,
+    SHAKE_DURATION_MS, SOUND_VOLUME_PERCENT_DEFAULT, SOUND_VOLUME_PERCENT_MAX,
+    SPAWN_RATE_PERCENT_DEFAULT,
 };
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
@@ -25,6 +26,12 @@ pub struct Settings {
     pub music_enabled: bool,
     /// SE(効果音)のON/OFF。
     pub se_enabled: bool,
+    /// MUSIC(BGM)の音量(%、0〜100、10%刻み。TERM独自拡張。#224)。ON/OFFとは別に、
+    /// アプリ内部のミックスゲインだけを調整する(OS側のシステム音量には触れない)。
+    /// 設定画面から調整する。
+    pub music_volume_percent: u32,
+    /// SE(効果音)の音量(%、同上)。設定画面から調整する。
+    pub se_volume_percent: u32,
     /// デバッグショートカット([ ] キー)で調整するブロック落下速度(tick間隔, ms)。
     pub block_fall_tick_ms: u64,
     /// デバッグショートカット(- = キー)で調整するプレイヤー自由落下速度(tick間隔, ms)。
@@ -90,6 +97,8 @@ impl Default for Settings {
         Settings {
             music_enabled: true,
             se_enabled: true,
+            music_volume_percent: SOUND_VOLUME_PERCENT_DEFAULT,
+            se_volume_percent: SOUND_VOLUME_PERCENT_DEFAULT,
             block_fall_tick_ms: FALL_TICK_MS,
             player_fall_tick_ms: FALL_TICK_MS,
             shake_duration_ms: SHAKE_DURATION_MS,
@@ -139,6 +148,15 @@ impl Settings {
             music_enabled: parse_bool_field(&text, "music_enabled")
                 .unwrap_or(default.music_enabled),
             se_enabled: parse_bool_field(&text, "se_enabled").unwrap_or(default.se_enabled),
+            // 音量は他のフィールドと異なり、読み込み時に意図的にSOUND_VOLUME_PERCENT_MAX
+            // でクランプする。手編集や破損データで異常値が入っていると、起動直後から
+            // 振幅に直結する音量が爆音になりかねないため(#224)。
+            music_volume_percent: parse_u64_field(&text, "music_volume_percent")
+                .map(|v| (v as u32).min(SOUND_VOLUME_PERCENT_MAX))
+                .unwrap_or(default.music_volume_percent),
+            se_volume_percent: parse_u64_field(&text, "se_volume_percent")
+                .map(|v| (v as u32).min(SOUND_VOLUME_PERCENT_MAX))
+                .unwrap_or(default.se_volume_percent),
             block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms")
                 .unwrap_or(default.block_fall_tick_ms),
             player_fall_tick_ms: parse_u64_field(&text, "player_fall_tick_ms")
@@ -216,9 +234,11 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
+            self.music_volume_percent,
+            self.se_volume_percent,
             self.block_fall_tick_ms,
             self.player_fall_tick_ms,
             self.shake_duration_ms,
@@ -302,6 +322,8 @@ mod tests {
         let settings = Settings::default();
         assert!(settings.music_enabled);
         assert!(settings.se_enabled);
+        assert_eq!(settings.music_volume_percent, SOUND_VOLUME_PERCENT_DEFAULT);
+        assert_eq!(settings.se_volume_percent, SOUND_VOLUME_PERCENT_DEFAULT);
         assert_eq!(settings.block_fall_tick_ms, FALL_TICK_MS);
         assert_eq!(settings.player_fall_tick_ms, FALL_TICK_MS);
         assert_eq!(settings.rock_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
@@ -394,6 +416,8 @@ mod tests {
         let a = Settings {
             music_enabled: false,
             se_enabled: true,
+            music_volume_percent: 70,
+            se_volume_percent: 0,
             block_fall_tick_ms: 200,
             player_fall_tick_ms: 100,
             shake_duration_ms: 300,
@@ -420,6 +444,8 @@ mod tests {
         let b = Settings {
             music_enabled: true,
             se_enabled: false,
+            music_volume_percent: 100,
+            se_volume_percent: 30,
             block_fall_tick_ms: 50,
             player_fall_tick_ms: 400,
             shake_duration_ms: 600,
@@ -513,6 +539,64 @@ mod tests {
 
         assert_eq!(loaded.music_enabled, Settings::default().music_enabled);
         assert_eq!(loaded.block_fall_tick_ms, 300);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_missing_volume_keys_falls_back_to_100_percent() {
+        // 音量キー自体が無い(#224追加前に保存されたsettings.json等)場合は、
+        // 既定値の100%へフォールバックする。
+        let path = temp_settings_path("volume-missing-keys");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"music_enabled\": true}").unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.music_volume_percent, SOUND_VOLUME_PERCENT_DEFAULT);
+        assert_eq!(loaded.se_volume_percent, SOUND_VOLUME_PERCENT_DEFAULT);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_out_of_range_volume_clamps_to_max() {
+        // 手編集や破損データで範囲外(150%)の値が入っていても、起動直後から爆音に
+        // ならないようSOUND_VOLUME_PERCENT_MAX(100%)へクランプする。
+        let path = temp_settings_path("volume-out-of-range");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"music_volume_percent\": 150, \"se_volume_percent\": 150}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.music_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+        assert_eq!(loaded.se_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_zero_volume_is_not_clamped() {
+        // 0%(ミュート相当)は下限として正当な値なのでクランプで消してはいけない。
+        let path = temp_settings_path("volume-zero");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"music_volume_percent\": 0, \"se_volume_percent\": 0}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.music_volume_percent, 0);
+        assert_eq!(loaded.se_volume_percent, 0);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

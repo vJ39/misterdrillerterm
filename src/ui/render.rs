@@ -428,7 +428,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         line(""),
         heading("== 一時停止中のみ =="),
         line("M: MUSIC ON/OFF   E: SE ON/OFF"),
-        line("設定画面: MUSIC/SE/Xブロック・AIR・スター・ダイヤの配分・色数を調整できる"),
+        line("設定画面: MUSIC/SE・音量・Xブロック・AIR・スター・ダイヤの配分・色数を調整できる"),
         line(""),
         heading("== デバッグショートカット =="),
         line("C: 周辺ブロックを2色に統一   L: ライフ+1   A: AIRを100%に回復"),
@@ -585,7 +585,11 @@ pub fn draw_mode_select(frame: &mut Frame, selection: CourseChoice) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsChoice {
     Music,
+    /// MUSIC(BGM)の音量(%、0〜100)。ON/OFFとは別の項目(TERM独自拡張。#224)。
+    MusicVolume,
     Se,
+    /// SE(効果音)の音量(%、0〜100)。ON/OFFとは別の項目(TERM独自拡張。#224)。
+    SeVolume,
     /// Xブロック(岩)の出現率(%)。
     RockRate,
     /// AIR(酸素カプセル)の出現率(%)。
@@ -626,8 +630,10 @@ impl SettingsChoice {
     /// ↓キーでの選択項目の巡回。
     pub fn cycle(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::Se,
-            SettingsChoice::Se => SettingsChoice::RockRate,
+            SettingsChoice::Music => SettingsChoice::MusicVolume,
+            SettingsChoice::MusicVolume => SettingsChoice::Se,
+            SettingsChoice::Se => SettingsChoice::SeVolume,
+            SettingsChoice::SeVolume => SettingsChoice::RockRate,
             SettingsChoice::RockRate => SettingsChoice::AirRate,
             SettingsChoice::AirRate => SettingsChoice::StarRate,
             SettingsChoice::StarRate => SettingsChoice::DiamondRate,
@@ -655,8 +661,10 @@ impl SettingsChoice {
             SettingsChoice::ChainVanishInterval => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
-            SettingsChoice::Se => SettingsChoice::Music,
-            SettingsChoice::RockRate => SettingsChoice::Se,
+            SettingsChoice::MusicVolume => SettingsChoice::Music,
+            SettingsChoice::Se => SettingsChoice::MusicVolume,
+            SettingsChoice::SeVolume => SettingsChoice::Se,
+            SettingsChoice::RockRate => SettingsChoice::SeVolume,
             SettingsChoice::AirRate => SettingsChoice::RockRate,
             SettingsChoice::StarRate => SettingsChoice::AirRate,
             SettingsChoice::DiamondRate => SettingsChoice::StarRate,
@@ -683,6 +691,8 @@ pub fn draw_settings(
     selection: SettingsChoice,
     music_enabled: bool,
     se_enabled: bool,
+    music_volume_percent: u32,
+    se_volume_percent: u32,
     rock_rate_percent: u32,
     air_rate_percent: u32,
     star_rate_percent: u32,
@@ -785,7 +795,17 @@ pub fn draw_settings(
         Line::from(Span::styled("SETTINGS", text_style)),
         Line::from(""),
         toggle_line("MUSIC", music_enabled, selection == SettingsChoice::Music),
+        rate_line(
+            "MUSIC音量",
+            music_volume_percent,
+            selection == SettingsChoice::MusicVolume,
+        ),
         toggle_line("SE", se_enabled, selection == SettingsChoice::Se),
+        rate_line(
+            "SE音量",
+            se_volume_percent,
+            selection == SettingsChoice::SeVolume,
+        ),
         rate_line(
             "Xブロック配分",
             rock_rate_percent,
@@ -874,9 +894,9 @@ pub fn draw_settings(
         )),
         Line::from(Span::styled(
             if standalone {
-                "配分・色数は←→で調整 / Escでタイトルへ"
+                "配分・音量・色数は←→で調整 / Escでタイトルへ"
             } else {
-                "配分・色数は←→で調整 / Escで閉じる"
+                "配分・音量・色数は←→で調整 / Escで閉じる"
             },
             text_style,
         )),
@@ -2556,7 +2576,9 @@ mod tests {
         // cycle_back()はcycle()の逆方向であり、どの項目から始めても cycle().cycle_back() で元へ戻る。
         let all = [
             SettingsChoice::Music,
+            SettingsChoice::MusicVolume,
             SettingsChoice::Se,
+            SettingsChoice::SeVolume,
             SettingsChoice::RockRate,
             SettingsChoice::AirRate,
             SettingsChoice::StarRate,
@@ -2573,6 +2595,7 @@ mod tests {
             SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::BombRate,
             SettingsChoice::DebugLogEnabled,
+            SettingsChoice::ChainVanishInterval,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);
@@ -2664,9 +2687,10 @@ mod tests {
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
-        // クリップして見えなくなる)。見出し1+空行1+設定項目19+空行1+案内2行=24行、
-        // 枠(上下)2行込みで26行必要。設定を追加したらこの定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 24;
+        // クリップして見えなくなる)。見出し1+空行1+設定項目21(#224でMUSIC音量・SE音量の
+        // 2項目を追加)+空行1+案内2行=26行、枠(上下)2行込みで28行必要。設定を追加したら
+        // この定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 26;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let settings_area = centered_rect(60, 90, frame_rect);

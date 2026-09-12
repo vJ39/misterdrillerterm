@@ -480,3 +480,16 @@ pub const AUTOPLAY_REVIVE_DELAY_MS: u64 = 1500;
 /// タイトル画面で無操作のままこの時間が過ぎたら、アトラクトモード(自動デモプレイ)を
 /// 開始する(ms)。
 pub const ATTRACT_MODE_IDLE_MS: u64 = 30000;
+
+// ---------------------------------------------------------------------------
+// SE/MUSIC音量調整(#224)。既存のON/OFF(M/Eキー・設定画面トグル)とは別に、
+// アプリ内部のミックスゲインだけを0〜100%(10%刻み)で調整できるようにする。
+// OS/システム側の音量には一切触れない。
+// ---------------------------------------------------------------------------
+
+/// SE/MUSIC音量(%)。100=現在のミックス(sfx::SE_VOLUME / bgm::BGM_VOLUME)そのまま。
+/// アプリ内部のゲインのみを変え、OS側のシステム音量には一切触れない。
+pub const SOUND_VOLUME_PERCENT_DEFAULT: u32 = 100;
+pub const SOUND_VOLUME_PERCENT_MIN: u32 = 0;
+pub const SOUND_VOLUME_PERCENT_MAX: u32 = 100;
+pub const SOUND_VOLUME_PERCENT_STEP: u32 = 10;

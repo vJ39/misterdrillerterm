@@ -8,16 +8,27 @@ use std::time::Duration;
 use rodio::mixer::Mixer;
 use rodio::{ChannelCount, Player, SampleRate, Source};
 
+use crate::constants::SOUND_VOLUME_PERCENT_MAX;
+
 /// 生成する波形のサンプルレート(Hz)。
 const SAMPLE_RATE: u32 = 44100;
 
 /// 末尾フェードアウトの長さ(ms)。クリック音(プチノイズ)防止用(spec.md 10章)。
 const FADE_MS: u64 = 3;
 
-/// SE再生音量の目安(spec.md 10章「SE用Sinkで0.6〜0.8」)。BGMとのバランス調整
+/// SE再生音量の基準ゲイン(spec.md 10章「SE用Sinkで0.6〜0.8」)。BGMとのバランス調整
 /// (TERM独自拡張。#147。ユーザー指摘: 「SEがうるさくてBGMちいさい」)で0.7→0.45へ
-/// 引き下げた(BGM側は`bgm::BGM_VOLUME`を0.35→0.55へ引き上げ)。
+/// 引き下げた(BGM側は`bgm::BGM_VOLUME`を0.35→0.55へ引き上げ)。SE音量設定(#224)が
+/// 100%のときのゲインで、実際に再生へ渡すゲインは`se_gain`で音量設定を反映して求める。
 pub const SE_VOLUME: f32 = 0.45;
+
+/// SE音量設定(%、`SOUND_VOLUME_PERCENT_MIN`〜`SOUND_VOLUME_PERCENT_MAX`)から、
+/// 実際にミキサーへ渡すゲインを求める(TERM独自拡張。#224)。100%で`SE_VOLUME`
+/// (基準ゲイン)そのもの、0%で無音になる。上限を超える値は`SOUND_VOLUME_PERCENT_MAX`
+/// でクランプする(OS側のシステム音量には触れず、アプリ内部のゲインのみを変える)。
+pub fn se_gain(volume_percent: u32) -> f32 {
+    SE_VOLUME * (volume_percent.min(SOUND_VOLUME_PERCENT_MAX) as f32 / 100.0)
+}
 
 /// 指定サンプルレート・長さ(ms)から、総サンプル数とフェードサンプル数を求める。
 fn sample_counts(sample_rate: u32, duration_ms: u64) -> (u64, u64) {
@@ -375,15 +386,15 @@ fn play_sequence(mixer: &Mixer, tones: Vec<Box<dyn Source<Item = f32> + Send>>, 
 }
 
 /// 掘削音: 色ブロックの直接掘削、または岩ブロックへのヒットが実際に発生した瞬間。
-/// 矩形波 440Hz, 20ms(spec.md 10章)。
-pub fn play_dig(mixer: &Mixer) {
-    play_tone(mixer, square_tone(440.0, 20, 0.5), SE_VOLUME);
+/// 矩形波 440Hz, 20ms(spec.md 10章)。`gain`はSE音量設定を反映したゲイン(`se_gain`参照)。
+pub fn play_dig(mixer: &Mixer, gain: f32) {
+    play_tone(mixer, square_tone(440.0, 20, 0.5), gain);
 }
 
 /// 岩ブロックヒット音(未破壊): 岩ブロックへ掘削入力し、5回目未満でまだ破壊に至らない瞬間。
 /// 矩形波(短い低音) 220Hz, 20ms(spec.md 10章)。
-pub fn play_rock_hit(mixer: &Mixer) {
-    play_tone(mixer, square_tone(220.0, 20, 0.5), SE_VOLUME);
+pub fn play_rock_hit(mixer: &Mixer, gain: f32) {
+    play_tone(mixer, square_tone(220.0, 20, 0.5), gain);
 }
 
 /// 破壊音の下降チャープを何連にするか(4個消滅ごとに1つ追加)の上限(TERM独自拡張)。
@@ -394,10 +405,10 @@ const MAX_DESTROY_CHIRPS: usize = 5;
 /// `blocks`(消滅数)が4個増えるごとにチャープを1つ追加し、たくさん消えるほど
 /// 「たくさん消えてる」感が出るようにする(ユーザー指摘: 「ブロックが消えたときの
 /// SEが必要たくさん消えるといっぱい消えてる感じに」)。1〜3個は従来通り単発のまま。
-pub fn play_destroy(mixer: &Mixer, blocks: usize) {
+pub fn play_destroy(mixer: &Mixer, blocks: usize, gain: f32) {
     let chirp_count = (blocks / 4 + 1).min(MAX_DESTROY_CHIRPS);
     if chirp_count == 1 {
-        play_tone(mixer, square_chirp(220.0, 110.0, 60, 0.5), SE_VOLUME);
+        play_tone(mixer, square_chirp(220.0, 110.0, 60, 0.5), gain);
         return;
     }
     let tones: Vec<Box<dyn Source<Item = f32> + Send>> = (0..chirp_count)
@@ -407,14 +418,14 @@ pub fn play_destroy(mixer: &Mixer, blocks: usize) {
                 as Box<dyn Source<Item = f32> + Send>
         })
         .collect();
-    play_sequence(mixer, tones, SE_VOLUME);
+    play_sequence(mixer, tones, gain);
 }
 
 /// 岩ブロック(Xブロック)破壊音: 色ブロックの破壊音より低く粗い「ゴツッ」という質感の
 /// 2音(TERM独自拡張。ユーザー指摘: 「Xブロックを壊したときに専用SEを鳴らす」)。
 /// `blocks`(消滅数)が4個増えるごとにもう1組追加し、`play_destroy`と同様に大量消滅時の
 /// 「たくさん消えてる」感を出す。
-pub fn play_rock_destroy(mixer: &Mixer, blocks: usize) {
+pub fn play_rock_destroy(mixer: &Mixer, blocks: usize, gain: f32) {
     let clunk_count = (blocks / 4 + 1).min(MAX_DESTROY_CHIRPS);
     let tones: Vec<Box<dyn Source<Item = f32> + Send>> = (0..clunk_count)
         .flat_map(|i| {
@@ -425,26 +436,27 @@ pub fn play_rock_destroy(mixer: &Mixer, blocks: usize) {
             ]
         })
         .collect();
-    play_sequence(mixer, tones, SE_VOLUME);
+    play_sequence(mixer, tones, gain);
 }
 
 /// ヒヤリ回避スライダー発動音: ブロックが落ち始める直前に間一髪回避した瞬間の「わ〜!」
 /// という驚きを表す、素早く上昇するチャープ(TERM独自拡張。ユーザー指摘: 「キャラが
 /// スライディングした瞬間...専用SEを鳴らす」)。他の効果音は全て下降チャープなので、
 /// 唯一の上昇チャープとして区別できるようにする。
-pub fn play_dodge(mixer: &Mixer) {
-    play_tone(mixer, square_chirp(300.0, 700.0, 80, 0.5), SE_VOLUME);
+pub fn play_dodge(mixer: &Mixer, gain: f32) {
+    play_tone(mixer, square_chirp(300.0, 700.0, 80, 0.5), gain);
 }
 
 /// air取得音: 酸素カプセル取得時。矩形波2音 523Hz(60ms)→784Hz(60ms)。
-pub fn play_oxygen_pickup(mixer: &Mixer) {
+/// 設定画面のSE音量調整でも、変更確認用のサンプルSEとして再利用する。
+pub fn play_oxygen_pickup(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
             Box::new(square_tone(523.0, 60, 0.5)),
             Box::new(square_tone(784.0, 60, 0.5)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
@@ -453,20 +465,20 @@ pub fn play_oxygen_pickup(mixer: &Mixer) {
 /// (TERM独自拡張。ユーザー指摘: 「AIRなくなりそうなときのSEが「ぴー、ぴー」って
 /// 変だから、あんまりうるさくない、サイレンみたいにして」)。500Hz→750Hz→500Hzと
 /// 滑らかに上下させ、振幅も他のSEより控えめにする。
-pub fn play_oxygen_warning(mixer: &Mixer) {
+pub fn play_oxygen_warning(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
             Box::new(sine_chirp(500.0, 750.0, 250, 0.35)),
             Box::new(sine_chirp(750.0, 500.0, 250, 0.35)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
 /// レベルアップ音: 30mごとのレベル到達時(spec.md 7章)。矩形波4音アルペジオ
 /// 523/659/784/1046Hz、各80ms(spec.md 10章)。
-pub fn play_level_up(mixer: &Mixer) {
+pub fn play_level_up(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -475,13 +487,13 @@ pub fn play_level_up(mixer: &Mixer) {
             Box::new(square_tone(784.0, 80, 0.5)),
             Box::new(square_tone(1046.0, 80, 0.5)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
 /// クリアファンファーレ: 1000m到達時。矩形波(チェックポイント音の拡張)
 /// 523/659/784/1046/1318Hz、各100ms。
-pub fn play_clear_fanfare(mixer: &Mixer) {
+pub fn play_clear_fanfare(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -491,14 +503,14 @@ pub fn play_clear_fanfare(mixer: &Mixer) {
             Box::new(square_tone(1046.0, 100, 0.5)),
             Box::new(square_tone(1318.0, 100, 0.5)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
 /// アイテム取得音: ショートカットR/C相当の効果を持つアイテムブロックを取得した瞬間
 /// (TERM独自拡張)。既存SEの多くが矩形波中心なのに対し、サイン波の駆け上がる3音
 /// 880/1174/1568Hz、各70msで差別化する。
-pub fn play_item_collected(mixer: &Mixer) {
+pub fn play_item_collected(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -506,7 +518,7 @@ pub fn play_item_collected(mixer: &Mixer) {
             Box::new(sine_chord(&[1174.0], 70, 0.6, 5, 10, 0.8)),
             Box::new(sine_chord(&[1568.0], 70, 0.6, 5, 10, 0.8)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
@@ -515,7 +527,7 @@ pub fn play_item_collected(mixer: &Mixer) {
 /// 上昇5音)と対になるよう、下降する4音+最後にオクターブ落ちるチャープで締める
 /// 「ガクッ」という終幕感のあるフレーズにした(以前は単純な下降チャープ1発
 /// 440Hz→110Hz・500msのみだった)。
-pub fn play_miss(mixer: &Mixer) {
+pub fn play_miss(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -524,20 +536,20 @@ pub fn play_miss(mixer: &Mixer) {
             Box::new(square_tone(294.0, 130, 0.5)),         // レ
             Box::new(square_chirp(262.0, 131.0, 260, 0.5)), // ドから1オクターブ下降して締める
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
 /// ライフロス音: ライフを1つ失ったが、まだライフが残っている瞬間。矩形波(短い下降チャープ)
 /// 440Hz→220Hz, 250ms(spec.md 10章)。
-pub fn play_life_lost(mixer: &Mixer) {
-    play_tone(mixer, square_chirp(440.0, 220.0, 250, 0.5), SE_VOLUME);
+pub fn play_life_lost(mixer: &Mixer, gain: f32) {
+    play_tone(mixer, square_chirp(440.0, 220.0, 250, 0.5), gain);
 }
 
 /// 復活音: 「天に召される」演出が終わり、その場に復活した瞬間(TERM独自拡張。
 /// ユーザー指摘: 「死んで、復活したときのSEほしい」)。気持ちを切り替える合図として
 /// 短く駆け上がる3音アルペジオ(矩形波)440/554/659Hz、各70ms。
-pub fn play_revive(mixer: &Mixer) {
+pub fn play_revive(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -545,20 +557,20 @@ pub fn play_revive(mixer: &Mixer) {
             Box::new(square_tone(554.0, 70, 0.5)),
             Box::new(square_tone(659.0, 70, 0.5)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
 /// ボム爆発音(TERM独自拡張。#96)。低い矩形波の「ドン」に続けて下降チャープを
 /// 重ね、既存の破壊音(play_destroy/play_rock_destroy)より低く長い爆発の質感を出す。
-pub fn play_bomb_explosion(mixer: &Mixer) {
+pub fn play_bomb_explosion(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
             Box::new(square_tone(80.0, 40, 0.6)) as Box<dyn Source<Item = f32> + Send>,
             Box::new(square_chirp(180.0, 55.0, 140, 0.55)) as Box<dyn Source<Item = f32> + Send>,
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
@@ -566,7 +578,7 @@ pub fn play_bomb_explosion(mixer: &Mixer) {
 /// Live+1」)。通常のレベルアップ音(play_level_up、矩形波4音)と重ねて鳴るため、
 /// サイン波の駆け上がる5音にして聞き分けられるようにする(play_item_collectedと
 /// 同じ音色系統)。
-pub fn play_extra_life(mixer: &Mixer) {
+pub fn play_extra_life(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -576,7 +588,7 @@ pub fn play_extra_life(mixer: &Mixer) {
             Box::new(sine_chord(&[1319.0], 60, 0.6, 5, 10, 0.8)),
             Box::new(sine_chord(&[1568.0], 120, 0.6, 5, 10, 0.8)),
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
@@ -585,7 +597,7 @@ pub fn play_extra_life(mixer: &Mixer) {
 /// 本体が激しく赤く点滅し始める瞬間(残り`constants::BOMB_DANGER_MS`)に1回だけ
 /// 鳴る。矩形波の短い「チッチッチッチッ」を駆け上がらせ、この後続く爆発音
 /// (play_bomb_explosion)への緊張を煽る。
-pub fn play_bomb_fuse_warning(mixer: &Mixer) {
+pub fn play_bomb_fuse_warning(mixer: &Mixer, gain: f32) {
     play_sequence(
         mixer,
         vec![
@@ -594,7 +606,7 @@ pub fn play_bomb_fuse_warning(mixer: &Mixer) {
             Box::new(square_tone(349.0, 55, 0.45)) as Box<dyn Source<Item = f32> + Send>,
             Box::new(square_tone(440.0, 55, 0.45)) as Box<dyn Source<Item = f32> + Send>,
         ],
-        SE_VOLUME,
+        gain,
     );
 }
 
@@ -603,6 +615,32 @@ pub fn play_bomb_fuse_warning(mixer: &Mixer) {
 /// 入った瞬間の1回だけの駆け上がり4音)とは別に、危険域が続く間`constants::
 /// BOMB_FUSE_TICK_INTERVAL_MS`おきに繰り返し呼ばれる想定。矩形波1音・極短(20ms)・
 /// 低めのピッチにして、駆け上がる4音の警告音より控えめな「乾いた」質感にする。
-pub fn play_bomb_fuse_tick(mixer: &Mixer) {
-    play_tone(mixer, square_tone(180.0, 20, 0.45), SE_VOLUME);
+pub fn play_bomb_fuse_tick(mixer: &Mixer, gain: f32) {
+    play_tone(mixer, square_tone(180.0, 20, 0.45), gain);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn se_gain_at_100_percent_equals_the_base_gain() {
+        assert_eq!(se_gain(100), SE_VOLUME);
+    }
+
+    #[test]
+    fn se_gain_at_0_percent_is_silent() {
+        assert_eq!(se_gain(0), 0.0);
+    }
+
+    #[test]
+    fn se_gain_at_50_percent_is_half_the_base_gain() {
+        assert_eq!(se_gain(50), SE_VOLUME * 0.5);
+    }
+
+    #[test]
+    fn se_gain_above_100_percent_clamps_to_the_base_gain() {
+        // 150%はSOUND_VOLUME_PERCENT_MAX(100%)でクランプされ、100%相当と同じになる。
+        assert_eq!(se_gain(150), SE_VOLUME);
+    }
 }
