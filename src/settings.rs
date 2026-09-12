@@ -152,10 +152,10 @@ impl Settings {
             // でクランプする。手編集や破損データで異常値が入っていると、起動直後から
             // 振幅に直結する音量が爆音になりかねないため(#224)。
             music_volume_percent: parse_u64_field(&text, "music_volume_percent")
-                .map(|v| (v as u32).min(SOUND_VOLUME_PERCENT_MAX))
+                .map(|v| v.min(SOUND_VOLUME_PERCENT_MAX as u64) as u32)
                 .unwrap_or(default.music_volume_percent),
             se_volume_percent: parse_u64_field(&text, "se_volume_percent")
-                .map(|v| (v as u32).min(SOUND_VOLUME_PERCENT_MAX))
+                .map(|v| v.min(SOUND_VOLUME_PERCENT_MAX as u64) as u32)
                 .unwrap_or(default.se_volume_percent),
             block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms")
                 .unwrap_or(default.block_fall_tick_ms),
@@ -570,6 +570,27 @@ mod tests {
         std::fs::write(
             &path,
             "{\"music_volume_percent\": 150, \"se_volume_percent\": 150}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.music_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+        assert_eq!(loaded.se_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_extremely_large_volume_still_clamps_to_max() {
+        // u32の範囲を超える値(4294967296 = 2^32)でもu64のままクランプしてからu32へ
+        // キャストするため、キャスト時の折り返りで小さい値へ化けたりしない(#227)。
+        let path = temp_settings_path("volume-huge");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"music_volume_percent\": 4294967296, \"se_volume_percent\": 4294967296}",
         )
         .unwrap();
 
