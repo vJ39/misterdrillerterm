@@ -62,6 +62,41 @@
 //! 変わった(1走あたり1.66回→2.47〜4.59回)。安全側の基準は緩めず、見積りの誤りだけを
 //! 直すのが正解だった。
 //!
+//! # 判断そのものの計測と、そこで見つけたバグ(#229)
+//!
+//! 完走率と死因の内訳だけでは「なぜそう動いたのか」が見えない。ソークに判断の計測を
+//! 足し(テストの`Telemetry`)、意図別のフレーム数・段差登りの空振り・待ちの累積・
+//! AIRとアイテムの取得/通過とそのときの見え方(`PassState`)を記録するようにした。
+//! 「見えていたのに取らなかった」の原因を、落下コミット(横移動が効かない)・列の
+//! 却下・同一行の死角のどれかに切り分けられる。
+//!
+//! これで挙動のバグが2つ見つかり、どちらも直している。
+//!
+//! 1. **登れない壁へ段差登りを出し続けていた**(`escape_climb`)。登り先の棚を確かめずに
+//!    `side_preference`側へ`MoveX`を出していたため、登れない壁に対して最長510フレーム
+//!    (17秒)ぶつかり続け、その間の自然減少だけで窒息していた。棚がある方向にだけ
+//!    出すようにしたところ、harsh設定の完走が25/32→31/32・死亡が2.12→1.88回/走
+//! 2. **待ち予算が事実上無効だった**(`note_decision`)。`WaitOut`以外の意図が1フレーム
+//!    挟まるだけで`waiting_frames`を0へ戻していたため、`conserve_oxygen`の
+//!    「待つ→予算切れ→別の手→また待つ」が無限に繰り返せていた(実測で495フレーム=
+//!    16秒の待ち)。行が進んだときだけ戻すようにし、あわせて予算切れの後は縦に岩を
+//!    割ると決める前に横の岩も同じ土俵で比べるようにした(1000mの完走10→11/32・
+//!    平均到達886→893m・死亡5.09→5.03回/走)
+//!
+//! 逆に、設計案のうち次の3つは実測で**採らなかった**。いずれも死亡総数か到達深度が
+//! 悪化した(32シードずつ、基準は完走11/32・平均893m・5.03回/走の1000mコース)。
+//!
+//! - **段差登りを押し潰し回避の選択肢に足す**: 完走5/32・平均868m。押し潰されは
+//!   1.81→1.66回/走へ減るが、登ると1行戻るぶん深度が伸びず酸素切れが増える。
+//!   「両隣が固体で歩いて出られない場面だけ登る」と絞っても結果は同じだった。
+//!   ボムから逃げる場面だけは岩1個ぶん(酸素20%)を節約できるため残してある
+//! - **同一行・斜め上のAIR/アイテムも採点に入れる**: 完走7/32・平均887m・5.22回/走。
+//!   AIRの取得数は2213→2280個とほぼ変わらず、寄り道の手間だけが増えた
+//! - **頭上クリア(R)の加点を頭上の脅威の数に連動させる**: 完走5/32・平均869m。
+//!   取得率が35%→20%へ落ち、酸素切れが2.94→3.34回/走へ増えた。頭上クリアは
+//!   「今見えている脅威」より先の掘り進みやすさに効いているらしく、今の盤面から
+//!   価値を測る方法が見つかっていない。スター化(K)の岩連動だけを採用している
+//!
 //! 経路探索はA*等を使わず、毎フレーム「現在行から先読み範囲で各列を採点→最良列へ
 //! 横移動→着いたら掘る」を繰り返す(`score_columns`)。目的列には
 //! `AUTOPLAY_COLUMN_SWITCH_MARGIN`のヒステリシスを効かせ、AIRと危険回避の間で
@@ -85,12 +120,12 @@ use crate::constants::{
     AUTOPLAY_AIR_DETOUR_MAX_COLS, AUTOPLAY_AIR_MIN_GAIN, AUTOPLAY_BOMB_EVADE_MS,
     AUTOPLAY_COLUMN_SCAN_RADIUS, AUTOPLAY_COLUMN_SWITCH_MARGIN, AUTOPLAY_DESCENT_WATCHDOG_FRAMES,
     AUTOPLAY_EMERGENCY_AIR_LOOKAHEAD_ROWS, AUTOPLAY_EMERGENCY_AIR_SCORE_MULTIPLIER,
-    AUTOPLAY_EMERGENCY_HORIZON_SEC, AUTOPLAY_LOOKAHEAD_ROWS, AUTOPLAY_ROCK_STREAK_ESCALATE,
-    AUTOPLAY_SCORE_AIR_DIVISOR, AUTOPLAY_SCORE_ITEM_BONUS, AUTOPLAY_SCORE_LATERAL_PER_COL,
-    AUTOPLAY_SCORE_THREAT_PENALTY, AUTOPLAY_SCORE_VOID_EXPOSURE, AUTOPLAY_STUCK_FRAMES,
-    AUTOPLAY_THREAT_MAX_SLACK_ROWS, AUTOPLAY_THREAT_MIN_SLACK_ROWS, AUTOPLAY_THREAT_REACTION_STEPS,
-    AUTOPLAY_THREAT_SCAN_ROWS, AUTOPLAY_WAIT_FOR_THREAT_MAX_MS, BOMB_BLAST_ROW_RANGE,
-    FRAME_INTERVAL_MS, INPUT_COOLDOWN_MS, OXYGEN_CAPSULE_RESTORE,
+    AUTOPLAY_EMERGENCY_HORIZON_SEC, AUTOPLAY_ITEM_STARIFY_ROCK_SATURATION, AUTOPLAY_LOOKAHEAD_ROWS,
+    AUTOPLAY_ROCK_STREAK_ESCALATE, AUTOPLAY_SCORE_AIR_DIVISOR, AUTOPLAY_SCORE_ITEM_BONUS,
+    AUTOPLAY_SCORE_LATERAL_PER_COL, AUTOPLAY_SCORE_THREAT_PENALTY, AUTOPLAY_SCORE_VOID_EXPOSURE,
+    AUTOPLAY_STUCK_FRAMES, AUTOPLAY_THREAT_MAX_SLACK_ROWS, AUTOPLAY_THREAT_MIN_SLACK_ROWS,
+    AUTOPLAY_THREAT_REACTION_STEPS, AUTOPLAY_THREAT_SCAN_ROWS, AUTOPLAY_WAIT_FOR_THREAT_MAX_MS,
+    BOMB_BLAST_ROW_RANGE, FRAME_INTERVAL_MS, INPUT_COOLDOWN_MS, OXYGEN_CAPSULE_RESTORE,
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_DECAY_PER_SEC, OXYGEN_MAX, ROCK_BREAK_OXYGEN_PENALTY,
     ROCK_HITS_TO_BREAK, depth_fraction,
 };
@@ -165,8 +200,51 @@ pub enum Intent {
     DigSideways,
     /// 手詰まりからの脱出として段差を登る
     EscapeClimb,
+    /// 危険を避ける・AIRやアイテムを取るために段差を登る(TERM独自拡張。#229)
+    ClimbOver,
     /// 岩を割る酸素が無いので、頭上の塊が着地して道が空くのをその場で待つ
     WaitOut,
+}
+
+#[cfg(test)]
+impl Intent {
+    /// 意図の種類数。ソークの意図別フレーム集計(#229)の配列長。
+    const COUNT: usize = 12;
+
+    /// 集計配列の添字。網羅的なmatchにしてあるため、意図を増やすと`COUNT`の更新漏れが
+    /// コンパイルエラーになる。
+    fn index(self) -> usize {
+        match self {
+            Intent::Idle => 0,
+            Intent::DefuseBomb => 1,
+            Intent::EvadeBomb => 2,
+            Intent::DodgeOverhead => 3,
+            Intent::SeekOxygen => 4,
+            Intent::DigDown => 5,
+            Intent::BreakRock => 6,
+            Intent::Sidestep => 7,
+            Intent::DigSideways => 8,
+            Intent::EscapeClimb => 9,
+            Intent::ClimbOver => 10,
+            Intent::WaitOut => 11,
+        }
+    }
+
+    /// 添字順の一覧(集計結果を名前付きで出力するため)。
+    const ALL: [Intent; Self::COUNT] = [
+        Intent::Idle,
+        Intent::DefuseBomb,
+        Intent::EvadeBomb,
+        Intent::DodgeOverhead,
+        Intent::SeekOxygen,
+        Intent::DigDown,
+        Intent::BreakRock,
+        Intent::Sidestep,
+        Intent::DigSideways,
+        Intent::EscapeClimb,
+        Intent::ClimbOver,
+        Intent::WaitOut,
+    ];
 }
 
 /// 頭上から落ちてくる塊の情報(TERM独自拡張。#221)。
@@ -180,6 +258,67 @@ struct ColumnThreat {
     /// この場合、落下が始まるのは揺れ(`shake_duration_ms`)が明けてからなので、
     /// 猶予を丸ごと見込める(#225)。
     pending: bool,
+}
+
+/// 経路上の岩の扱い(TERM独自拡張。#229)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RockBudget {
+    /// 通常。酸素で払える岩しか経路に含めない。
+    Affordable,
+    /// 迂回も待ちも尽きた場面。払えない岩も候補に残し、縦に割るのと同じ土俵で比べる。
+    LastResort,
+}
+
+/// 列採点の共通材料(TERM独自拡張。#229)。列ごとに変わらない計算を`score_columns`が
+/// 1回だけ行い、各列の採点へ配る。
+struct ScoreContext {
+    /// 候補範囲(`slack`/`safe`の先頭が指す列)。
+    lo: usize,
+    hi: usize,
+    /// 酸素が逼迫しているか(AIRの加点と先読み行数が変わる)。
+    emergency: bool,
+    rock_budget: RockBudget,
+    /// 候補範囲の各列の余裕(行)。頭上に脅威が無ければ+∞。
+    slack: Vec<f32>,
+    /// 候補範囲の各列へ入ってよいか(必要な余裕を満たすか)。
+    safe: Vec<bool>,
+    /// AIR1個ぶんの加点(行)。回復量が寄り道の最低ラインに届かなければ0。
+    air_bonus: f32,
+    /// アイテム1個ぶんの加点(行)。効果ごとに、今の盤面でどれだけ役に立つかで決める
+    /// (TERM独自拡張。#229 F4)。
+    item_clear_above: f32,
+    item_starify: f32,
+}
+
+impl ScoreContext {
+    /// そのマスに乗っているAIR/アイテムの加点(AIRぶん, アイテムぶん)。
+    /// `air_value`は列ごとの寄り道距離を織り込んだAIRの加点。
+    fn pickup_value(&self, cell: Cell, air_value: f32) -> (f32, f32) {
+        match cell {
+            Cell::Oxygen => (air_value, 0.0),
+            Cell::Item(ItemEffect::ClearAbove) => (0.0, self.item_clear_above),
+            Cell::Item(ItemEffect::StarifyScreen) => (0.0, self.item_starify),
+            // 色の統一は「掘りやすさ」を変えるだけで、行数への換算が立たない。
+            // 寄り道してまで取る理由が無いため加点しない(#221からの据え置き)。
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// `c`列の余裕(行)。候補範囲の外は安全側に倒して「余裕なし」とする。
+    fn slack_of(&self, c: usize) -> f32 {
+        self.slack
+            .get(c.wrapping_sub(self.lo))
+            .copied()
+            .unwrap_or(f32::NEG_INFINITY)
+    }
+
+    /// `c`列へ入ってよいか。候補範囲の外は通さない。
+    fn is_safe(&self, c: usize) -> bool {
+        self.safe
+            .get(c.wrapping_sub(self.lo))
+            .copied()
+            .unwrap_or(false)
+    }
 }
 
 /// 1つの列の採点結果(TERM独自拡張。#221)。
@@ -252,8 +391,8 @@ impl Autopilot {
         if let Some(actions) = self.defuse_adjacent_bomb(game) {
             return (Intent::DefuseBomb, actions);
         }
-        if let Some(actions) = self.evade_imminent_bomb(game) {
-            return (Intent::EvadeBomb, actions);
+        if let Some(decision) = self.evade_imminent_bomb(game) {
+            return decision;
         }
         if let Some(actions) = self.escape_overhead_threat(game) {
             return (Intent::DodgeOverhead, actions);
@@ -281,16 +420,19 @@ impl Autopilot {
     /// - 岩を割った直後は`rock_break_pending`を立てておく。岩が砕けた次のフレームは
     ///   自由落下待ち(`Idle`)になるため、「前フレームの意図」だけ見ると岩で買った前進を
     ///   `note_progress`が取りこぼす。
-    /// - 待ち(`WaitOut`)は連続フレーム数を数え、上限を超えたら待つのをやめる。
+    /// - 待ち(`WaitOut`)はフレーム数を数え、上限を超えたら待つのをやめる。数えた値を
+    ///   戻すのは`note_progress`が行の前進を検出したときだけ(#229)。**以前はWaitOut
+    ///   以外の意図が1フレーム挟まるだけで0へ戻していた**ため、`conserve_oxygen`の
+    ///   手順(待つ→予算切れで別の手→また待つ)がそのまま無限ループになり、待機上限
+    ///   (`AUTOPLAY_WAIT_FOR_THREAT_MAX_MS`)が実質無効だった。実測では1000mコースの
+    ///   酸素切れ死82/99件が、直前300フレームの過半を待ち・登り・落下待ちで費やしていた。
     fn note_decision(&mut self, intent: &Intent) {
         if *intent == Intent::BreakRock {
             self.rock_break_pending = true;
         }
-        self.waiting_frames = if *intent == Intent::WaitOut {
-            self.waiting_frames.saturating_add(1)
-        } else {
-            0
-        };
+        if *intent == Intent::WaitOut {
+            self.waiting_frames = self.waiting_frames.saturating_add(1);
+        }
     }
 
     /// 進捗を記録し、手詰まりが続けば`escalation`を1段上げる。
@@ -311,6 +453,8 @@ impl Autopilot {
             self.last_row = pos.0;
             self.frames_without_descent = 0;
             self.escalation = 0;
+            // 待ち予算は「実際に行が進んだ」ときだけ戻す(#229)。
+            self.waiting_frames = 0;
             // 岩を割って買った前進は「前進」に数えない(#225)。数えてしまうと、岩を
             // 割るたびに段階が0へ戻り、横方向の岩掘りが解禁される段階(2)へ永久に
             // 到達しない(実測で全岩破壊判断のうちescalation1以上は0件だった)。
@@ -391,7 +535,7 @@ impl Autopilot {
     ///
     /// 同じ行にいる場合は横へ動いても同じ行のまま(爆風は幅全体に届く)で逃げたことに
     /// ならないため、まず掘って行を変える。
-    fn evade_imminent_bomb(&self, game: &Game) -> Option<Vec<InputAction>> {
+    fn evade_imminent_bomb(&self, game: &Game) -> Option<(Intent, Vec<InputAction>)> {
         let (row, col) = game.player.position();
 
         let mut same_row_threat = false;
@@ -411,13 +555,27 @@ impl Autopilot {
             return None;
         }
 
-        let escape_by_row = self.dig_down_to_change_row(game);
+        let escape_by_row = self
+            .dig_down_to_change_row(game)
+            .map(|actions| (Intent::EvadeBomb, actions));
         let escape_by_col = self
             .safe_sidestep_direction(game)
-            .map(|dir| vec![move_action(dir)]);
+            .map(|dir| (Intent::EvadeBomb, vec![move_action(dir)]));
+        let escape_by_climb = self
+            .safe_climb_direction(game)
+            .map(|dir| (Intent::ClimbOver, vec![move_action(dir)]));
 
         if same_row_threat {
-            escape_by_row.or(escape_by_col)
+            // 同じ行から出るには行を変えるしかない。直下が岩なら掘り下げは酸素20%の
+            // 買い物になるため、無料で行を変えられる段差登りを先に試す(#229 F3)。
+            if matches!(
+                game.board.cell_or_none(row + 1, col),
+                Some(Cell::Rock { .. })
+            ) {
+                escape_by_climb.or(escape_by_row).or(escape_by_col)
+            } else {
+                escape_by_row.or(escape_by_climb).or(escape_by_col)
+            }
         } else {
             escape_by_col.or(escape_by_row)
         }
@@ -444,6 +602,14 @@ impl Autopilot {
 
         // 「その手を打った後にどれだけ余裕が残るか」で選ぶ。速さで選ぶと、掘り下げが
         // 一番速いのにその先が空洞で、掘った勢いのまま落下して潰される(実測した死因)。
+        //
+        // ここへ「段差を登って避ける」を第3の選択肢として足す案(#229 F3)は実測で
+        // 不採用。1000mコースの完走が11/32→5/32・平均到達893m→868mへ落ちた
+        // (押し潰されは1.81→1.66回/走へ減るが、登ると1行戻るぶん深度が伸びず、
+        // 酸素切れが2.94→3.12回/走へ増えて差し引きで損)。「両隣が固体で歩いて
+        // 出られない場面だけ登る」と絞っても結果は同じだった。同じ登りでも、ボムから
+        // 逃げる場面(`evade_imminent_bomb`)だけは岩1個ぶんの酸素を節約できるため
+        // 残してある。
         let mut options: Vec<(f32, u64, bool, Vec<InputAction>)> = Vec::new();
         let descend_ms = self.descend_time_ms(game);
         if descend_ms != u64::MAX {
@@ -686,6 +852,21 @@ impl Autopilot {
     /// 候補列を左から順に採点する。候補範囲は通常±`AUTOPLAY_COLUMN_SCAN_RADIUS`列、
     /// 手詰まり(escalation1以上)または酸素の緊急時は全幅。
     fn score_columns(&self, game: &Game) -> Vec<ColumnScore> {
+        self.score_columns_with(game, RockBudget::Affordable)
+    }
+
+    /// 経路上の岩の扱いを指定して採点する(#229)。待ち予算まで使い切った場面では
+    /// 「払えない岩でも通る」候補を出し直し、縦に割るのと同じ土俵で比べる。
+    fn score_columns_with(&self, game: &Game, budget: RockBudget) -> Vec<ColumnScore> {
+        let context = self.score_context(game, budget);
+        (context.lo..=context.hi)
+            .filter_map(|c| self.score_column(game, c, &context))
+            .collect()
+    }
+
+    /// 列ごとに変わらない計算を1フレームに1回だけ行う(#229)。頭上の脅威は「入って
+    /// よいかの判定」と「採点の減点」の両方で要るため、以前は列あたり2回計算していた。
+    fn score_context(&self, game: &Game, rock_budget: RockBudget) -> ScoreContext {
         let col = game.player.col;
         let width = game.board.width();
         let emergency = is_emergency(game);
@@ -698,34 +879,72 @@ impl Autopilot {
             )
         };
 
+        let threats: Vec<Option<ColumnThreat>> = (lo..=hi)
+            .map(|c| self.column_threat(game, c, game.player.row))
+            .collect();
+        let slack: Vec<f32> = threats
+            .iter()
+            .enumerate()
+            .map(|(index, threat)| match threat {
+                None => f32::INFINITY,
+                Some(threat) => self.threat_slack_rows(game, lo + index, threat),
+            })
+            .collect();
         // 経路の途中で通り過ぎるだけの列も、入った瞬間に潰されるなら通ってはいけない。
         // 目的列しか見ないと「安全な列を目指して危険な列を踏み抜く」ことになる(実測した
         // 死因の最多パターン)。列ごとに一度だけ判定して経路チェックで使い回す。
-        let safe: Vec<bool> = (lo..=hi)
-            .map(|c| self.column_is_safe_to_enter(game, c))
-            .collect();
+        let minimum = min_slack_rows(game);
+        let safe: Vec<bool> = slack.iter().map(|slack| *slack >= minimum).collect();
 
-        (lo..=hi)
-            .filter_map(|c| self.score_column(game, c, emergency, &safe, lo))
-            .collect()
+        let gain = air_gain(game.player.oxygen);
+        let air_bonus = if gain >= AUTOPLAY_AIR_MIN_GAIN {
+            let multiplier = if emergency {
+                AUTOPLAY_EMERGENCY_AIR_SCORE_MULTIPLIER
+            } else {
+                1.0
+            };
+            gain / AUTOPLAY_SCORE_AIR_DIVISOR * multiplier
+        } else {
+            0.0
+        };
+
+        // スター化(K)は画面内の岩をまとめてスターへ変えるアイテム。先読み範囲に岩が
+        // 無ければ何も起きないので、寄り道してまで取る理由も無い(#229 F4)。価値の
+        // 材料は列に依らないため、ここで1回だけ数える。
+        let near_lo = col.saturating_sub(AUTOPLAY_COLUMN_SCAN_RADIUS).max(lo);
+        let near_hi = (col + AUTOPLAY_COLUMN_SCAN_RADIUS).min(hi);
+        let rocks_ahead = (near_lo..=near_hi)
+            .flat_map(|c| (1..=AUTOPLAY_LOOKAHEAD_ROWS).map(move |d| (game.player.row + d, c)))
+            .filter(|&(r, c)| matches!(game.board.cell_or_none(r, c), Some(Cell::Rock { .. })))
+            .count();
+
+        ScoreContext {
+            lo,
+            hi,
+            emergency,
+            rock_budget,
+            slack,
+            safe,
+            air_bonus,
+            // 頭上クリア(R)も同じように「頭上の脅威の数」へ連動させる案は実測で不採用
+            // (#229 F4)。取得率が35%→20%へ落ち、1000mコースの完走が11/32→5/32・
+            // 酸素切れが2.94→3.34回/走へ悪化した。今見えている脅威の数では、この
+            // アイテムの価値(掘り進んだ後の天井をまとめて消せること)を測れていない。
+            item_clear_above: AUTOPLAY_SCORE_ITEM_BONUS,
+            item_starify: saturating_item_bonus(rocks_ahead, AUTOPLAY_ITEM_STARIFY_ROCK_SATURATION),
+        }
     }
 
     /// 1列ぶんの採点。到達できない・入った瞬間に潰される列は`None`(=スコア-∞)。
     ///
     /// 基礎点は`clear_run`(その列を岩に当たらず掘り進める行数、上限
     /// `AUTOPLAY_LOOKAHEAD_ROWS`)で、単位は「行」。加減点もすべて行に換算して揃える。
-    fn score_column(
-        &self,
-        game: &Game,
-        c: usize,
-        emergency: bool,
-        safe: &[bool],
-        safe_offset: usize,
-    ) -> Option<ColumnScore> {
+    fn score_column(&self, game: &Game, c: usize, ctx: &ScoreContext) -> Option<ColumnScore> {
         let (row, col) = game.player.position();
         let dist = c.abs_diff(col);
+        let emergency = ctx.emergency;
 
-        if !self.lateral_path_is_open(game, c, safe, safe_offset) {
+        if !self.lateral_path_is_open(game, c, ctx) {
             return None;
         }
 
@@ -742,26 +961,25 @@ impl Autopilot {
         // 変わった(1走あたり1.66回→4.12〜4.59回)ため採らない。候補が空になる問題は
         // 基準を緩めてではなく、揺れ猶予の見積り誤り(`shake_allowance_ms`)を直して
         // 解決している(#225)。
-        let threat_penalty = match self.column_threat(game, c, row) {
-            None => 0.0,
-            Some(threat) => {
-                let slack = self.threat_slack_rows(game, c, &threat);
-                let minimum = min_slack_rows(game);
-                if slack < minimum {
-                    return None;
-                }
+        let threat_penalty = {
+            let slack = ctx.slack_of(c);
+            let minimum = min_slack_rows(game);
+            if slack < minimum {
+                return None;
+            }
+            if slack.is_finite() {
                 let comfort = slack / minimum - 1.0;
                 AUTOPLAY_SCORE_THREAT_PENALTY * (1.0 - comfort).clamp(0.0, 1.0)
+            } else {
+                0.0
             }
         };
 
-        let gain = air_gain(game.player.oxygen);
-        let air_counts =
-            gain >= AUTOPLAY_AIR_MIN_GAIN && (emergency || dist <= AUTOPLAY_AIR_DETOUR_MAX_COLS);
-        let air_multiplier = if emergency {
-            AUTOPLAY_EMERGENCY_AIR_SCORE_MULTIPLIER
+        // 寄り道の距離制限(緊急時は外す)を満たす列だけがAIRの加点を受ける。
+        let air_value = if emergency || dist <= AUTOPLAY_AIR_DETOUR_MAX_COLS {
+            ctx.air_bonus
         } else {
-            1.0
+            0.0
         };
         let scan_rows = if emergency {
             AUTOPLAY_EMERGENCY_AIR_LOOKAHEAD_ROWS
@@ -796,15 +1014,9 @@ impl Autopilot {
             }
             // AIR・アイテムは経路が塞がっていても数える。盤面は落下で刻々と変わるため、
             // 今この瞬間に塞がっていることを理由に切り捨てない。
-            match cell {
-                Cell::Oxygen if air_counts => {
-                    air += gain / AUTOPLAY_SCORE_AIR_DIVISOR * air_multiplier;
-                }
-                Cell::Item(ItemEffect::ClearAbove | ItemEffect::StarifyScreen) => {
-                    items += AUTOPLAY_SCORE_ITEM_BONUS;
-                }
-                _ => {}
-            }
+            let (gained_air, gained_items) = ctx.pickup_value(cell, air_value);
+            air += gained_air;
+            items += gained_items;
         }
 
         // 横移動の代償は「1列あたりの目安(ふらつき防止のための下駄)」と「実際の所要
@@ -843,8 +1055,13 @@ impl Autopilot {
         // ときこそ20%の出費は重く、harsh設定で酸素切れが1走あたり0.3回増えた(#225)。
         let lateral_rocks = self.lateral_rock_count(game, c);
         // 払えない岩は縦も横も同じ20%。`descend`側だけで止めると、横へ岩を割りに行く
-        // 経路が素通しになって酸素の歯止めが効かない(#225)。
-        if lateral_rocks > 0 && !rock_is_affordable(game) {
+        // 経路が素通しになって酸素の歯止めが効かない(#225)。ただし待ち予算まで使い切った
+        // 場面(`RockBudget::LastResort`)では、払えなくても縦に割るしかなくなるため、
+        // 横の岩も同じ土俵に載せて比べる(#229 F2)。
+        if lateral_rocks > 0
+            && ctx.rock_budget == RockBudget::Affordable
+            && !rock_is_affordable(game)
+        {
             return None;
         }
         let lateral_rock_penalty = lateral_rocks as f32 * rock_cost_rows(game);
@@ -891,13 +1108,7 @@ impl Autopilot {
     ///
     /// 経路上の岩はここでは弾かない(#225)。岩は通れないのではなく酸素20%を払えば通れる
     /// ものなので、`score_column`が`lateral_rock_count`ぶんの減点として扱う。
-    fn lateral_path_is_open(
-        &self,
-        game: &Game,
-        c: usize,
-        safe: &[bool],
-        safe_offset: usize,
-    ) -> bool {
+    fn lateral_path_is_open(&self, game: &Game, c: usize, ctx: &ScoreContext) -> bool {
         let (row, col) = game.player.position();
         if c == col {
             return true;
@@ -917,11 +1128,7 @@ impl Autopilot {
             if settled_bomb_at(game, (row, next)) {
                 return false;
             }
-            if !safe
-                .get(next.wrapping_sub(safe_offset))
-                .copied()
-                .unwrap_or(false)
-            {
+            if !ctx.is_safe(next) {
                 return false;
             }
             cursor = next;
@@ -1031,7 +1238,27 @@ impl Autopilot {
             return (Intent::EscapeClimb, actions);
         }
 
-        // 4. 最後の手段。ただし割った時点で致死圏に入るなら、自分から即死を選ばない。
+        // 4. 迂回も待ちも登りも尽きた。ここから先はどうせ岩を払うことになるので、
+        //    縦に割ると決める前に「横へ抜ける経路の岩」を同じ土俵で比べ直す(#229 F2)。
+        //    同じ20%でも、横1個割って掘り進める列へ移れるなら、その先で稼げる行数が
+        //    まるごと違う。以前はここを見ずに直下を割っていたため、掘り止まりの列に
+        //    留まったまま酸素だけを払い続けることがあった。
+        //    現在列も候補に含めて比べる。現在列の点には直下の岩の代償
+        //    (`rock_below_penalty`)が既に載っているため、「横へ1個割って抜ける」と
+        //    「縦に割る」が同じ尺度で並ぶ。
+        let mut best: Option<ColumnScore> = None;
+        for candidate in self.score_columns_with(game, RockBudget::LastResort).iter() {
+            if best.is_none_or(|current| self.is_better(col, candidate, &current)) {
+                best = Some(*candidate);
+            }
+        }
+        if let Some(target) = best
+            && target.col != col
+        {
+            return self.step_toward(game, &target);
+        }
+
+        // 5. 最後の手段。ただし割った時点で致死圏に入るなら、自分から即死を選ばない。
         if rock_break_is_lethal(game) {
             return (Intent::Idle, Vec::new());
         }
@@ -1072,17 +1299,87 @@ impl Autopilot {
             })
     }
 
-    /// 手詰まり脱出用の段差登り。頭上が空いている場合のみ、`side_preference`へ
-    /// `MoveX`を出し続ける。`move_lateral`の段差登りは「同じ方向へ2回ぶつかる」ことで
-    /// 成立するため、同方向の入力を連投してよいのはこの経路だけ(通常の`step_toward`は
-    /// 誤って段差を登らないよう、ぶつかった次は掘りに切り替える)。
+    /// 手詰まり脱出用の段差登り。登り先の棚がある方向へ`MoveX`を出し続ける。
+    /// `move_lateral`の段差登りは「同じ方向へ2回ぶつかる」ことで成立するため、同方向の
+    /// 入力を連投してよいのはこの経路だけ(通常の`step_toward`は誤って段差を登らないよう、
+    /// ぶつかった次は掘りに切り替える)。
+    ///
+    /// **棚の有無を必ず確かめてから出す**(#229)。以前は`side_preference`側に盤面が
+    /// 続いてさえいれば`MoveX`を出し続けていたため、登れない壁に対して最大510フレーム
+    /// (17秒)ぶつかり続け、その間の自然減少だけで酸素切れに至っていた(harsh設定の
+    /// 酸素切れ死14件中9件が、死の直前300フレームの半分以上をこの空振りに使っていた)。
+    /// 該当する方向が無ければ`None`を返し、呼び出し側の採点・岩割りへ素直に譲る。
     fn escape_climb(&self, game: &Game) -> Option<Vec<InputAction>> {
+        self.climb_direction(game).map(|dir| vec![move_action(dir)])
+    }
+
+    /// 段差登りが成立する方向(`side_preference`側→逆側の順)。
+    fn climb_direction(&self, game: &Game) -> Option<Direction> {
+        [self.side_preference, opposite(self.side_preference)]
+            .into_iter()
+            .find(|&dir| self.can_climb_step(game, dir))
+    }
+
+    /// 段差登りが成立し、かつ登り切った先で頭上の塊との余裕が残る方向(#229)。
+    /// 危険から逃げる手段として登るときは、逃げ込んだ先で潰されては意味が無いため、
+    /// 横移動(`column_is_safe_to_enter`)と同じ基準で登り先も確かめる。
+    fn safe_climb_direction(&self, game: &Game) -> Option<Direction> {
+        let minimum = min_slack_rows(game);
+        [self.side_preference, opposite(self.side_preference)]
+            .into_iter()
+            .find(|&dir| {
+                self.can_climb_step(game, dir) && self.climb_slack_rows(game, dir) >= minimum
+            })
+    }
+
+    /// `dir`へ段差を登り切った時点で、登り先の列の頭上との間に何行ぶんの余裕が残るか。
+    ///
+    /// 登ると行が1つ上がる=脅威に1行ぶん近づくため、`threat_slack_rows`(同じ行に
+    /// 留まったまま横へ移る前提)ではなく登り先の行から測り直す。登り切るには同方向へ
+    /// 2回入力する必要があるので、その所要時間も行数に換算して差し引く。
+    fn climb_slack_rows(&self, game: &Game, dir: Direction) -> f32 {
         let (row, col) = game.player.position();
-        if row == 0 || game.board.cell(row - 1, col) != Cell::Empty {
-            return None;
+        let Some(side) = neighbor(game, (row, col), dir) else {
+            return f32::NEG_INFINITY;
+        };
+        let Some(landing_row) = row.checked_sub(1) else {
+            return f32::NEG_INFINITY;
+        };
+        match self.column_threat(game, side.1, landing_row) {
+            None => f32::INFINITY,
+            Some(threat) => {
+                let block_tick = game.effective_block_fall_tick_ms().max(1) as f32;
+                let climb_ms = 2 * (game.move_cooldown_ms() + FRAME_INTERVAL_MS);
+                threat.dist as f32 + shake_allowance_ms(game, &threat) as f32 / block_tick
+                    - climb_ms as f32 / block_tick
+            }
         }
-        neighbor(game, (row, col), self.side_preference)?;
-        Some(vec![move_action(self.side_preference)])
+    }
+
+    /// `dir`へ段差登り(`physics::move_lateral`)が実際に成立するか。`move_lateral`の
+    /// 成立条件をそのまま写したもの: 接地していること・自分の頭上が空いていること・
+    /// 隣が固体(=ぶつかれる)であること・登り先の1マス斜め上が入れるマスであること。
+    /// 静止ボムは押し出し/登り判定がゲーム側の別経路になるため、どちらの位置でも
+    /// 「登れない」として扱う。
+    fn can_climb_step(&self, game: &Game, dir: Direction) -> bool {
+        let (row, col) = game.player.position();
+        if row == 0 || !game.player_is_grounded() {
+            return false;
+        }
+        if game.board.cell(row - 1, col) != Cell::Empty {
+            return false;
+        }
+        let Some(side) = neighbor(game, (row, col), dir) else {
+            return false;
+        };
+        let side_is_solid = !matches!(
+            game.board.cell(side.0, side.1),
+            Cell::Empty | Cell::Oxygen | Cell::Item(_)
+        );
+        if !side_is_solid || settled_bomb_at(game, side) {
+            return false;
+        }
+        self.is_safe_to_enter(game, (row - 1, side.1))
     }
 
     // --- 共通ヘルパー --------------------------------------------------------
@@ -1203,6 +1500,14 @@ fn rock_break_is_lethal(game: &Game) -> bool {
 /// 小さくなる。
 fn air_gain(oxygen: f32) -> f32 {
     OXYGEN_CAPSULE_RESTORE.min((OXYGEN_MAX - oxygen).max(0.0))
+}
+
+/// アイテムの加点(行)。`amount`がそのアイテムの効き目の材料(岩の数・脅威を抱えた
+/// 列の数)で、`saturation`に達したところで`AUTOPLAY_SCORE_ITEM_BONUS`いっぱいになる
+/// (TERM独自拡張。#229 F4)。0なら加点0=寄り道しない。
+fn saturating_item_bonus(amount: usize, saturation: usize) -> f32 {
+    let saturation = saturation.max(1);
+    AUTOPLAY_SCORE_ITEM_BONUS * amount.min(saturation) as f32 / saturation as f32
 }
 
 /// 1行ぶんの下降に相当する時間(ms)。列スコアの単位「行」と時間を行き来する換算基準。
@@ -1452,6 +1757,7 @@ mod tests {
     use crate::game::board::ColorKind;
     use crate::game::{Bomb, GameEvent, MissCause};
     use crate::settings::Settings;
+    use std::collections::{HashMap, VecDeque};
 
     /// 手詰まり判定で`escalation`が1段上がるまでに必要な`decide`の呼び出し回数。
     /// 初回は「前フレームと位置が違う」扱いでカウンタが初期化されるため、その1回と、
@@ -1482,6 +1788,39 @@ mod tests {
     fn grounded_game_at(seed: u64, row: usize, col: usize) -> Game {
         let mut game = game_at(seed, row, col);
         game.board.rows[row + 1][col] = Cell::Diamond;
+        game
+    }
+
+    /// 判断の前提を1つずつ組み立てるための厳密な盤面(#229)。盤面をクリアしたうえで
+    /// プレイヤーより下を最深行までダイヤで埋め、アイテムの出現率を0%にする。
+    ///
+    /// `game_at`(全マスEmpty)は手で置いたブロックが軒並み「支えを失った塊」になるため、
+    /// 崩落予測が意図しない形で反応する。また`Game::update`を回すテストでは窓補充
+    /// (`top_up_items_ahead`)が走り、置いた覚えのないアイテムが湧く。どちらも
+    /// 「この盤面ならこう判断するはず」を検証したいテストにとっては雑音になる。
+    fn solid_floor_game_at(seed: u64, row: usize, col: usize) -> Game {
+        let mut game = Game::new(seed);
+        game.apply_settings(&Settings {
+            item_clear_above_rate_percent: 0,
+            item_unify_colors_rate_percent: 0,
+            item_starify_screen_rate_percent: 0,
+            ..Settings::default()
+        });
+        for r in game.board.rows.iter_mut() {
+            for cell in r.iter_mut() {
+                *cell = Cell::Empty;
+            }
+        }
+        // 足場はダイヤにする。連結しない種別なので、掘削で消える範囲が1マスに閉じ、
+        // 足場そのものが崩落予測を動かすことがない。
+        for r in (row + 1)..game.board.depth_rows() {
+            for c in 0..game.board.width() {
+                game.board.rows[r][c] = Cell::Diamond;
+            }
+        }
+        game.player.row = row;
+        game.player.col = col;
+        game.player.facing = Direction::Down;
         game
     }
 
@@ -1732,6 +2071,44 @@ mod tests {
         );
     }
 
+    // --- 待ち予算の累積(#229 F2) -------------------------------------------
+
+    /// 待ち予算は「WaitOut以外の意図が1フレーム挟まった」程度では戻さない。戻して
+    /// いたため、`conserve_oxygen`の「待つ→予算切れで別の手→また待つ」がそのまま
+    /// 無限ループになり、待機上限が実質無効だった(#229)。
+    #[test]
+    fn the_wait_budget_only_resets_once_the_row_actually_advances() {
+        let mut pilot = Autopilot::new(false);
+        pilot.note_progress((500, 5));
+
+        let budget_frames = (AUTOPLAY_WAIT_FOR_THREAT_MAX_MS / FRAME_INTERVAL_MS) as u32;
+        for _ in 0..budget_frames {
+            pilot.note_decision(&Intent::WaitOut);
+        }
+        assert_eq!(
+            pilot.waiting_frames, budget_frames,
+            "前提: 予算を使い切った"
+        );
+
+        // 別の手を1フレーム挟み、横にだけ動く(行は進んでいない)。
+        pilot.note_decision(&Intent::DigSideways);
+        pilot.note_progress((500, 6));
+        assert_eq!(
+            pilot.waiting_frames, budget_frames,
+            "行が進まない限り予算は戻らないはず"
+        );
+        pilot.note_decision(&Intent::WaitOut);
+        assert_eq!(
+            pilot.waiting_frames,
+            budget_frames + 1,
+            "続きから累積するはず"
+        );
+
+        // 実際に1行進んだら、そこで初めて予算が戻る。
+        pilot.note_progress((501, 6));
+        assert_eq!(pilot.waiting_frames, 0);
+    }
+
     // --- 横の岩は禁止ではなく有料(#225 F2) ---------------------------------
 
     /// 「横へ1個割れば直進できる列」と「縦に岩を割り続ける列」を同じ土俵で比較する。
@@ -1747,11 +2124,9 @@ mod tests {
             1,
             "経路上の岩は数えられるはず"
         );
-        let safe: Vec<bool> = (5..=6)
-            .map(|c| pilot.column_is_safe_to_enter(&game, c))
-            .collect();
+        let context = pilot.score_context(&game, RockBudget::Affordable);
         assert!(
-            pilot.lateral_path_is_open(&game, 6, &safe, 5),
+            pilot.lateral_path_is_open(&game, 6, &context),
             "岩があっても到達不能にはしない(有料なだけ)"
         );
     }
@@ -1830,11 +2205,9 @@ mod tests {
             "前提: 必要な余裕に届かない列({slack})"
         );
         assert!(!pilot.column_is_safe_to_enter(&game, 6));
-        let safe: Vec<bool> = (5..=6)
-            .map(|c| pilot.column_is_safe_to_enter(&game, c))
-            .collect();
+        let context = pilot.score_context(&game, RockBudget::Affordable);
         assert!(
-            pilot.score_column(&game, 6, false, &safe, 5).is_none(),
+            pilot.score_column(&game, 6, &context).is_none(),
             "採点でも候補から外れるはず"
         );
     }
@@ -1951,6 +2324,137 @@ mod tests {
             (oxygen_reserve(1000) - OXYGEN_WARNING_THRESHOLD).abs() < 0.01,
             "最深では酸素警告の閾値と一致するはず: {}",
             oxygen_reserve(1000)
+        );
+    }
+
+    // --- アイテムの価値連動加点(#229 F4) -----------------------------------
+
+    /// スター化アイテム(K)は、先読み範囲に岩が1つも無ければ寄り道の価値が無い
+    /// (#229 F4)。以前は盤面に関わらず一律+10だったため、岩0個でも寄っていた。
+    #[test]
+    fn a_starify_item_is_worthless_when_there_is_no_rock_to_turn_into_a_star() {
+        let mut game = solid_floor_game_at(70, 500, 5);
+        game.board.rows[501][5] = Cell::Color(ColorKind::Red); // 直下は掘れる
+        game.board.rows[503][8] = Cell::Item(ItemEffect::StarifyScreen); // 3列右
+        let pilot = Autopilot::new(false);
+        let context = pilot.score_context(&game, RockBudget::Affordable);
+        assert_eq!(
+            context.item_starify, 0.0,
+            "先読み範囲に岩が無いので加点しないはず"
+        );
+
+        let mut pilot = Autopilot::new(false);
+        assert_eq!(
+            pilot.decide_with_intent(&game).0,
+            Intent::DigDown,
+            "寄り道せず掘り下げるはず"
+        );
+    }
+
+    /// 同じ盤面でも、先読み範囲に岩があればスター化アイテムは寄り道に見合う(#229 F4)。
+    #[test]
+    fn a_starify_item_is_worth_a_detour_once_there_are_rocks_ahead() {
+        let mut game = solid_floor_game_at(71, 500, 5);
+        game.board.rows[501][5] = Cell::Color(ColorKind::Red);
+        game.board.rows[503][8] = Cell::Item(ItemEffect::StarifyScreen);
+        // 先読み範囲(現在列±4列)の左側に岩を並べる。経路にも目的列にも掛からない
+        // ので、寄り道の判断だけがアイテムの価値で変わる。
+        for row in 502..=505 {
+            for col in 1..=3 {
+                game.board.rows[row][col] = Cell::Rock { hits: 0 };
+            }
+        }
+        let pilot = Autopilot::new(false);
+        let context = pilot.score_context(&game, RockBudget::Affordable);
+        assert_eq!(
+            context.item_starify, AUTOPLAY_SCORE_ITEM_BONUS,
+            "岩が飽和数以上あるので上限まで加点するはず"
+        );
+
+        let mut pilot = Autopilot::new(false);
+        let (intent, actions) = pilot.decide_with_intent(&game);
+        assert_eq!(intent, Intent::Sidestep);
+        assert_eq!(actions, vec![InputAction::MoveRight], "アイテムへ寄るはず");
+    }
+
+    /// 頭上クリアアイテム(R)の加点は、頭上の脅威の数に連動させず上限のままにする
+    /// (#229 F4)。連動させる案は実測で成績が落ちた(取得率35%→20%・1000mコースの
+    /// 完走11/32→5/32・酸素切れ2.94→3.34回/走)ため採らなかった、という判断を
+    /// 定数に固定しておく。
+    #[test]
+    fn a_clear_above_item_keeps_its_full_bonus_regardless_of_what_hangs_overhead() {
+        let mut game = solid_floor_game_at(72, 500, 5);
+        game.board.rows[501][5] = Cell::Color(ColorKind::Red);
+        game.board.rows[503][8] = Cell::Item(ItemEffect::ClearAbove);
+        let pilot = Autopilot::new(false);
+        let context = pilot.score_context(&game, RockBudget::Affordable);
+        assert_eq!(context.item_clear_above, AUTOPLAY_SCORE_ITEM_BONUS);
+
+        let mut pilot = Autopilot::new(false);
+        let (intent, actions) = pilot.decide_with_intent(&game);
+        assert_eq!(intent, Intent::Sidestep);
+        assert_eq!(actions, vec![InputAction::MoveRight], "アイテムへ寄るはず");
+    }
+
+    // --- ボムからの段差登り(#229 F3) ---------------------------------------
+
+    /// 手組み盤面を実際に動かし、`done`が成立するかフレーム上限に達するまで進める。
+    /// 発生したイベントをすべて返す(「岩を割らずに済んだか」の検証に使う)。
+    fn run_until(
+        game: &mut Game,
+        pilot: &mut Autopilot,
+        max_frames: u32,
+        done: impl Fn(&Game) -> bool,
+    ) -> Vec<GameEvent> {
+        let delta = std::time::Duration::from_millis(FRAME_INTERVAL_MS);
+        let mut events = Vec::new();
+        for _ in 0..max_frames {
+            if done(game) {
+                break;
+            }
+            for action in pilot.decide(game) {
+                events.extend(game.apply_input(action));
+            }
+            events.extend(game.update(delta));
+        }
+        events
+    }
+
+    /// 同じ行のボムから逃げるとき、直下が岩なら「掘って行を変える」は酸素20%の
+    /// 買い物になる。登って行を変えられるならそちらが先(#229 F3)。
+    #[test]
+    fn decide_climbs_away_from_a_bomb_instead_of_paying_for_the_rock_below() {
+        let mut game = solid_floor_game_at(66, 500, 5);
+        game.board.rows[501][5] = Cell::Rock { hits: 0 };
+        game.board.rows[500][6] = Cell::Diamond; // 右の足がかり(1段上は空き)
+        game.bombs_mut().push(Bomb {
+            pos: (500, 1),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: AUTOPLAY_BOMB_EVADE_MS - 1,
+            settle_bounce_dir: 1,
+        });
+        let oxygen_before = game.player.oxygen;
+        let mut pilot = Autopilot::new(false);
+
+        let (intent, actions) = pilot.decide_with_intent(&game);
+        assert_eq!(intent, Intent::ClimbOver);
+        assert_eq!(actions, vec![InputAction::MoveRight]);
+
+        let events = run_until(&mut game, &mut pilot, 60, |g| g.player.row == 499);
+        assert_eq!(game.player.position(), (499, 6));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::RockDestroyed { .. })),
+            "岩を割らずに行を変えるはず: {events:?}"
+        );
+        assert!(
+            oxygen_before - game.player.oxygen < ROCK_BREAK_OXYGEN_PENALTY,
+            "岩1個ぶんの酸素を払っている: {} → {}",
+            oxygen_before,
+            game.player.oxygen
         );
     }
 
@@ -2443,6 +2947,72 @@ mod tests {
         }
     }
 
+    // --- 段差登りの棚ゲート(#229 F1) ----------------------------------------
+
+    /// 両隣が固体で、その1段上も塞がっている行き止まり(=どちら側にも棚が無い)。
+    fn walled_dead_end(seed: u64) -> Game {
+        let mut game = solid_floor_game_at(seed, 500, 5);
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 直下は岩
+        for col in [4, 6] {
+            game.board.rows[500][col] = Cell::Rock { hits: 0 }; // 両隣も岩
+            game.board.rows[499][col] = Cell::Rock { hits: 0 }; // 斜め上も塞がる=棚が無い
+        }
+        game
+    }
+
+    /// 棚が無い壁に対しては段差登りを出さない(#229 F1)。以前は`side_preference`側に
+    /// 盤面が続いてさえいれば`MoveX`を出し続けていたため、登れない壁へ最大510フレーム
+    /// (17秒)ぶつかり続け、その間の自然減少だけで窒息していた。
+    #[test]
+    fn a_dead_end_without_a_ledge_never_emits_the_escape_climb() {
+        let game = walled_dead_end(60);
+        let mut pilot = Autopilot::new(false);
+        for _ in 0..stuck_frames_to_escalate() * 3 {
+            pilot.decide(&game);
+        }
+        assert_eq!(pilot.escalation, 3, "前提: 手詰まりが極まっている");
+        assert!(
+            pilot.climb_direction(&game).is_none(),
+            "前提: どちら側にも登り先の棚が無い"
+        );
+
+        for frame in 0..600 {
+            assert_ne!(
+                pilot.decide_with_intent(&game).0,
+                Intent::EscapeClimb,
+                "frame={frame}: 登れない壁に向かって登ろうとしている"
+            );
+        }
+    }
+
+    /// 棚が無く、岩を割ると危険域に入るが致死圏ではない残量。壁にぶつかり続けて
+    /// 窒息するのではなく、代償を払って岩を割る判断へ進む(#229 F1)。
+    #[test]
+    fn a_dead_end_without_a_ledge_pays_for_the_rock_rather_than_stalling_until_it_suffocates() {
+        let mut game = walled_dead_end(61);
+        game.player.oxygen =
+            oxygen_reserve(game.player.depth_m()) + ROCK_BREAK_OXYGEN_PENALTY + 1.0;
+        assert!(!rock_is_affordable(&game), "前提: 割ると危険域へ落ちる残量");
+        assert!(!rock_break_is_lethal(&game), "前提: ただし致死圏ではない");
+        let mut pilot = Autopilot::new(false);
+
+        let deadline_frames = (1500 / FRAME_INTERVAL_MS) as u32;
+        let mut paid_for_a_rock = false;
+        for frame in 0..=deadline_frames {
+            let (intent, _) = pilot.decide_with_intent(&game);
+            assert_ne!(
+                intent,
+                Intent::EscapeClimb,
+                "frame={frame}: 登れない壁に向かって登ろうとしている"
+            );
+            if matches!(intent, Intent::BreakRock | Intent::DigSideways) {
+                paid_for_a_rock = true;
+                break;
+            }
+        }
+        assert!(paid_for_a_rock, "1.5秒以内に岩を割る判断へ進むはず");
+    }
+
     #[test]
     fn escalation_rises_when_the_row_stops_advancing_even_though_the_player_keeps_moving() {
         // 横移動が自由になると位置は変わり続けるため、位置ベースの停滞検知だけでは
@@ -2545,6 +3115,26 @@ mod tests {
         Unlimited,
     }
 
+    /// 窓に入ったAIR/アイテムが、そのとき判断からどう見えていたか(#229)。
+    ///
+    /// 「見えていたのに取らなかった」の原因を、落下コミット(横移動が効かない)・
+    /// 列の却下(候補にすら上がらない)・同一行の死角(採点が現在行より下しか見ない)の
+    /// どれかに切り分けるための区分。宣言順がそのまま優先順(下ほど「寄れたはず」)で、
+    /// 同じマスが窓にいた全フレームでの最大値を採る。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum PassState {
+        /// 自由落下中にしか見えていない(横移動が効かず、寄る手段が無かった)
+        SeenFallingOnly,
+        /// 候補から却下された列にあった
+        RejectedColumn,
+        /// プレイヤーと同じ行にあった
+        SameRow,
+        /// 採点候補に残った列にあった
+        Candidate,
+        /// そのフレームの目的列にあった
+        Targeted,
+    }
+
     /// 1回の自動プレイの結果。
     struct SoakResult {
         cleared: bool,
@@ -2556,9 +3146,75 @@ mod tests {
         deaths: Vec<MissCause>,
         /// 発生イベントの並び(再現性の検証用)。
         event_log: Vec<(u32, GameEvent)>,
+
+        // --- 以下は「賢さ」の計測(#229) ---
+        /// 意図別のフレーム数。
+        intent_frames: [u32; Intent::COUNT],
+        /// 段差登りを出したが、その方向に登り先の棚が無かったフレーム数。F1の適用後は
+        /// 常に0になるはず(壁にぶつかり続けて窒息していた分)。
+        escape_climb_no_ledge_frames: u32,
+        /// 段差登りが連続したフレーム数の最大値。
+        escape_climb_max_streak: u32,
+        /// その場待ち(`WaitOut`)のフレーム数。
+        wait_out_frames: u32,
+        /// 行が進まないまま累積した`WaitOut`フレーム数の最大値。待機上限
+        /// (`AUTOPLAY_WAIT_FOR_THREAT_MAX_MS`)が実際に効いているかを見る。
+        wait_out_max_budget_frames: u32,
+        /// 前フレームより行が浅くなった回数(段差登りが成立した回数)。
+        climbs: u32,
+        /// AIRの取得(フレーム, 取得直前の残量, 深度m)。
+        air_pickups: Vec<(u32, f32, usize)>,
+        /// 取らずに通り過ぎたAIR(通過時の残量, 横距離, 見え方)。
+        air_passes: Vec<(f32, i32, PassState)>,
+        /// アイテムの取得(効果, フレーム, 残量, 先読み窓の岩の数, 頭上の不安定な塊の数)。
+        item_pickups: Vec<(ItemEffect, u32, f32, usize, usize)>,
+        /// 取らずに通り過ぎたアイテム(効果, 横距離, 見え方)。
+        item_passes: Vec<(ItemEffect, i32, PassState)>,
+        /// 頭上からの落下を横/下へ避けた回数。
+        dodge_events: u32,
+        /// そのうち、安全に登れる棚があった回数(登りを選択肢にする価値の目安)。
+        dodge_with_safe_ledge: u32,
+        /// 押し潰し死のうち、直前`LEDGE_REVIEW_FRAMES`フレームに安全な棚があった回数。
+        crush_deaths_with_recent_safe_ledge: u32,
+        /// 酸素切れ死のうち、直前`DEATH_REVIEW_FRAMES`フレームの過半を
+        /// 「登り・待ち・自由落下待ち」で費やしていた回数(停滞して窒息した死に方)。
+        stalled_oxygen_deaths: u32,
+        /// 酸素が警告域・緊急域だったフレーム数。
+        frames_warning: u32,
+        frames_emergency: u32,
+        /// 走中の酸素の最小値。
+        min_oxygen: f32,
     }
 
     impl SoakResult {
+        fn new() -> Self {
+            SoakResult {
+                cleared: false,
+                frames: 0,
+                deepest_m: 0,
+                rocks_drilled: 0,
+                deaths: Vec::new(),
+                event_log: Vec::new(),
+                intent_frames: [0; Intent::COUNT],
+                escape_climb_no_ledge_frames: 0,
+                escape_climb_max_streak: 0,
+                wait_out_frames: 0,
+                wait_out_max_budget_frames: 0,
+                climbs: 0,
+                air_pickups: Vec::new(),
+                air_passes: Vec::new(),
+                item_pickups: Vec::new(),
+                item_passes: Vec::new(),
+                dodge_events: 0,
+                dodge_with_safe_ledge: 0,
+                crush_deaths_with_recent_safe_ledge: 0,
+                stalled_oxygen_deaths: 0,
+                frames_warning: 0,
+                frames_emergency: 0,
+                min_oxygen: OXYGEN_MAX,
+            }
+        }
+
         fn unharmed(&self) -> bool {
             self.cleared && self.deaths.is_empty()
         }
@@ -2567,6 +3223,309 @@ mod tests {
         fn deaths_by_cause(&self, cause: MissCause) -> usize {
             self.deaths.iter().filter(|c| **c == cause).count()
         }
+
+        /// 残量が`OXYGEN_MAX`の半分以下の状態で、寄れたはず(候補列・目的列)のAIRを
+        /// 取らずに通り過ぎた回数(#229 G3)。`only_targeted`にすると、そのとき実際に
+        /// 目指していた列にあったものだけを数える(候補列は最大9列あり、窓に入った
+        /// だけで「寄れたはず」と数えると実態より大きく出るため、両方を記録する)。
+        fn missed_air_while_low(&self, only_targeted: bool) -> usize {
+            self.air_passes
+                .iter()
+                .filter(|(oxygen, _, state)| {
+                    *oxygen <= OXYGEN_MAX / 2.0
+                        && if only_targeted {
+                            *state == PassState::Targeted
+                        } else {
+                            matches!(state, PassState::Candidate | PassState::Targeted)
+                        }
+                })
+                .count()
+        }
+
+        /// アイテム効果別の(取得数, 通過数)。
+        fn item_take_rate(&self, effect: ItemEffect) -> (usize, usize) {
+            (
+                self.item_pickups.iter().filter(|p| p.0 == effect).count(),
+                self.item_passes.iter().filter(|p| p.0 == effect).count(),
+            )
+        }
+    }
+
+    /// 死因を分析するとき、死の直前どれだけ遡って意図の内訳を見るか(#229 G2)。
+    const DEATH_REVIEW_FRAMES: usize = 300;
+    /// 押し潰し死の直前、安全な棚があったかを遡って見るフレーム数(#229 G5)。
+    const LEDGE_REVIEW_FRAMES: usize = 15;
+
+    /// 窓で見かけたAIR/アイテム1マスぶんの記録(#229)。
+    struct Sighting {
+        /// AIRなら`None`、アイテムならその効果。
+        item: Option<ItemEffect>,
+        /// これまでで最も良かった見え方。
+        state: PassState,
+        /// 最後に見たときの横距離(負=左)。
+        lateral_dist: i32,
+    }
+
+    /// そのフレームの判断直前(入力を当てる前)の状況(#229)。取得イベントが飛んできた
+    /// ときに「どれだけ価値のある状況で取れたか」を後から言えるようにする。
+    struct FrameSnapshot {
+        frame: u32,
+        oxygen: f32,
+        depth_m: usize,
+        rocks_in_lookahead: usize,
+        unstable_above: usize,
+    }
+
+    /// ソーク1走ぶんの計測器(#229)。`play`が毎フレーム`observe`を呼ぶ。
+    ///
+    /// 判断の内部状態(`escalation`/`target_col`/採点結果)と盤面を突き合わせて、
+    /// 「その手を選んだとき他に何が見えていたか」まで残すのが目的。完走率や死因だけでは
+    /// 「なぜ寄らなかったのか」「なぜ登らなかったのか」が分からず、実際にF1の空振りを
+    /// 見落としていた。
+    struct Telemetry {
+        sightings: HashMap<(usize, usize), Sighting>,
+        /// 直近`DEATH_REVIEW_FRAMES`フレームが停滞していたか(死因分析用)。
+        recent_stalls: VecDeque<bool>,
+        /// 直近`LEDGE_REVIEW_FRAMES`フレームで安全に登れる棚があったか。
+        recent_safe_ledge: VecDeque<bool>,
+        escape_climb_streak: u32,
+        wait_out_budget: u32,
+        deepest_row: usize,
+        previous_row: usize,
+    }
+
+    impl Telemetry {
+        fn new(start_row: usize) -> Self {
+            Telemetry {
+                sightings: HashMap::new(),
+                recent_stalls: VecDeque::with_capacity(DEATH_REVIEW_FRAMES),
+                recent_safe_ledge: VecDeque::with_capacity(LEDGE_REVIEW_FRAMES),
+                escape_climb_streak: 0,
+                wait_out_budget: 0,
+                deepest_row: start_row,
+                previous_row: start_row,
+            }
+        }
+
+        /// 1フレームぶんの観測。判断の直後・入力を当てる前に呼ぶ。
+        fn observe(
+            &mut self,
+            game: &Game,
+            pilot: &Autopilot,
+            intent: Intent,
+            actions: &[InputAction],
+            result: &mut SoakResult,
+        ) -> FrameSnapshot {
+            let row = game.player.row;
+            result.intent_frames[intent.index()] += 1;
+            result.min_oxygen = result.min_oxygen.min(game.player.oxygen);
+            if game.player.oxygen < OXYGEN_WARNING_THRESHOLD {
+                result.frames_warning += 1;
+            }
+            if is_emergency(game) {
+                result.frames_emergency += 1;
+            }
+
+            // 自由落下の待ち(Idle)は下へ進んでいるので停滞ではない。地に足が着いた
+            // まま何も進んでいないフレームだけを停滞として数える(#229 G2)。
+            let stalled = matches!(intent, Intent::EscapeClimb | Intent::WaitOut)
+                || (intent == Intent::Idle && game.player_is_grounded());
+            push_bounded(&mut self.recent_stalls, stalled, DEATH_REVIEW_FRAMES);
+            let safe_ledge = pilot.safe_climb_direction(game).is_some();
+            push_bounded(&mut self.recent_safe_ledge, safe_ledge, LEDGE_REVIEW_FRAMES);
+
+            if intent == Intent::EscapeClimb {
+                self.escape_climb_streak += 1;
+                result.escape_climb_max_streak =
+                    result.escape_climb_max_streak.max(self.escape_climb_streak);
+                // 出した方向に本当に棚があるか(F1が塞いだ空振りの検出)。
+                let has_ledge =
+                    lateral_of(actions).is_some_and(|dir| pilot.can_climb_step(game, dir));
+                if !has_ledge {
+                    result.escape_climb_no_ledge_frames += 1;
+                }
+            } else {
+                self.escape_climb_streak = 0;
+            }
+
+            if intent == Intent::DodgeOverhead {
+                result.dodge_events += 1;
+                if safe_ledge {
+                    result.dodge_with_safe_ledge += 1;
+                }
+            }
+
+            if row > self.deepest_row {
+                self.deepest_row = row;
+                self.wait_out_budget = 0;
+            }
+            if intent == Intent::WaitOut {
+                result.wait_out_frames += 1;
+                self.wait_out_budget += 1;
+                result.wait_out_max_budget_frames =
+                    result.wait_out_max_budget_frames.max(self.wait_out_budget);
+            }
+            if row < self.previous_row {
+                result.climbs += 1;
+            }
+            self.previous_row = row;
+
+            self.watch_window(game, pilot);
+            self.collect_passes(game, result);
+
+            FrameSnapshot {
+                frame: result.frames,
+                oxygen: game.player.oxygen,
+                depth_m: game.player.depth_m(),
+                rocks_in_lookahead: rocks_in_lookahead(game),
+                unstable_above: unstable_mass_above(game),
+            }
+        }
+
+        /// 窓(現在列±`AUTOPLAY_COLUMN_SCAN_RADIUS`列 × 現在行から下`AUTOPLAY_LOOKAHEAD_ROWS`行)
+        /// のAIR/アイテムを、そのフレームの見え方とともに覚える。
+        fn watch_window(&mut self, game: &Game, pilot: &Autopilot) {
+            let (row, col) = game.player.position();
+            let grounded = game.player_is_grounded();
+            let candidates: Vec<usize> = pilot.score_columns(game).iter().map(|s| s.col).collect();
+            let lo = col.saturating_sub(AUTOPLAY_COLUMN_SCAN_RADIUS);
+            let hi = (col + AUTOPLAY_COLUMN_SCAN_RADIUS).min(game.board.width() - 1);
+
+            for c in lo..=hi {
+                let column_state = if !grounded {
+                    // 落下中は横移動そのものが通らない。列の良し悪し以前に寄れない。
+                    PassState::SeenFallingOnly
+                } else if pilot.target_col == Some(c) {
+                    PassState::Targeted
+                } else if candidates.contains(&c) {
+                    PassState::Candidate
+                } else {
+                    PassState::RejectedColumn
+                };
+                for d in 0..=AUTOPLAY_LOOKAHEAD_ROWS {
+                    let Some(cell) = game.board.cell_or_none(row + d, c) else {
+                        break;
+                    };
+                    let item = match cell {
+                        Cell::Oxygen => None,
+                        Cell::Item(effect) => Some(effect),
+                        _ => continue,
+                    };
+                    let state = if d == 0 {
+                        column_state.max(PassState::SameRow)
+                    } else {
+                        column_state
+                    };
+                    let lateral_dist = c as i32 - col as i32;
+                    self.sightings
+                        .entry((row + d, c))
+                        .and_modify(|seen| {
+                            seen.state = seen.state.max(state);
+                            seen.lateral_dist = lateral_dist;
+                        })
+                        .or_insert(Sighting {
+                            item,
+                            state,
+                            lateral_dist,
+                        });
+                }
+            }
+        }
+
+        /// プレイヤーより上になったマスを「通過」として確定する。通過した時点でまだ
+        /// 盤面に残っていたものだけが「取らなかった」1件になる。
+        fn collect_passes(&mut self, game: &Game, result: &mut SoakResult) {
+            let row = game.player.row;
+            self.sightings.retain(|&(cell_row, cell_col), seen| {
+                if cell_row >= row {
+                    return true;
+                }
+                let still_there = match seen.item {
+                    None => game.board.cell(cell_row, cell_col) == Cell::Oxygen,
+                    Some(effect) => game.board.cell(cell_row, cell_col) == Cell::Item(effect),
+                };
+                if still_there {
+                    match seen.item {
+                        None => {
+                            result.air_passes.push((
+                                game.player.oxygen,
+                                seen.lateral_dist,
+                                seen.state,
+                            ));
+                        }
+                        Some(effect) => {
+                            result
+                                .item_passes
+                                .push((effect, seen.lateral_dist, seen.state));
+                        }
+                    }
+                }
+                false
+            });
+        }
+
+        /// 直近`DEATH_REVIEW_FRAMES`フレームのうち、停滞(登り・待ち・接地したまま
+        /// 何もしない)が過半を占めていたか。
+        fn recently_stalled(&self) -> bool {
+            if self.recent_stalls.is_empty() {
+                return false;
+            }
+            let stalled = self
+                .recent_stalls
+                .iter()
+                .filter(|stalled| **stalled)
+                .count();
+            stalled * 2 > self.recent_stalls.len()
+        }
+
+        /// 直近`LEDGE_REVIEW_FRAMES`フレームのどこかで安全に登れる棚があったか。
+        fn had_safe_ledge_recently(&self) -> bool {
+            self.recent_safe_ledge.iter().any(|had| *had)
+        }
+    }
+
+    /// 固定長のリングバッファとして`VecDeque`へ積む。
+    fn push_bounded<T>(queue: &mut VecDeque<T>, value: T, capacity: usize) {
+        if queue.len() == capacity {
+            queue.pop_front();
+        }
+        queue.push_back(value);
+    }
+
+    /// 窓(現在列±`AUTOPLAY_COLUMN_SCAN_RADIUS`列 × 下`AUTOPLAY_LOOKAHEAD_ROWS`行)にある
+    /// 岩の数。スター化アイテムがどれだけ役に立つ場面だったかの目安。
+    fn rocks_in_lookahead(game: &Game) -> usize {
+        let (row, col) = game.player.position();
+        let lo = col.saturating_sub(AUTOPLAY_COLUMN_SCAN_RADIUS);
+        let hi = (col + AUTOPLAY_COLUMN_SCAN_RADIUS).min(game.board.width() - 1);
+        (lo..=hi)
+            .flat_map(|c| (1..=AUTOPLAY_LOOKAHEAD_ROWS).map(move |d| (row + d, c)))
+            .filter(|&(r, c)| matches!(game.board.cell_or_none(r, c), Some(Cell::Rock { .. })))
+            .count()
+    }
+
+    /// 頭上`AUTOPLAY_THREAT_SCAN_ROWS`行の窓にある「直下に穴が空いた固体」の数。
+    /// 頭上クリアアイテムがどれだけ役に立つ場面だったかの目安で、塊の支持関係まで
+    /// 追う正確な判定(`column_threat`)ではなく1マスだけ見る安価な近似。
+    fn unstable_mass_above(game: &Game) -> usize {
+        let (row, col) = game.player.position();
+        let lo = col.saturating_sub(AUTOPLAY_COLUMN_SCAN_RADIUS);
+        let hi = (col + AUTOPLAY_COLUMN_SCAN_RADIUS).min(game.board.width() - 1);
+        (lo..=hi)
+            .flat_map(|c| (1..=AUTOPLAY_THREAT_SCAN_ROWS).map(move |d| (row.checked_sub(d), c)))
+            .filter_map(|(r, c)| r.map(|r| (r, c)))
+            .filter(|&(r, c)| {
+                let solid = !matches!(
+                    game.board.cell(r, c),
+                    Cell::Empty | Cell::Oxygen | Cell::Item(_)
+                );
+                solid
+                    && matches!(
+                        game.board.cell_or_none(r + 1, c),
+                        Some(Cell::Empty | Cell::Oxygen | Cell::Item(_))
+                    )
+            })
+            .count()
     }
 
     /// 無敵OFFのオートプレイで1本通しプレイし、結果を集計する。main.rsのメインループと
@@ -2577,18 +3536,14 @@ mod tests {
         game.apply_settings(&profile.settings);
         let mut pilot = Autopilot::new(false);
         let delta = std::time::Duration::from_millis(FRAME_INTERVAL_MS);
-        let mut result = SoakResult {
-            cleared: false,
-            frames: 0,
-            deepest_m: 0,
-            rocks_drilled: 0,
-            deaths: Vec::new(),
-            event_log: Vec::new(),
-        };
+        let mut result = SoakResult::new();
+        let mut telemetry = Telemetry::new(game.player.row);
 
         for frame in 0..max_frames {
             result.frames = frame + 1;
-            for action in pilot.decide(&game) {
+            let (intent, actions) = pilot.decide_with_intent(&game);
+            let snapshot = telemetry.observe(&game, &pilot, intent, &actions, &mut result);
+            for action in actions {
                 let events = game.apply_input(action);
                 for event in &events {
                     // 掘削で壊した岩だけを数える。着地での4連結自動消滅はupdate側で
@@ -2597,10 +3552,10 @@ mod tests {
                         result.rocks_drilled += blocks;
                     }
                 }
-                record(&mut result, frame, &events);
+                record(&mut result, frame, &events, &snapshot, &telemetry);
             }
             let events = game.update(delta);
-            record(&mut result, frame, &events);
+            record(&mut result, frame, &events, &snapshot, &telemetry);
 
             result.deepest_m = result.deepest_m.max(game.player.depth_m());
             assert!(
@@ -2626,11 +3581,42 @@ mod tests {
         result
     }
 
-    fn record(result: &mut SoakResult, frame: u32, events: &[GameEvent]) {
+    fn record(
+        result: &mut SoakResult,
+        frame: u32,
+        events: &[GameEvent],
+        snapshot: &FrameSnapshot,
+        telemetry: &Telemetry,
+    ) {
         for event in events {
             match event {
                 GameEvent::LifeLost { cause } | GameEvent::GameOverMiss { cause } => {
                     result.deaths.push(*cause);
+                    // 死んだ瞬間の「直前に何をしていたか」は、死因の内訳だけでは
+                    // 見えない詰まり方(壁にぶつかり続けて窒息する等)を捕まえる(#229)。
+                    match cause {
+                        MissCause::OxygenOut if telemetry.recently_stalled() => {
+                            result.stalled_oxygen_deaths += 1;
+                        }
+                        MissCause::CrushedByFallingBlock if telemetry.had_safe_ledge_recently() => {
+                            result.crush_deaths_with_recent_safe_ledge += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                GameEvent::OxygenCollected => {
+                    result
+                        .air_pickups
+                        .push((snapshot.frame, snapshot.oxygen, snapshot.depth_m));
+                }
+                GameEvent::ItemCollected(effect) => {
+                    result.item_pickups.push((
+                        *effect,
+                        snapshot.frame,
+                        snapshot.oxygen,
+                        snapshot.rocks_in_lookahead,
+                        snapshot.unstable_above,
+                    ));
                 }
                 _ => {}
             }
@@ -2688,7 +3674,10 @@ mod tests {
     /// 無傷完走5割・完走時の岩破壊15回以下)。
     ///
     /// 実測値(#225時点): 完走16/16・無傷完走11/16・酸素切れ0・完走時の平均岩破壊2.4回・
-    /// 1走あたりの死亡0.38回。
+    /// 1走あたりの死亡0.38回。(#229時点): 完走16/16・無傷完走10/16・酸素切れ0・
+    /// 平均岩破壊2.4回・1走あたりの死亡0.44回(押し潰され0.25回・爆風0.19回)。
+    /// このコースは浅く、手詰まりも酸素の逼迫もほぼ起きない(待ち0フレーム・
+    /// 段差登り0回)ため、#229の修正はここでは数字に出ない。
     #[test]
     fn soak_short_course_within_life_budget() {
         const SEEDS: u64 = 16;
@@ -2698,6 +3687,7 @@ mod tests {
             .collect();
         let summary = Summary::of(&results);
         summary.print("300m(既定・ライフ予算内)", SEEDS);
+        assert_never_stalls(&summary);
 
         assert!(
             summary.out_of_oxygen.is_empty(),
@@ -2734,18 +3724,21 @@ mod tests {
     /// 置く。設計メモにある3.22回/走は`Game::apply_settings`を通さない旧ハーネスでの値で、
     /// 実機の盤面(出現率の再抽選後は岩が12.1%→15.8%に増える)とは条件が違うため使わない。
     ///
-    /// 実測値(いずれも同じハーネス・32シード):
-    /// - 修正前: 完走6/32・平均到達871m・押し潰され1.78回/酸素切れ3.06回/爆風0.19回・
-    ///   完走時の平均岩破壊50.8回
-    /// - 修正後: 完走8/32・平均到達859m・押し潰され1.47回/酸素切れ3.44回/爆風0.25回・
-    ///   完走時の平均岩破壊43.4回
+    /// #229では**採否の基準を「1走あたりの死亡総数」と「平均到達深度」に変えた**
+    /// (ユーザー判断)。このコースでは「岩を割る回数」と「押し潰される回数」がほぼ1対1で
+    /// 入れ替わり、死因単体では改善を判定できないため。死因ごとの上限は歯止めとして残す。
     ///
-    /// このコースでは酸素切れが減っていない。実測を重ねた結果、1000mの既定設定では
-    /// 「岩を割る回数を減らす」と「押し潰される回数」がほぼ1対1で入れ替わり、死亡総数が
-    /// 4.7〜5.1回/走で動かないことが分かっている(酸素切れを0.06回/走まで落とす設定も
-    /// 作れたが、その時の押し潰されは4.12回/走だった)。ユーザー判断2(押し潰し死を
-    /// 増やさない)を優先し、押し潰されが基準を下回る範囲で最良の構成を採っている。
-    /// 酸素切れの改善は`soak_harsh_profile_within_life_budget`(ユーザーの実設定)が示す。
+    /// 実測値(いずれも同じハーネス・32シード):
+    /// - #225修正前: 完走6/32・平均到達871m・押し潰され1.78回/酸素切れ3.06回・
+    ///   完走時の平均岩破壊50.8回
+    /// - #225修正後: 完走8/32・平均到達859m・押し潰され1.47回/酸素切れ3.44回・
+    ///   死亡5.16回/走・完走時の平均岩破壊43.4回
+    /// - #229修正後: 完走7/32・平均到達879m・押し潰され1.66回/酸素切れ3.19回・
+    ///   死亡5.06回/走・完走時の平均岩破壊44.9回
+    ///
+    /// 調整に使っていないシード(100〜163の64本)でも確認している: 完走8/64・
+    /// 平均到達850m・死亡5.25回/走。完走率が32シードの値より低いのは、この構成の
+    /// 完走率自体が2割前後で、シードの当たり外れの幅が大きいため。
     #[test]
     #[ignore = "長時間のソークテスト。cargo test --release -- --ignored で実行する"]
     fn soak_full_course_within_life_budget() {
@@ -2756,16 +3749,28 @@ mod tests {
             .collect();
         let summary = Summary::of(&results);
         summary.print("1000m(既定・ライフ予算内)", SEEDS);
+        assert_never_stalls(&summary);
 
-        // ユーザー判断2の機械的な検証。修正前(同ハーネス)の1.78回/走を上回らないこと。
+        // #229の採否基準: 死亡総数と到達深度。どちらも#225時点の実測を下回らないこと。
+        assert!(
+            summary.deaths_per_run() <= 5.16,
+            "1走あたりの死亡総数が#225時点の実測(5.16回/走)を上回っている: {:.2}回/走",
+            summary.deaths_per_run()
+        );
+        assert!(
+            summary.average_deepest_m >= 859.0,
+            "平均到達深度が#225時点の実測(859m)を下回っている: {:.0}m",
+            summary.average_deepest_m
+        );
+        // 死因ごとの歯止め。総数が同じでも特定の死に方へ偏っていないことを見る。
         assert!(
             summary.crush_deaths_per_run() <= 1.78,
-            "押し潰し死が修正前の実測(1.78回/走)を上回っている: {:.2}回/走",
+            "押し潰し死が#225修正前の実測(1.78回/走)を上回っている: {:.2}回/走",
             summary.crush_deaths_per_run()
         );
         assert!(
             summary.cleared >= 6,
-            "完走が修正前の実測(6/32)を下回っている: {}/{SEEDS}",
+            "完走が#225修正前の実測(6/32)を下回っている: {}/{SEEDS}",
             summary.cleared
         );
         assert!(
@@ -2784,13 +3789,17 @@ mod tests {
     /// 「AIR不足でめっちゃ死ぬ」という指摘の再現条件そのもの。
     ///
     /// 実測値(同じハーネス・32シード):
-    /// - 修正前: 完走2/32・平均到達423m・酸素切れ3.81回/走(死因の98%)・押し潰され0.09回/走・
-    ///   完走時の平均岩破壊37.5回
-    /// - 修正後: 完走25/32・平均到達492m・酸素切れ0.81回/走・押し潰され1.28回/走・
-    ///   完走時の平均岩破壊20.1回・無傷完走5/32
+    /// - #225修正前: 完走2/32・平均到達423m・酸素切れ3.81回/走(死因の98%)・
+    ///   押し潰され0.09回/走・完走時の平均岩破壊37.5回
+    /// - #225修正後: 完走25/32・平均到達492m・酸素切れ0.81回/走・押し潰され1.28回/走・
+    ///   死亡2.12回/走・完走時の平均岩破壊20.1回
+    /// - #229修正後: 完走32/32・平均到達500m・酸素切れ0.91回/走・押し潰され0.88回/走・
+    ///   死亡1.84回/走・完走時の平均岩破壊20.7回
     ///
-    /// 押し潰されが0.09→1.28回/走へ増えて見えるのは、修正前は平均423mで酸素切れになり
-    /// 潰される前に死んでいたため。1走あたりの死亡総数は3.91回→2.12回へ減っている。
+    /// 押し潰されが0.09→1.28回/走へ増えて見えるのは、#225修正前は平均423mで酸素切れに
+    /// なり潰される前に死んでいたため。#229では登れない壁への段差登り(最長17秒の空振り)を
+    /// 塞いだのが効いていて、完走が25→32/32・死亡総数が2.12→1.84回/走になった。
+    /// 調整に使っていないシード(100〜163の64本)でも完走56/64・死亡2.06回/走。
     #[test]
     #[ignore = "長時間のソークテスト。cargo test --release -- --ignored で実行する"]
     fn soak_harsh_profile_within_life_budget() {
@@ -2801,21 +3810,28 @@ mod tests {
             .collect();
         let summary = Summary::of(&results);
         summary.print("500m(harsh・ライフ予算内)", SEEDS);
+        assert_never_stalls(&summary);
 
         assert!(
-            summary.cleared >= 16,
-            "ユーザーの実設定での完走が16/32に届いていない: {}/{SEEDS}",
+            summary.cleared >= 28,
+            "ユーザーの実設定での完走が#229時点の実測(32/32)から大きく落ちている: \
+             {}/{SEEDS}",
             summary.cleared
         );
         assert!(
+            summary.average_deepest_m >= 492.0,
+            "平均到達深度が#225時点の実測(492m)を下回っている: {:.0}m",
+            summary.average_deepest_m
+        );
+        assert!(
             summary.oxygen_deaths_per_run() <= 1.5,
-            "酸素切れ死が修正前の実測(3.81回/走)から改善しきれていない: {:.2}回/走",
+            "酸素切れ死が#225修正前の実測(3.81回/走)から改善しきれていない: {:.2}回/走",
             summary.oxygen_deaths_per_run()
         );
         assert!(
-            summary.total_deaths as f64 / SEEDS as f64 <= 3.91,
-            "1走あたりの死亡総数が修正前の実測(3.91回/走)を上回っている: {:.2}回/走",
-            summary.total_deaths as f64 / SEEDS as f64
+            summary.deaths_per_run() <= 2.12,
+            "1走あたりの死亡総数が#225時点の実測(2.12回/走)を上回っている: {:.2}回/走",
+            summary.deaths_per_run()
         );
     }
 
@@ -2854,6 +3870,32 @@ mod tests {
         total_deaths: usize,
         /// 原因別の死亡回数(全シード合計)。
         deaths_by_cause: Vec<(MissCause, usize)>,
+
+        // --- 以下は「賢さ」の計測(#229) ---
+        total_frames: u64,
+        intent_frames: [u64; Intent::COUNT],
+        escape_climb_no_ledge_frames: u64,
+        escape_climb_max_streak: u32,
+        wait_out_frames: u64,
+        wait_out_max_budget_frames: u32,
+        climbs: u64,
+        stalled_oxygen_deaths: u32,
+        dodge_events: u64,
+        dodge_with_safe_ledge: u64,
+        crush_deaths_with_recent_safe_ledge: u32,
+        air_pickups: usize,
+        air_passes: usize,
+        missed_air_while_low: usize,
+        missed_air_while_low_targeted: usize,
+        /// 効果別の(取得数, 通過数)。
+        item_stats: Vec<(ItemEffect, usize, usize)>,
+        /// スター化アイテムを取ったときの、先読み窓の岩の数の平均。
+        starify_rocks_at_pickup: f64,
+        /// 頭上クリアアイテムを取ったときの、頭上の不安定な塊の数の平均。
+        clear_above_unstable_at_pickup: f64,
+        frames_warning: u64,
+        frames_emergency: u64,
+        min_oxygen: f32,
     }
 
     impl Summary {
@@ -2869,6 +3911,30 @@ mod tests {
                 MissCause::DrilledIntoFallingBlock,
                 MissCause::BombBlast,
             ];
+            let sum = |pick: fn(&SoakResult) -> u64| -> u64 {
+                results.iter().map(|(_, r)| pick(r)).sum()
+            };
+            let mut intent_frames = [0u64; Intent::COUNT];
+            for (_, r) in results {
+                for (total, frames) in intent_frames.iter_mut().zip(r.intent_frames) {
+                    *total += u64::from(frames);
+                }
+            }
+            let item_stats = [
+                ItemEffect::ClearAbove,
+                ItemEffect::UnifyColors,
+                ItemEffect::StarifyScreen,
+            ]
+            .into_iter()
+            .map(|effect| {
+                let (taken, passed) = results
+                    .iter()
+                    .map(|(_, r)| r.item_take_rate(effect))
+                    .fold((0, 0), |acc, (t, p)| (acc.0 + t, acc.1 + p));
+                (effect, taken, passed)
+            })
+            .collect();
+
             Summary {
                 seeds: results.len(),
                 cleared: results.iter().filter(|(_, r)| r.cleared).count(),
@@ -2894,6 +3960,54 @@ mod tests {
                         (cause, total)
                     })
                     .collect(),
+                total_frames: sum(|r| u64::from(r.frames)),
+                intent_frames,
+                escape_climb_no_ledge_frames: sum(|r| u64::from(r.escape_climb_no_ledge_frames)),
+                escape_climb_max_streak: results
+                    .iter()
+                    .map(|(_, r)| r.escape_climb_max_streak)
+                    .max()
+                    .unwrap_or(0),
+                wait_out_frames: sum(|r| u64::from(r.wait_out_frames)),
+                wait_out_max_budget_frames: results
+                    .iter()
+                    .map(|(_, r)| r.wait_out_max_budget_frames)
+                    .max()
+                    .unwrap_or(0),
+                climbs: sum(|r| u64::from(r.climbs)),
+                stalled_oxygen_deaths: sum(|r| u64::from(r.stalled_oxygen_deaths)) as u32,
+                dodge_events: sum(|r| u64::from(r.dodge_events)),
+                dodge_with_safe_ledge: sum(|r| u64::from(r.dodge_with_safe_ledge)),
+                crush_deaths_with_recent_safe_ledge: sum(|r| {
+                    u64::from(r.crush_deaths_with_recent_safe_ledge)
+                }) as u32,
+                air_pickups: results.iter().map(|(_, r)| r.air_pickups.len()).sum(),
+                air_passes: results.iter().map(|(_, r)| r.air_passes.len()).sum(),
+                missed_air_while_low: results
+                    .iter()
+                    .map(|(_, r)| r.missed_air_while_low(false))
+                    .sum(),
+                missed_air_while_low_targeted: results
+                    .iter()
+                    .map(|(_, r)| r.missed_air_while_low(true))
+                    .sum(),
+                item_stats,
+                starify_rocks_at_pickup: average_at_pickup(
+                    results,
+                    ItemEffect::StarifyScreen,
+                    |p| p.3 as f64,
+                ),
+                clear_above_unstable_at_pickup: average_at_pickup(
+                    results,
+                    ItemEffect::ClearAbove,
+                    |p| p.4 as f64,
+                ),
+                frames_warning: sum(|r| u64::from(r.frames_warning)),
+                frames_emergency: sum(|r| u64::from(r.frames_emergency)),
+                min_oxygen: results
+                    .iter()
+                    .map(|(_, r)| r.min_oxygen)
+                    .fold(OXYGEN_MAX, f32::min),
             }
         }
 
@@ -2914,6 +4028,20 @@ mod tests {
             self.per_run(MissCause::CrushedByFallingBlock)
         }
 
+        fn deaths_per_run(&self) -> f64 {
+            self.total_deaths as f64 / self.seeds.max(1) as f64
+        }
+
+        /// 段差登りを出したのに棚が無かったフレームの割合(#229 G1)。
+        fn escape_climb_no_ledge_rate(&self) -> f64 {
+            self.escape_climb_no_ledge_frames as f64 / self.total_frames.max(1) as f64
+        }
+
+        /// 残量が半分以下でCandidate/TargetedだったAIRを取り逃した回数/走(#229 G3)。
+        fn missed_air_while_low_per_run(&self) -> f64 {
+            self.missed_air_while_low as f64 / self.seeds.max(1) as f64
+        }
+
         fn print(&self, course: &str, seeds: u64) {
             println!(
                 "{course}: 完走 {}/{seeds} / 無傷完走 {}/{seeds} / 酸素切れ {}シード / \
@@ -2926,7 +4054,7 @@ mod tests {
                 self.average_rocks,
                 self.average_frames,
                 self.total_deaths,
-                self.total_deaths as f64 / self.seeds.max(1) as f64,
+                self.deaths_per_run(),
             );
             for (cause, total) in &self.deaths_by_cause {
                 println!(
@@ -2934,6 +4062,120 @@ mod tests {
                     *total as f64 / self.seeds.max(1) as f64
                 );
             }
+            println!(
+                "    意図別フレーム: {}",
+                Intent::ALL
+                    .iter()
+                    .zip(self.intent_frames)
+                    .filter(|(_, frames)| *frames > 0)
+                    .map(|(intent, frames)| format!(
+                        "{intent:?} {:.1}%",
+                        frames as f64 * 100.0 / self.total_frames.max(1) as f64
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            );
+            println!(
+                "    段差登り: 成立 {}回 / 棚無しの空振り {}フレーム({:.3}%) / 最長連続 {}フレーム",
+                self.climbs,
+                self.escape_climb_no_ledge_frames,
+                self.escape_climb_no_ledge_rate() * 100.0,
+                self.escape_climb_max_streak,
+            );
+            println!(
+                "    待ち: 計{}フレーム / 行が進まないまま最大{}フレーム連続 / \
+                 停滞したまま酸素切れ {}件",
+                self.wait_out_frames, self.wait_out_max_budget_frames, self.stalled_oxygen_deaths,
+            );
+            println!(
+                "    AIR: 取得{}回 / 通過{}回(取得率 {:.0}%) / 残量50%以下で寄れたはずの\
+                 取り逃し {}回({:.2}回/走、うち目指していた列 {}回)",
+                self.air_pickups,
+                self.air_passes,
+                self.air_pickups as f64 * 100.0
+                    / (self.air_pickups + self.air_passes).max(1) as f64,
+                self.missed_air_while_low,
+                self.missed_air_while_low_per_run(),
+                self.missed_air_while_low_targeted,
+            );
+            for (effect, taken, passed) in &self.item_stats {
+                println!(
+                    "    {effect:?}: 取得{taken}回 / 通過{passed}回 (取得率 {:.0}%)",
+                    *taken as f64 * 100.0 / (taken + passed).max(1) as f64
+                );
+            }
+            println!(
+                "    アイテムの取り時: スター化の先読み窓の岩 平均{:.1}個 / \
+                 頭上クリアの不安定な塊 平均{:.1}個",
+                self.starify_rocks_at_pickup, self.clear_above_unstable_at_pickup,
+            );
+            println!(
+                "    回避: 横/下へ {}回(うち安全な棚あり {}回) / \
+                 押し潰し死のうち直前に棚があった {}件",
+                self.dodge_events,
+                self.dodge_with_safe_ledge,
+                self.crush_deaths_with_recent_safe_ledge,
+            );
+            println!(
+                "    酸素: 警告域 {:.1}% / 緊急域 {:.1}% / 最小 {:.1}%",
+                self.frames_warning as f64 * 100.0 / self.total_frames.max(1) as f64,
+                self.frames_emergency as f64 * 100.0 / self.total_frames.max(1) as f64,
+                self.min_oxygen,
+            );
         }
+    }
+
+    /// どのコースでも共通で満たすべき「詰まっていないこと」の基準(#229)。
+    ///
+    /// 完走率・死因の内訳は、詰まり方(登れない壁に張り付く・待ち続ける)が別の死因へ
+    /// 化けるだけでも動いてしまう。ここでは結果ではなく過程を直接見る。
+    ///
+    /// 一方、次の2つは`Summary::print`に出すだけで閾値にしていない。どちらも設計時は
+    /// 「0件/1回以下」を目標に置いたが、実測してみると目標そのものが成立しなかった。
+    ///
+    /// - **停滞したまま酸素切れ**(死の直前10秒の過半を待ち・登り・接地したままの待機に
+    ///   費やした死に方): 1000mで57/102件、harshで8/29件。行き止まりに入り込んで
+    ///   そのまま窒息する経路が残っている。段差登りの空振り(F1)を塞いでも消えず、
+    ///   これ以上は経路探索の作り自体(1行ずつの貪欲法)の問題になる
+    /// - **寄れたはずのAIRの取り逃し**: 窓(9列×14行)に入ったAIRのうち、却下されて
+    ///   いない列にあったものを数えると1000mで59.94回/走になる。候補列は最大9列
+    ///   あるため「候補列にあった=寄れたはず」とは言えず、指標として閾値化できない。
+    ///   実際に目指していた列にあったものに絞ると3.53回/走まで下がるが、それでも
+    ///   目的列は毎フレーム変わるため「取り逃し」と断じるには弱い
+    fn assert_never_stalls(summary: &Summary) {
+        assert!(
+            summary.escape_climb_no_ledge_rate() <= 0.01,
+            "登り先の棚が無いのに段差登りを出しているフレームが多すぎる: \
+             {}フレーム({:.3}%)",
+            summary.escape_climb_no_ledge_frames,
+            summary.escape_climb_no_ledge_rate() * 100.0
+        );
+        assert!(
+            summary.escape_climb_max_streak <= 100,
+            "段差登りが{}フレーム連続している(登れない壁に張り付いている疑い)",
+            summary.escape_climb_max_streak
+        );
+        assert!(
+            summary.wait_out_max_budget_frames <= 60,
+            "行が進まないまま{}フレーム待ち続けている\
+             (待機上限{}msが実質無効になっている疑い)",
+            summary.wait_out_max_budget_frames,
+            AUTOPLAY_WAIT_FOR_THREAT_MAX_MS
+        );
+    }
+
+    /// アイテム取得時の状況(岩の数・不安定な塊の数)の平均。
+    fn average_at_pickup(
+        results: &[(u64, SoakResult)],
+        effect: ItemEffect,
+        pick: fn(&(ItemEffect, u32, f32, usize, usize)) -> f64,
+    ) -> f64 {
+        let samples: Vec<f64> = results
+            .iter()
+            .flat_map(|(_, r)| r.item_pickups.iter())
+            .filter(|pickup| pickup.0 == effect)
+            .map(pick)
+            .collect();
+        samples.iter().sum::<f64>() / samples.len().max(1) as f64
     }
 }
