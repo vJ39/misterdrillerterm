@@ -1,7 +1,5 @@
 //! ratatui描画(spec.md 9章 TUI仕様)。
-//!
 //! 1論理セルを横4文字×縦2ターミナル行の大型ブロックとして描画する(9.2)。
-//! 旧版のhalf-block方式(1論理セルを1文字に圧縮)は完全に廃止した。
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -66,13 +64,11 @@ struct LayoutPlan {
     hud_rect: Rect,
     /// 可視論理行数。
     visible_rows: usize,
-    /// オーバーレイ(ポーズ/ゲームオーバー等)を中央配置する基準となる、
-    /// ゲーム画面全体のフレーム(9.10「旧`centered_rect`はオーバーレイ専用として残す」)。
+    /// オーバーレイ(ポーズ/ゲームオーバー等)を中央配置する基準となるゲーム画面全体のフレーム(9.10)。
     game_frame: Rect,
 }
 
-/// フィールドペイン幅(列数×4文字+左右ボーダー2文字、9.2)。列数(TERM独自拡張。
-/// ユーザー指摘: 「設定値に列の数を変更できるようにして」)に応じて可変になる。
+/// フィールドペイン幅(列数×4文字+左右ボーダー2文字、9.2)。設定の列数に応じて可変になる。
 fn field_pane_w(field_width: usize) -> u16 {
     field_width as u16 * CELL_W + 2
 }
@@ -184,8 +180,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 // エントリポイント
 // ---------------------------------------------------------------------------
 
-/// `autoplay_enabled`はオートプレイ(TERM独自拡張。#218)が動作中かどうか。AIの実体は
-/// `Game`の外(`autoplay::Autopilot`)にあるためgameからは判定できず、main.rsから渡す。
+/// `autoplay_enabled`はオートプレイが動作中かどうか。AIの実体は`Game`の外
+/// (`autoplay::Autopilot`)にあるためgameからは判定できず、main.rsから渡す。
 /// 無敵状態・回避したミス数は`Game`自身が持っているのでここでは受け取らない。
 pub fn draw(
     frame: &mut Frame,
@@ -214,8 +210,8 @@ pub fn draw(
     draw_field(frame, plan.field_rect, plan.visible_rows, game);
     draw_status(frame, plan.hud_rect, game, autoplay_enabled);
 
-    // チェックポイント(100mごと)到達演出(TERM独自拡張。#178)。短時間のバナー表示
-    // だけで、盤面(draw_field)自体は裏で通常通り動き続けている。
+    // チェックポイント(100mごと)到達演出。短時間のバナー表示だけで、
+    // 盤面(draw_field)自体は裏で通常通り動き続けている。
     if let Some(depth_m) = game.checkpoint_flash_depth_m() {
         draw_checkpoint_banner(frame, plan.game_frame, depth_m);
     }
@@ -236,7 +232,7 @@ pub fn draw(
             ],
         ),
         // 押し潰されてのミスは、GameOverオーバーレイを出す前に一呼吸「潰れた」演出
-        // (draw_field内のdraw_player)を見せる(spec.md 5章・9章TERM独自拡張)。
+        // (draw_field内のdraw_player)を見せる(spec.md 5章・9章)。
         GameStatus::GameOver if !game.crush_flash_active() => {
             draw_game_over_overlay(frame, plan.game_frame, game.game_over_selection())
         }
@@ -248,7 +244,7 @@ pub fn draw(
     }
 }
 
-/// ON/OFF状態を短い日本語ラベルにする(TERM独自拡張、10章)。
+/// ON/OFF状態を短いラベルにする(spec.md 10章)。
 fn on_off_label(enabled: bool) -> &'static str {
     if enabled { "ON" } else { "OFF" }
 }
@@ -257,17 +253,9 @@ fn on_off_label(enabled: bool) -> &'static str {
 // タイトル画面(spec.md 1章「Escキーはタイトルへ戻る」の受け皿)
 // ---------------------------------------------------------------------------
 
-/// タイトル画面のアートは端末サイズいっぱいに表示する(TERM独自拡張。#148。
-/// ユーザー提案: 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。
-/// 以前(#129)はアート:案内文の高さ比を黄金比にする方針だったため、アートの
-/// 表示行数を絞る必要があり、その結果アートが低解像度で潰れて見える問題が
-/// あった(#127で解像度を上げた直後に#129で再び縮小した経緯)。ロゴ・案内文を
-/// アートと同じ領域(画面全体)へ上から重ね描きする方式に変えたことで、この
-/// トレードオフ自体を解消している。
-///
-/// アートの構築(PNGデコード+Lanczos3リサイズ)は軽くない処理のため、端末サイズが
-/// 変わらない限り再利用するキャッシュを`title_art_lines`に持たせている
-/// (`draw_title`はタイトル画面にいる間、毎フレーム=約33msごとに呼ばれるため)。
+/// タイトル画面のアートは端末いっぱいに表示し、ロゴ・案内文はその上に重ね描きする(アートの
+/// 行数を絞ると低解像度で潰れるため)。アート構築(PNGデコード+Lanczos3リサイズ)は重く、
+/// `draw_title`は毎フレーム呼ばれるため、端末サイズが変わらない限り再利用するキャッシュを持つ。
 type TitleArtCache = Option<((u16, u16), Vec<Line<'static>>)>;
 
 fn title_art_lines(cols: u16, rows: u16) -> Vec<Line<'static>> {
@@ -288,19 +276,16 @@ fn title_art_lines(cols: u16, rows: u16) -> Vec<Line<'static>> {
     })
 }
 
-/// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント
-/// (3行×3列、TERM独自拡張。ユーザー指摘: 「TERMMAPみたいにかっこいい題字
-/// つくってくれ」)。T/E/R/Mは`vJ39/termmap`のワードマーク(`keymap.rs`の`LOGO`)と
-/// 同じ字形をそのまま流用し、I/S/Dは同じ作法(角・ヒゲの罫線文字)で新規に起こした。
-/// 半角スペースは2列ぶんの空白で単語の区切りに使う。
+/// タイトルワードマーク("MISDRI TERM")を構成する1文字ぶんの罫線フォント(3行×3列)。
+/// T/E/R/Mは`vJ39/termmap`のワードマーク(`keymap.rs`の`LOGO`)と同じ字形、I/S/Dは同じ作法
+/// (角・ヒゲの罫線文字)で起こしたもの。半角スペースは2列ぶんの空白で単語の区切りに使う。
 fn title_logo_glyph(c: char) -> &'static [&'static str; 3] {
     match c {
         'M' => &["┏┳┓", "┃┃┃", "╹╹╹"],
         'I' => &["╺┳╸", " ┃ ", "╺┻╸"],
         'S' => &["┏━╸", "┗━┓", "╺━┛"],
-        // 単純な箱形("┏━┓"/"┃ ┃"/"┗━┛")だとOと見分けがつかなかった(ユーザー指摘の
-        // スクショで実際に「MISORI TERM」に見えていた)ため、右側だけ丸角(細線)にして
-        // 左の角ばった縦棒(太線)とのコントラストでDの丸みを出す。
+        // 単純な箱形("┏━┓"/"┃ ┃"/"┗━┛")だとOと見分けがつかない("MISORI"に読める)ため、
+        // 右側だけ丸角(細線)にして左の角ばった縦棒(太線)とのコントラストでDの丸みを出す。
         'D' => &["┏━╮", "┃ │", "┗━╯"],
         'R' => &["┏━┓", "┣┳┛", "╹┗╸"],
         'T' => &["╺┳╸", " ┃ ", " ╹ "],
@@ -310,8 +295,7 @@ fn title_logo_glyph(c: char) -> &'static [&'static str; 3] {
 }
 
 /// "MISDRI TERM"のワードマーク3行を、上ほど明るい金〜赤銅色のグラデーションで組む
-/// (termmapの緑グラデーションと同じ発想。ゲーム内のダイヤブロック配色(黄土色系、#62)
-/// に寄せた色にした)。
+/// (ゲーム内のダイヤブロック配色(黄土色系)に寄せた色)。
 fn build_title_logo_lines() -> [Line<'static>; 3] {
     const GRADIENT: [Color; 3] = [
         Color::Rgb(255, 210, 90),
@@ -355,17 +339,15 @@ pub fn draw_title(frame: &mut Frame) {
             .bg(colors::LETTERBOX_BG),
     );
 
-    // アートを画面いっぱいに表示する(TERM独自拡張。#148)。
+    // アートを画面いっぱいに表示する。
     let art_lines = title_art_lines(area.width, area.height);
     frame.render_widget(
         Paragraph::new(Text::from(art_lines)).alignment(Alignment::Center),
         area,
     );
 
-    // ロゴ・案内文はアートの上に重ね描きする(TERM独自拡張。#148。ユーザー提案:
-    // 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。パネルの
-    // 地色(LETTERBOX_BG)がその部分のアートを覆い隠す形で表示されるため、
-    // 背景の絵柄によらず文字が読める。
+    // ロゴ・案内文はアートの上に重ね描きする。パネルの地色(LETTERBOX_BG)がその部分の
+    // アートを覆い隠すため、背景の絵柄によらず文字が読める。
     let text_style = Style::default()
         .fg(colors::PANEL_TEXT)
         .bg(colors::LETTERBOX_BG);
@@ -389,26 +371,19 @@ pub fn draw_title(frame: &mut Frame) {
 }
 
 // ---------------------------------------------------------------------------
-// ヘルプ画面(TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)
+// ヘルプ画面
 // ---------------------------------------------------------------------------
 
-/// ヘルプ画面のジュークボックスUI状態(TERM独自拡張。#151。ユーザー指摘:
-/// 「ヘルプページミュージック選んで再生する機能ほしい」)。カーソル位置
-/// (`selection`)と現在再生中の曲(`playing`、無ければ`None`)を保持する。
+/// ヘルプ画面のジュークボックスUI状態。カーソル位置(`selection`)と
+/// 現在再生中の曲(`playing`、無ければ`None`)を保持する。
 pub struct HelpJukeboxState {
     pub selection: usize,
     pub playing: Option<usize>,
 }
 
-/// 操作キー・デバッグショートカット一覧を表示するヘルプ画面。`jukebox`が
-/// `Some`の時のみ、埋め込みBGMを選んで試聴できるジュークボックス欄を表示する
-/// (TERM独自拡張。#151)。一時停止中のヘルプオーバーレイでは実際のプレイ中BGMと
-/// 混ざってしまうため対象外にし、タイトルから開く独立画面のみで有効にする。
-/// `standalone`はタイトルから開いた独立画面(true、Escでタイトルへ戻る)か、プレイ中の
-/// 一時停止オーバーレイ(false、Escはオーバーレイを閉じてプレイ再開するだけ)かを表す
-/// (TERM独自拡張。#155。以前は文脈を問わず「Qキーでタイトルへ戻る」と表示しており、
-/// 一時停止オーバーレイ表示中は実際の挙動と食い違っていた。終了キー自体は元Qだったが
-/// 「すべてのQキーをESCに変更」の指摘でEscへ変更した(#204))。
+/// 操作キー・デバッグショートカット一覧のヘルプ画面。`jukebox`が`Some`の時のみジュークボックス
+/// 欄を出す(一時停止中はプレイ中BGMと混ざるため、タイトルから開く独立画面のみ)。`standalone`
+/// は独立画面(true、Escでタイトルへ)か一時停止オーバーレイ(false、Escは閉じるだけ)かを表す。
 pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalone: bool) {
     let area = frame.area();
 
@@ -459,7 +434,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         line("C: 周辺ブロックを2色に統一   L: ライフ+1   A: AIRを100%に回復"),
         line("R: 自分より上のブロックを全削除   K: 画面内のX/ダイヤを全てスターに"),
         line("B: ボムを画面内のランダムな位置に設置"),
-        line("T: オートプレイ ON/OFF(無敵も同時にON)   G: 無敵(ミス無効) ON/OFF"),
+        line("T: オートプレイ ON/OFF   G: 無敵(ミス無効) ON/OFF(Tとは独立)"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
         line(", / .: 揺れ時間 長く/短く"),
@@ -500,9 +475,8 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
 }
 
 // ---------------------------------------------------------------------------
-// モードセレクト画面(TERM独自拡張。#112。ユーザー指摘: 「起動フローに
-// モードセレクト画面を追加」)。タイトルでEnterを押した直後に経由し、ここで
-// 選んだコースのゴール深度で新しいゲームが始まる。
+// モードセレクト画面。タイトルでEnterを押した直後に経由し、ここで選んだコースの
+// ゴール深度で新しいゲームが始まる。
 // ---------------------------------------------------------------------------
 
 /// モードセレクト画面での選択(spec.md 1章の確定事実「コースは2種類: 500m
@@ -514,8 +488,7 @@ pub enum CourseChoice {
 }
 
 impl CourseChoice {
-    /// ↑/↓・←/→どちらでも切り替える(TERM独自拡張)。選択肢が2つだけなので
-    /// 方向を問わず反転すればよい。
+    /// ↑/↓・←/→どちらでも切り替える。選択肢が2つだけなので方向を問わず反転すればよい。
     pub fn toggle(self) -> Self {
         match self {
             CourseChoice::Easy => CourseChoice::Normal,
@@ -531,9 +504,8 @@ impl CourseChoice {
         }
     }
 
-    /// 保存済みのゴール深度から選択を復元する(TERM独自拡張。前回選んだコースを
-    /// 次回起動時のモードセレクト画面の初期選択として引き継ぐ)。
-    /// `COURSE_EASY_DEPTH_M`以下ならイージー、それより大きければノーマルとみなす。
+    /// 保存済みのゴール深度から選択を復元する(前回選んだコースを次回起動時の初期選択に
+    /// 引き継ぐ)。`COURSE_EASY_DEPTH_M`以下ならイージー、それより大きければノーマルとみなす。
     pub fn from_depth_goal_m(depth_goal_m: usize) -> Self {
         if depth_goal_m <= crate::constants::COURSE_EASY_DEPTH_M {
             CourseChoice::Easy
@@ -606,9 +578,7 @@ pub fn draw_mode_select(frame: &mut Frame, selection: CourseChoice) {
 }
 
 // ---------------------------------------------------------------------------
-// 設定画面(TERM独自拡張。ユーザー指摘: 「サウンドON/OFFではなくMUSIC/SEを
-// それぞれトグルできるように。設定画面つくって、カーソルで選んでスペースで
-// トグルできるように」)
+// 設定画面
 // ---------------------------------------------------------------------------
 
 /// 設定画面での選択項目。
@@ -616,61 +586,44 @@ pub fn draw_mode_select(frame: &mut Frame, selection: CourseChoice) {
 pub enum SettingsChoice {
     Music,
     Se,
-    /// Xブロック(岩)の出現率(%)。TERM独自拡張。ユーザー指摘: 「設定でXブロックの
-    /// 配分量・AIRの配分量をいじれるようにしたい」
+    /// Xブロック(岩)の出現率(%)。
     RockRate,
-    /// AIR(酸素カプセル)の出現率(%)。TERM独自拡張。
+    /// AIR(酸素カプセル)の出現率(%)。
     AirRate,
-    /// スターブロックの出現率(%、0まで下げられる)。TERM独自拡張。
-    /// ユーザー指摘: 「スターブロック比率0〜」
+    /// スターブロックの出現率(%、0まで下げられる)。
     StarRate,
-    /// ダイヤブロックの出現率(%、0まで下げられる)。TERM独自拡張。
-    /// ユーザー指摘: 「ダイヤブロック0%設定」
+    /// ダイヤブロックの出現率(%、0まで下げられる)。
     DiamondRate,
     /// アイテムブロック(ClearAbove、ショートカットR効果)の出現率(%、0まで下げられる)。
-    /// TERM独自拡張。ユーザー指摘: 「各種アイテムの出現頻度の設定項目増やして」
     ItemClearAboveRate,
     /// アイテムブロック(UnifyColors、ショートカットC効果)の出現率(%、同上)。
     ItemUnifyColorsRate,
     /// アイテムブロック(StarifyScreen、ショートカットK効果)の出現率(%、同上)。
     ItemStarifyScreenRate,
-    /// 出現する色ブロックの色数(1〜4)。TERM独自拡張。ユーザー指摘: 「出現する色
-    /// ブロックの色数を設定で選べるようにしたい(1〜4)」
+    /// 出現する色ブロックの色数(1〜4)。
     ColorCount,
-    /// 色ブロックの結合しやすさ(%、0まで下げられる)。TERM独自拡張。
-    /// ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」
+    /// 色ブロックの結合しやすさ(%、0まで下げられる)。
     ColorClusterRate,
-    /// フィールド幅(列数)。TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更
-    /// できるようにして」。新規ゲーム開始時にのみ反映される。
+    /// フィールド幅(列数)。新規ゲーム開始時にのみ反映される。
     FieldWidth,
-    /// ブロック落下速度(tick間隔, ms)。TERM独自拡張。従来はデバッグショートカット
-    /// ([ ])でのみ調整可能だったが、ユーザー指摘: 「ブロックが落ちるスピードの
-    /// 設定値がないよね」を受け、設定画面からも調整できるようにした。
+    /// ブロック落下速度(tick間隔, ms)。デバッグショートカット([ ])と同じ値を設定画面からも調整する。
     BlockFallSpeed,
-    /// キャラ自身の自由落下速度(tick間隔, ms)。TERM独自拡張。従来はデバッグ
-    /// ショートカット(-/=)でのみ調整可能だったが、ユーザー指摘: 「設定画面から、
-    /// キャラに関する落下などの設定がなくなってる」を受け、設定画面からも
-    /// 調整できるようにした。
+    /// キャラ自身の自由落下速度(tick間隔, ms)。デバッグショートカット(-/=)と同じ値を設定画面からも調整する。
     PlayerFallSpeed,
-    /// 横移動(MoveLeft/MoveRight)のクールダウン間隔(ms、小さいほど速い)。TERM独自
-    /// 拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」。
+    /// 横移動(MoveLeft/MoveRight)のクールダウン間隔(ms、小さいほど速い)。
     MoveSpeed,
     /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms)。
-    /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」。
     DodgeRecoveryMs,
-    /// ボム出現頻度(%、0まで下げられる)。TERM独自拡張。#96。
+    /// ボム出現頻度(%、0まで下げられる)。
     BombRate,
-    /// #85調査用のブロック状態遷移ログ(SQLite)を記録するかどうか(TERM独自拡張。
-    /// #167。ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」)。
+    /// 調査用のブロック状態遷移ログ(SQLite)を記録するかどうか。
     DebugLogEnabled,
-    /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=従来通り即座に連鎖)。
-    /// TERM独自拡張。#187。ユーザー指摘: 「ブロックが消えて、連鎖的に次ブロックが
-    /// 消えるとき、0msで連続するのではなく一定のインターバルで連鎖するように」。
+    /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=即座に連鎖)。
     ChainVanishInterval,
 }
 
 impl SettingsChoice {
-    /// ↓キーでの選択項目の巡回(TERM独自拡張)。
+    /// ↓キーでの選択項目の巡回。
     pub fn cycle(self) -> Self {
         match self {
             SettingsChoice::Music => SettingsChoice::Se,
@@ -695,9 +648,7 @@ impl SettingsChoice {
         }
     }
 
-    /// ↑キーでの選択項目の巡回(`cycle`の逆方向、TERM独自拡張)。ユーザー指摘:
-    /// 「設定画面でカーソル↑おしても下いくんやけど」を受け、FaceUp/FaceDownで
-    /// 同じ`cycle`を呼んでいた(常に同じ向きにしか進めなかった)バグを修正するために追加した。
+    /// ↑キーでの選択項目の巡回(`cycle`の厳密な逆方向)。
     pub fn cycle_back(self) -> Self {
         match self {
             SettingsChoice::Music => SettingsChoice::ChainVanishInterval,
@@ -723,11 +674,9 @@ impl SettingsChoice {
     }
 }
 
-/// 設定画面を描画する。MUSIC/SEのON/OFF、Xブロック/AIR/スター/ダイヤ・アイテム3種の
-/// 出現率(%)、色ブロックの色数、現在選択中の項目をカーソル(反転表示)で示す。
-/// `standalone`はタイトルから開いた独立画面(true、Escでタイトルへ戻る)か、プレイ中の
-/// 一時停止オーバーレイ(false、Escはオーバーレイを閉じてプレイ再開するだけ)かを表す
-/// (TERM独自拡張。#155。終了キーは元Qだったが#204でEscへ変更した)。
+/// 設定画面を描画する。各設定値と、現在選択中の項目をカーソル(反転表示)で示す。
+/// `standalone`はタイトルから開いた独立画面(true、Escでタイトルへ戻る)か、
+/// 一時停止オーバーレイ(false、Escは閉じてプレイ再開するだけ)かを表す。
 #[allow(clippy::too_many_arguments)]
 pub fn draw_settings(
     frame: &mut Frame,
@@ -763,10 +712,8 @@ pub fn draw_settings(
     );
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-    // 設定項目が増えるたびに縦に伸びてきた(#108でアイテム3種のrate行を追加した際、
-    // 従来の50%では下部のms_line(落下速度等)が枠からクリップして見えなくなった。
-    // ユーザー指摘: 「設定画面から時間要素の細かいものが結構消えてる」)。項目追加を
-    // 見越して余裕を持たせる。
+    // 高さが足りないと下部の行が枠からクリップして見えなくなるため、項目追加を見越して
+    // 縦に余裕を持たせる(必要行数はテスト`settings_screen_box_is_tall_enough_...`で確認)。
     let settings_area = centered_rect(60, 90, frame_rect);
     frame.render_widget(Clear, settings_area);
 
@@ -982,11 +929,9 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
 
     let buf = frame.buffer_mut();
 
-    // 直近の重力ティックで落下した(移動後の位置)→(移動前の位置)のマップ(TERM独自拡張。
-    // ユーザー指摘: 「ブロックの落ち方をコマ送りでなくピクセル単位で滑らかにしてほしい」)。
-    // 移動後の位置は、静的な通常描画では一旦Emptyとして扱い(まだ本来の場所に「到着」
-    // していない、宙にある状態を表現するため)、実際の内容はこのあと`draw_falling_blocks`が
-    // 移動前→移動後を補間した位置へ重ねて描画する。
+    // 直近の重力ティックで落下した(移動後の位置)→(移動前の位置)のマップ。移動後の位置は
+    // 静的な通常描画では一旦Emptyとして扱い(まだ到着していない宙にある状態)、実際の内容は
+    // このあと`draw_falling_blocks`が移動前→移動後を補間した位置へ重ねて描画する。
     let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
 
     for screen_row in 0..visible_rows {
@@ -1009,15 +954,9 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             } else {
                 BoardCell::Empty
             };
-            // プレイヤーがいる論理セルも含め、常にそのマス本来の内容を描画する
-            // (プレイヤーは掘削・移動でEmptyになったマスにしか進入できないため、
-            // 通常はここでEmpty背景が描かれるだけになる)。プレイヤー自身のスプライトは
-            // このループの外側で、見た目補間アニメーション込みで別途重ねて描画する
-            // (spec.md 9.5・9章TERM独自拡張)。
-            //
-            // 支えを失って揺れている(落下開始前の猶予期間中の)ブロックは、左右に
-            // 小刻みなジッターを加えて描画する(TERM独自拡張。ユーザー指摘: 「落下開始
-            // までのアニメーションぐらぐらしてほしい(各種ブロック)」)。
+            // プレイヤーがいるセルも含め常にそのマス本来の内容を描画し、プレイヤーの
+            // スプライトはループの外側で補間アニメーション込みで重ねる(spec.md 9.5)。
+            // 支えを失って揺れている(落下開始前の猶予期間中の)ブロックは左右に小刻みなジッターを加える。
             let draw_x = if game.is_cell_shaking(board_row, col) {
                 let jitter = shake_jitter_x(game.player.elapsed_seconds, board_row, col);
                 (x as i32 + jitter).clamp(
@@ -1027,16 +966,9 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             } else {
                 x
             };
-            // 消滅した直後のセルは一瞬フラッシュしてから背景色へ消えていく
-            // (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出して
-            // ほしい」)。
-            // ボム爆発の爆風が届いた直後のセルは、スター変換後の見た目を炎の色で
-            // 一瞬覆う(TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、
-            // ボンバーマンTERMのように炎アニメーションほしい」)。
-            // 最終ゴール(深度1000m)到達時、盤面の底(実際のフィールドより深い、
-            // 本来は描画対象の無い行)に地底の地面を表示し、クリアした実感を出す
-            // (TERM独自拡張。#182。ユーザー指摘: 「最終ゴールは地底の地面を表示して
-            // クリアした感じにしてほしい」)。
+            // 優先順: クリア後の盤面の底(フィールドより深い行)は地底の地面 > 爆風直後の
+            // セルは炎色で一瞬覆う > 消滅直後のセルはフラッシュしてから背景色へ消える >
+            // チェックポイント安全地帯のEmptyは地面ビジュアル > 通常描画。
             if game.status == GameStatus::Cleared && board_row >= game.board.depth_rows() {
                 fill_bedrock_ground(buf, draw_x, y);
             } else if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
@@ -1065,8 +997,7 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
 }
 
 /// 画面外(まだスクロールインしていない、`top_row`より浅い行)にボムがある場合、
-/// そのボムがある列全体を赤く点滅させて警告する(TERM独自拡張。#175。ユーザー指摘:
-/// 「知らない間に画面外に爆弾がいるので縦列を赤くピカピカさせること」)。
+/// そのボムがある列全体を赤く点滅させて警告する。
 fn draw_off_screen_bomb_warnings(
     buf: &mut Buffer,
     inner: Rect,
@@ -1103,21 +1034,12 @@ fn draw_off_screen_bomb_warnings(
     }
 }
 
-/// ボム(TERM独自拡張。#96/#123/#125/#133)を盤面の上に重ねて描画する。ブロックとは
-/// 別レイヤーのオブジェクトなので、通常のセル描画ループとは独立してここで扱う。段階
-/// (`BombPhase`)に応じて、白ボンの登場(Entering)→ボムが転がってくる(Rolling)→
-/// 設置されて点滅カウントダウン(Ticking)の3段階を描き分ける(ユーザー指摘: 「白ボンが
-/// 画面の外からとことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...
-/// ってなって、爆発する」)。白ボンはボムより1行上に表示する(ユーザー指摘: 「爆弾は
-/// キャラよりも下側にも配置されるようにしてほしい」)。起爆が近づくほど導火線の火花の
-/// 点滅を速める(既存の「揺れ」「スター点滅」と同じ、爆発前に必ず視覚的な予兆を
-/// 出す設計方針)。転がり中(Rolling)は横移動だけでなく`bomb_roll_is_bouncing_up`で
-/// 縦にも弾ませる(#133。ユーザー指摘: 「ぽーんぽーんぽんぽんころころ...って弾ませ
-/// ながらモーションがないと回転寿司みたいにすーって入ってきちゃ駄目」)。
+/// ボムを盤面の上に重ねて描画する(ブロックとは別レイヤーなので通常のセル描画ループとは独立)。
+/// `BombPhase`に応じて 白ボン登場(Entering)→転がり(Rolling、縦にも弾ませる)→落下・バウンド
+/// (Settling)→設置後の点滅カウントダウン(Ticking) を描き分け、起爆が近づくほど点滅を速める。
 fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize, game: &Game) {
     for bomb in game.bombs() {
-        // originとposは常に同じ行(TERM独自拡張。#123)で、ボム自体はその行に描く。
-        // 白ボンはユーザー指摘により1行上に表示する。
+        // originとposは常に同じ行で、ボム自体はその行に、白ボンはその1行上に描く。
         let bomb_row = bomb.pos.0;
         let shirobon_row = bomb_row.saturating_sub(1);
 
@@ -1153,9 +1075,8 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 );
             }
             BombPhase::Settling => {
-                // 落下・左右バウンド中(TERM独自拡張。#140)は現在位置(`bomb.pos`、
-                // 重力・跳ねに応じて毎tick更新される)へそのまま描く。起爆カウント
-                // ダウンはまだ始まっていないため、火花は暗い方の色で固定する。
+                // 落下・左右バウンド中は現在位置(`bomb.pos`、毎tick更新される)へそのまま描く。
+                // 起爆カウントダウンはまだ始まっていないため、火花は暗い方の色で固定する。
                 let Some((x, y)) =
                     cell_screen_pos(inner, top_row, visible_rows, bomb.pos.0, bomb.pos.1)
                 else {
@@ -1195,7 +1116,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
 }
 
 /// フィールド内の論理セル位置(行・列)を、現在のスクロール位置(`top_row`)・
-/// 可視行数を踏まえて画面座標(x, y)へ変換する(TERM独自拡張。#125)。範囲外なら`None`。
+/// 可視行数を踏まえて画面座標(x, y)へ変換する。範囲外なら`None`。
 fn cell_screen_pos(
     inner: Rect,
     top_row: usize,
@@ -1206,7 +1127,7 @@ fn cell_screen_pos(
     cell_screen_pos_f32(inner, top_row, visible_rows, row, col as f32)
 }
 
-/// `cell_screen_pos`の列位置を小数(補間中の途中位置)で受け取る版(TERM独自拡張。#125)。
+/// `cell_screen_pos`の列位置を小数(補間中の途中位置)で受け取る版。
 fn cell_screen_pos_f32(
     inner: Rect,
     top_row: usize,
@@ -1233,8 +1154,7 @@ fn cell_screen_pos_f32(
     Some((x, y))
 }
 
-/// 白ボンのスプライト(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
-/// とことこやってきて」)。プレイヤースプライトと同じ4文字×2行の描画方式を使う。
+/// 白ボンのスプライト。プレイヤースプライトと同じ4文字×2行の描画方式を使う。
 fn draw_shirobon_sprite(buf: &mut Buffer, x: u16, y: u16) {
     for (dy, line) in [" oo ", " () "].iter().enumerate() {
         for (dx, ch) in line.chars().enumerate() {
@@ -1250,16 +1170,11 @@ fn draw_shirobon_sprite(buf: &mut Buffer, x: u16, y: u16) {
     }
 }
 
-/// 転がり中(Rolling)の弾みの周期。区間を`BOMB_ROLL_BOUNCE_COUNT`回に分割し、
-/// 各区間の前半だけ1マス上へ跳ねさせる(TERM独自拡張。#133)。
+/// 転がり中(Rolling)の弾みの回数。区間をこの回数に分割し、各区間の前半だけ1マス上へ跳ねさせる。
 const BOMB_ROLL_BOUNCE_COUNT: u32 = 3;
 
-/// 進捗`t`(0.0=転がり開始、1.0=設置直前)の時点でボムが1マス上に跳ねている
-/// (=ジャンプ中)かどうか(TERM独自拡張。#133。ユーザー指摘: 「爆弾がぽーん
-/// ぽーんぽんぽんころころ...って弾ませながらモーションがないと回転寿司みたいに
-/// すーって入ってきちゃ駄目」)。横方向の線形移動しかしていなかった従来の
-/// 見た目(コンベア/回転寿司のようにすっと滑るだけ)を避けるため、縦方向にも
-/// 複数回の跳ねを加える。
+/// 進捗`t`(0.0=転がり開始、1.0=設置直前)の時点でボムが1マス上に跳ねているかどうか。
+/// 横方向の線形移動だけだとコンベアのように滑って見えるため、縦方向にも複数回の跳ねを加える。
 fn bomb_roll_is_bouncing_up(t: f32) -> bool {
     let t = t.clamp(0.0, 1.0);
     if t >= 1.0 {
@@ -1270,20 +1185,14 @@ fn bomb_roll_is_bouncing_up(t: f32) -> bool {
     local < 0.5
 }
 
-/// 導火線の火花が「ちりちり」明滅する周期(TERM独自拡張。#130)。この時間ごとに
-/// 火花の位置・グリフを切り替え、単調な点滅でなく飛び散るような見た目にする。
+/// 導火線の火花が「ちりちり」明滅する周期。この時間ごとに火花の位置・グリフを
+/// 切り替え、単調な点滅でなく飛び散るような見た目にする。
 const BOMB_CRACKLE_FRAME_MS: u32 = 70;
 const BOMB_CRACKLE_GLYPHS: [char; 4] = ['\'', '`', '.', '*'];
 
-/// ボム本体のスプライト(TERM独自拡張。#96/#125/#130/#138。ユーザー指摘: 「ボムは、
-/// 丸い「いかにもな」爆弾の形状しておいてほしい」「爆弾、背景と同化してるから、
-/// もっと輪郭くっきり、火花ちりちりアニメーションさせて」「爆発直前で爆弾がチカチカ
-/// 激しく赤く光るようにして」)。以前は本体グリフの前景色にしか`BOMB_BODY_FG`を
-/// 使わず、周囲はフィールド背景色のまま透過していたため、暗い色同士で輪郭が背景に
-/// 溶け込んで見えていた。セル全体を本体色(`body`。起爆間際は`bomb_body_color`で
-/// 赤く点滅させたものを渡す)で塗りつぶした上に、明るい縁取り色(`BOMB_RIM_FG`)で
-/// 丸い輪郭を描き、上段の導火線の火花は`crackle_ms`に応じて位置・グリフを切り替えて
-/// ちりちりと弾けるようにする。
+/// ボム本体のスプライト。セル全体を本体色`body`(起爆間際は`bomb_body_color`で赤点滅)で
+/// 塗りつぶした上に明るい縁取り色(`BOMB_RIM_FG`)で丸い輪郭を描く(背景色を透過させると
+/// 暗い色同士で輪郭が溶ける)。上段の火花は`crackle_ms`に応じて位置・グリフを切り替える。
 fn draw_bomb_sprite(
     buf: &mut Buffer,
     x: u16,
@@ -1323,9 +1232,8 @@ fn draw_bomb_sprite(
     put(buf, x + 3, y + 1, ')', rim, body);
 }
 
-/// ボムの点滅が「明るい方」の周期かどうか(TERM独自拡張。#96)。残り時間が
-/// `BOMB_BLINK_FAST_THRESHOLD_MS`を切ると点滅周期を短くし、起爆間近であることを
-/// 強調する。
+/// 導火線の火花の点滅周期。残り時間が`BOMB_BLINK_FAST_THRESHOLD_MS`を切ると
+/// 短い方の周期に切り替え、起爆間近であることを強調する。
 const BOMB_BLINK_PERIOD_MS: u32 = 400;
 const BOMB_BLINK_PERIOD_FAST_MS: u32 = 150;
 const BOMB_BLINK_FAST_THRESHOLD_MS: u32 = 1000;
@@ -1339,16 +1247,12 @@ fn bomb_is_bright_frame(remaining_ms: u32) -> bool {
     (remaining_ms / period).is_multiple_of(2)
 }
 
-/// 起爆間際は導火線の火花だけでなく本体そのものも激しく赤く点滅させる
-/// (TERM独自拡張。#138。ユーザー指摘: 「爆発直前で爆弾がチカチカ激しく赤く
-/// 光るようにして」)。残り時間が`BOMB_DANGER_MS`(#168で導火線カウントダウンSE
-/// と共有する定数に切り出した)を切ったら、`BOMB_BODY_FLASH_PERIOD_MS`ごとに
-/// 通常の本体色と警告色(赤)を切り替える。
+/// 起爆間際は火花だけでなく本体も激しく赤く点滅させる。残り時間が`BOMB_DANGER_MS`
+/// (導火線カウントダウンSEと共有)を切ったら、この周期で本体色と警告色(赤)を切り替える。
 const BOMB_BODY_FLASH_PERIOD_MS: u32 = 100;
 
-/// 画面外のボム警告(縦列の赤ピカピカ)を赤く見せる時間(ms、TERM独自拡張。#175・
-/// #203・#205)。常時赤に近い遅い点滅は盤面の可視性を奪うため、短く点灯して
-/// すぐ消える非対称なデューティ比にする(ユーザー指摘: 「50ms赤点、500ms滅」)。
+/// 画面外のボム警告(縦列の赤点滅)の点灯時間(ms)。常時赤に近い遅い点滅は盤面の可視性を
+/// 奪うため、短く点灯してすぐ消える非対称なデューティ比(50ms点灯/500ms消灯)にする。
 const OFF_SCREEN_BOMB_WARNING_ON_MS: u32 = 50;
 /// 画面外のボム警告を消灯させておく時間(ms)。
 const OFF_SCREEN_BOMB_WARNING_OFF_MS: u32 = 500;
@@ -1364,10 +1268,8 @@ fn bomb_body_color(remaining_ms: u32) -> Color {
     }
 }
 
-/// 直近の重力ティックで落下したブロックを、移動前の位置から移動後の位置へ向けて
-/// 滑らかに補間した画面座標へ描画する(TERM独自拡張。ユーザー指摘: 「ブロックの落ち方を
-/// コマ送りでなくピクセル単位で滑らかにしてほしい」)。連結・接続表現(丸み縁取り等)は
-/// 移動が完了してから通常描画に委ねるため、ここでは単色の塗りつぶしのみ行う。
+/// 直近の重力ティックで落下したブロックを、移動前→移動後を滑らかに補間した画面座標へ描画する。
+/// 静止時と同じグリフ模様で描き、接続罫線の判定は着地先時点の盤面を基準にする。
 fn draw_falling_blocks(
     buf: &mut Buffer,
     inner: Rect,
@@ -1383,17 +1285,13 @@ fn draw_falling_blocks(
         } else {
             BoardCell::Empty
         };
-        // 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyだが消滅フラッシュは
-        // まだ残っている(TERM独自拡張。#172。ユーザー指摘: 「崩れてきたブロックが、
-        // 接地する1コマ前でスルスルと消えてしまう」)。盤面から読めない間は消滅直前の
-        // 種類で補い、最後まで落ちきってからフラッシュへ移る見た目にする。
+        // 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyだが消滅フラッシュはまだ残っている。
+        // 盤面から読めない間は消滅直前の種類で補い、最後まで落ちきってからフラッシュへ移る見た目にする。
         let cell = match cell {
             BoardCell::Empty => {
                 let resolved = game.recently_vanished_kind((to_row, to_col));
-                // #174: このフォールバック分岐に入ったこと自体(補えたか/丸ごと
-                // スキップしたか)をログに残す。この分岐は同一tick着地+自動消滅の
-                // ような稀なケースでしか通らないため、毎フレーム描画中でも記録量は
-                // 少ない。
+                // このフォールバック分岐に入ったこと(補えたか/スキップしたか)をログに残す。
+                // 稀なケースでしか通らないため、毎フレーム描画中でも記録量は少ない。
                 game.log_render_fallback((to_row, to_col), (from_row, from_col), resolved);
                 match resolved {
                     Some(kind) => kind,
@@ -1420,19 +1318,14 @@ fn draw_falling_blocks(
         if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
             continue; // 補間の一時的なはみ出しは描画をスキップする
         }
-        // 落下中も静止時と同じグリフ模様(色ブロックの接続罫線・岩のXマーク・
-        // ダイヤ/スター等の固定グリフ)で描画する(TERM独自拡張。ユーザー指摘:
-        // 「落下アニメーションで模様が消えて、色味だけでしか認識できない」
-        // 「あいまいな物体が落ちているように見える」)。接続罫線の判定は着地先
-        // (to_row, to_col)時点の盤面を基準にする(その時点で既に確定している)。
+        // 落下中も静止時と同じグリフ模様で描画する(単色塗りだと何が落ちているか分からない)。
+        // 接続罫線の判定は着地先(to_row, to_col)時点の盤面を基準にする(その時点で既に確定している)。
         draw_logical_cell(buf, x, y, &game.board, to_row, to_col, cell);
     }
 }
 
-/// 揺れ中のブロックにかける、左右の小刻みなジッター(文字数単位、TERM独自拡張)。
-/// セルの座標から求めた位相をずらすことで、隣接セルが機械的に完全同期して見えるのを
-/// 避けつつ、同じ塊はおおむね一体で震える(ユーザー指摘: 「落下開始までのアニメーション
-/// ぐらぐらしてほしい(各種ブロック)」)。
+/// 揺れ中のブロックにかける、左右の小刻みなジッター(文字数単位)。セルの座標から求めた
+/// 位相をずらすことで、隣接セルが機械的に完全同期して見えるのを避けつつ、同じ塊はおおむね一体で震える。
 fn shake_jitter_x(elapsed_secs: f32, row: usize, col: usize) -> i32 {
     const FREQ: f32 = 18.0;
     let phase = (row as f32 * 0.7 + col as f32 * 1.3) % std::f32::consts::TAU;
@@ -1446,9 +1339,8 @@ fn shake_jitter_x(elapsed_secs: f32, row: usize, col: usize) -> i32 {
     }
 }
 
-/// プレイヤーのスプライトを、直前の論理位置から現在位置へ補間した画面座標へ描画する
-/// (TERM独自拡張、9章)。ロジック上の当たり判定・掘削・落下判定は常に整数マス基準の
-/// ままで、ここで行うのはあくまで描画位置の補間のみ。
+/// プレイヤーのスプライトを、直前の論理位置から現在位置へ補間した画面座標へ描画する(9章)。
+/// ロジック上の当たり判定・掘削・落下判定は常に整数マス基準のままで、ここで行うのは描画位置の補間のみ。
 fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
     let (prev_row, prev_col) = game.render_prev_position();
     let (cur_row, cur_col) = game.player.position();
@@ -1462,10 +1354,8 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
         return; // スクロール範囲外(補間中に上端を跨ぐ極端なケースの防御)
     }
 
-    // 「わ〜!」スライダー演出中(TERM独自拡張)は、直前の移動方向へさらに滑り込み、
-    // 進捗が進むにつれ本来の位置へ戻ってくる(ユーザー指摘: 「ブロックが落ち始める
-    // 直前に移動してにげたとき、「わ〜!」ってスライダー(アニメーションしてねキャラ)
-    // して切り間に合う感じ」)。
+    // 「わ〜!」スライダー演出中は、直前の移動方向へさらに滑り込み、
+    // 進捗が進むにつれ本来の位置へ戻ってくる。
     let dodge_offset_cells = if game.is_dodge_sliding() {
         let dir_col = (cur_col as f32 - prev_col as f32).signum();
         (1.0 - game.dodge_slide_progress()) * DODGE_SLIDE_OFFSET_CELLS * dir_col
@@ -1473,9 +1363,7 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
         0.0
     };
     let px = inner.x as f32 + interp_col * CELL_W as f32 + dodge_offset_cells * CELL_W as f32;
-    // 「天に召される」演出中(TERM独自拡張)は、進捗に応じてスプライトを上へ
-    // ドリフトさせる(ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、
-    // 一度天に召される演出をして」)。
+    // 「天に召される」演出中は、進捗に応じてスプライトを上へドリフトさせる。
     let ascend_offset = game.ascend_progress() * ASCEND_RISE_CELLS * CELL_H as f32;
     let py = inner.y as f32 + screen_row * CELL_H as f32 - ascend_offset;
     if px < 0.0 || py < 0.0 {
@@ -1512,10 +1400,10 @@ fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
     }
 }
 
-/// 「わ〜!」スライダー演出で最大どれだけ滑らせるか(論理セル単位、TERM独自拡張)。
+/// 「わ〜!」スライダー演出で最大どれだけ滑らせるか(論理セル単位)。
 const DODGE_SLIDE_OFFSET_CELLS: f32 = 0.6;
 
-/// 「天に召される」演出でスプライトが上へ昇る距離(論理セル単位、TERM独自拡張)。
+/// 「天に召される」演出でスプライトが上へ昇る距離(論理セル単位)。
 const ASCEND_RISE_CELLS: f32 = 2.0;
 
 /// 1論理セルぶん(4文字×2行)を描画する。
@@ -1532,12 +1420,8 @@ fn draw_logical_cell(
         BoardCell::Empty => fill_block(buf, x, y, colors::FIELD_EMPTY_BG),
         BoardCell::Color(kind) => draw_color_block(buf, x, y, board, row, col, kind),
         BoardCell::Rock { hits } => draw_rock_block(buf, x, y, board, row, col, hits),
-        // AIRはカプセル(丸薬)らしいシルエットにする(TERM独自拡張。#106/#128。
-        // ユーザー指摘: 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」。
-        // #106時点では枠線の角glyphを丸めるだけで、セル自体の背景は正方形のまま
-        // 塗りつぶされていたため依然として正方形に見えていた。`draw_rounded_unit`
-        // は四隅のセルをフィールド背景色で斜めに欠き取り、実際に輪郭が丸まった
-        // シルエットになるようにする。
+        // AIRはカプセル(丸薬)らしいシルエットにする。`draw_rounded_unit`が四隅を
+        // フィールド背景色で欠き取り、正方形でなく輪郭の丸まったシルエットになる。
         BoardCell::Oxygen => draw_rounded_unit(
             buf,
             x,
@@ -1547,12 +1431,8 @@ fn draw_logical_cell(
             colors::OXYGEN_BG,
         ),
         BoardCell::Diamond => draw_diamond_block(buf, x, y, board, row, col),
-        // スターブロックは氷の結晶のようにきらめかせる(TERM独自拡張。#134。ユーザー
-        // 指摘: 「スター化したブロックはもっとキラキラしたモーションしてほしい
-        // 本当に氷見たく いまのままだとただの白い正方形だ」)。#128/#132と同じく
-        // `draw_rounded_unit`で正方形の塗りつぶしをやめ、さらに4マスを同時に一斉
-        // 点滅させるのでなく`star_sparkle_content`で位置ごとに位相をずらし、複数
-        // 箇所が順にきらめくようにする。
+        // スターブロックは氷の結晶のようにきらめかせる。四隅を欠き取った輪郭にし、
+        // `star_sparkle_content`で4マスの位相をずらして複数箇所が順にきらめくようにする。
         BoardCell::Star { visible_ms } => draw_rounded_unit(
             buf,
             x,
@@ -1561,13 +1441,9 @@ fn draw_logical_cell(
             colors::STAR_FG,
             colors::star_bg(visible_ms, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS),
         ),
-        // アイテムブロックも他ブロック同様、効果ごとに専用の形状にする(TERM独自拡張。
-        // ユーザー指摘: 「他のアイテムも相手有無特有の形状にしたい」)。ClearAboveは
-        // 頭上を吹き飛ばすイメージで上向き矢印を、UnifyColorsは色が混ざり合う
-        // イメージで陰陽風の分割円を上段に添える。AIR(#128)と同じく、`draw_fixed_unit`
-        // の「セル全体を正方形に塗りつぶす」見た目ではアイテムらしさが薄いという
-        // 指摘(#132。ユーザー指摘: 「C/R/Kアイテムもアイテムっぽい形状に変えよう」)
-        // を受け、`draw_rounded_unit`で四隅を欠き取った輪郭にした。
+        // アイテムブロックは効果ごとに専用の形状にする。ClearAboveは頭上を吹き飛ばす
+        // イメージで上向き矢印、UnifyColorsは色が混ざり合うイメージで陰陽風の分割円を
+        // 上段に添え、いずれも四隅を欠き取った輪郭にする。
         BoardCell::Item(ItemEffect::ClearAbove) => draw_rounded_unit(
             buf,
             x,
@@ -1596,8 +1472,7 @@ fn draw_logical_cell(
     }
 }
 
-/// スターブロックのキラキラ点滅グリフ(TERM独自拡張。ユーザー指摘: 「スターブロックは
-/// 消えるまえからキラキラしてほしい」)。画面内に入ってから消えるまでの間ずっと、
+/// スターブロックのキラキラ点滅グリフ。画面内に入ってから消えるまでの間ずっと、
 /// `STAR_SPARKLE_PERIOD_MS`ごとに☆/★を交互に切り替える。
 fn star_glyph(visible_ms: u32) -> char {
     if (visible_ms / STAR_SPARKLE_PERIOD_MS).is_multiple_of(2) {
@@ -1607,18 +1482,15 @@ fn star_glyph(visible_ms: u32) -> char {
     }
 }
 
-/// スターブロック内の4マス(2列×2行)ぶんの位相ずれ(TERM独自拡張。#134。ユーザー
-/// 指摘: 「スター化したブロックはもっとキラキラしたモーションしてほしい 本当に
-/// 氷見たく いまのままだとただの白い正方形だ」)。4マスが完全に同時に一斉点滅する
-/// と結局「均一な四角」にしか見えないため、位置ごとに`STAR_SPARKLE_PERIOD_MS`の
-/// 1/4ずつ位相をずらし、氷の結晶のように複数箇所が順にきらめくようにする。
+/// スターブロック内の4マス(2列×2行)ぶんの位相ずれ。4マスが一斉点滅すると均一な四角に
+/// しか見えないため、`STAR_SPARKLE_PERIOD_MS`の1/4ずつ位相をずらして順にきらめかせる。
 const STAR_SPARKLE_PHASE_OFFSETS_MS: [[u32; 2]; 2] = [
     [0, STAR_SPARKLE_PERIOD_MS / 4],
     [STAR_SPARKLE_PERIOD_MS / 2, STAR_SPARKLE_PERIOD_MS * 3 / 4],
 ];
 
 /// スターブロックの`draw_rounded_unit`用の中央2列×2行のコンテンツを、位置ごとに
-/// 位相をずらした`star_glyph`で組み立てる(TERM独自拡張。#134)。
+/// 位相をずらした`star_glyph`で組み立てる。
 fn star_sparkle_content(visible_ms: u32) -> [[char; 2]; 2] {
     let mut content = [[' '; 2]; 2];
     for (row, offsets) in STAR_SPARKLE_PHASE_OFFSETS_MS.iter().enumerate() {
@@ -1636,7 +1508,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color, bg: Color) {
     }
 }
 
-/// 4文字×2行を単色の空白で塗りつぶす(Cell::Empty用)。
+/// 4文字×2行を単色の空白で塗りつぶす。
 fn fill_block(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
     for dy in 0..CELL_H {
         for dx in 0..CELL_W {
@@ -1645,10 +1517,8 @@ fn fill_block(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
     }
 }
 
-/// 最終ゴール(深度1000m)到達時、盤面の底に見える地底の地面(TERM独自拡張。#182。
-/// ユーザー指摘: 「最終ゴールは地底の地面を表示してクリアした感じにしてほしい」)。
-/// 単色の塗りつぶしではなく、岩肌のようなハッチング模様にして「掘り進めない本当の
-/// 底に到達した」ことを見た目でも伝える。
+/// 最終ゴール到達時の盤面の底やチェックポイント安全地帯に見せる地底の地面。単色でなく
+/// 岩肌のようなハッチング模様にして「掘り進めない底に到達した」ことを見た目でも伝える。
 const BEDROCK_GROUND_GLYPHS: [[char; 4]; 2] = [['▓', '▒', '▓', '▒'], ['▒', '▓', '▒', '▓']];
 
 fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
@@ -1666,12 +1536,9 @@ fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
     }
 }
 
-/// `board_row`が、100mごとのチェックポイント通過後の安全地帯(TERM独自拡張。
-/// #181/#185)に含まれるかどうか(TERM独自拡張。#186。ユーザー指摘: 「100mごとの
-/// 先はどうせクリアするのでいったん何もなし(地面みたいにしてほしい)」)。安全地帯は
-/// 通過すると必ず`Cell::Empty`になる区間なので、素の空背景ではなく最終ゴールと
-/// 同じ地底の地面ビジュアルで表示する。500mはボーナスフロア(アイテム/AIR配置。
-/// #179)であり空にはならないため対象外にする。
+/// `board_row`が100mごとのチェックポイント通過後の安全地帯に含まれるかどうか。安全地帯は
+/// 必ず`Cell::Empty`になる区間なので、素の空背景でなく地底の地面ビジュアルで表示する。
+/// 500mはボーナスフロア(アイテム/AIR配置)で空にはならないため対象外にする。
 fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
     if board_row < CHECKPOINT_STEP_M {
         return false;
@@ -1728,10 +1595,8 @@ fn conn_mask_rock(board: &Board, row: usize, col: usize) -> ConnMask {
     })
 }
 
-/// ダイヤブロック用の接続判定(TERM独自拡張。#141。ユーザー指摘: 「ダイヤブロック
-/// の見た目を岩ボコのような形状にして」)。岩ブロックと同じく、隣接するダイヤ
-/// ブロック同士の境界を消して1つの塊(ゴツゴツした岩のような連続した形状)に
-/// 見えるようにする。
+/// ダイヤブロック用の接続判定。岩ブロックと同じく、隣接するダイヤブロック同士の
+/// 境界を消して1つの塊(ゴツゴツした岩のような連続した形状)に見えるようにする。
 fn conn_mask_diamond(board: &Board, row: usize, col: usize) -> ConnMask {
     conn_mask_by(board, row, col, |cell| matches!(cell, BoardCell::Diamond))
 }
@@ -1792,13 +1657,9 @@ fn put_edge(buf: &mut Buffer, x: u16, y: u16, connected: bool, fg: Color, bg: Co
 
 // --- 9.4 岩・酸素・ダイヤブロックの描画 ---
 
-/// AIR・アイテムブロック共通の描画(TERM独自拡張。#106/#128/#132。ユーザー指摘:
-/// 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」「C/R/Kアイテムも
-/// アイテムっぽい形状に変えよう」)。角に丸罫線の"glyph"を乗せるだけでセル自体の
-/// 背景は正方形のまま塗りつぶす描画だと、依然として正方形に見えてしまう。ここでは
-/// 四隅のセルを四分割ブロック文字(`▘▝▖▗`)でフィールド背景色(`FIELD_EMPTY_BG`)側に
-/// 3/4欠き取り、実際に輪郭が斜めに丸まったシルエット(八角形状)になるようにする。
-/// 中央2列×2行の`content`は呼び出し側で種類ごとに変える。
+/// AIR・スター・アイテムブロック共通の描画。角に丸罫線を乗せるだけでは背景が正方形のまま
+/// 見えるため、四隅を四分割ブロック文字(`▘▝▖▗`)でフィールド背景色側に3/4欠き取り、
+/// 輪郭が斜めに丸まったシルエット(八角形状)にする。中央2列×2行の`content`は呼び出し側で決める。
 fn draw_rounded_unit(
     buf: &mut Buffer,
     x: u16,
@@ -1831,10 +1692,9 @@ fn rock_glyphs(hits: u8) -> [[char; 2]; 2] {
     [[flat[0], flat[1]], [flat[2], flat[3]]]
 }
 
-/// 岩ブロック(Xブロック)の描画。色ブロックと同様、隣接する岩ブロック同士は角の罫線を
-/// 接続させ1つの塊として繋がって見えるようにする(ユーザー指摘反映: 「Xブロックも接触
-/// したら結合しないと」・横方向も対象)。ヒビ/Xマーク(rock_glyphs)は視認性を優先し、
-/// 接続の有無に関わらず中央2列には常に表示する(色ブロックのように空白へは置き換えない)。
+/// 岩ブロック(Xブロック)の描画。色ブロックと同様、隣接する岩ブロック同士は角の罫線を接続させ
+/// 1つの塊に見せる。ヒビ/Xマーク(rock_glyphs)は視認性を優先し、接続の有無に関わらず
+/// 中央2列には常に表示する(色ブロックのように空白へは置き換えない)。
 fn draw_rock_block(
     buf: &mut Buffer,
     x: u16,
@@ -1860,12 +1720,8 @@ fn draw_rock_block(
     put(buf, x + 2, y + 1, glyphs[1][1], fg, bg);
 }
 
-/// ダイヤブロックの描画(TERM独自拡張。#141。ユーザー指摘: 「ダイヤブロックの
-/// 見た目を岩ボコのような形状にして」)。以前は`draw_fixed_unit`で常に単独の
-/// 角丸ボックスとして描いていたため、隣接していても1個ずつ独立した箱の並びに
-/// しか見えなかった。岩ブロック(`draw_rock_block`)と同じ接続判定
-/// (`conn_mask_diamond`)を使い、隣接するダイヤブロック同士の境界を消すことで、
-/// ゴツゴツした岩の塊のような連続した形状になるようにする。
+/// ダイヤブロックの描画。岩ブロック(`draw_rock_block`)と同じ接続判定(`conn_mask_diamond`)で
+/// 隣接するダイヤブロック同士の境界を消し、ゴツゴツした岩の塊のような連続した形状にする。
 fn draw_diamond_block(buf: &mut Buffer, x: u16, y: u16, board: &Board, row: usize, col: usize) {
     let mask = conn_mask_diamond(board, row, col);
     let bg = colors::DIAMOND_BG;
@@ -1909,18 +1765,9 @@ fn draw_player_sprite(buf: &mut Buffer, x: u16, y: u16, lines: [&str; 2], bg: Co
     }
 }
 
-/// プレイヤーの向き・掘削演出フレームに応じたスプライト(4文字×2行)を返す(TERM独自
-/// 拡張。ユーザー指摘: 「上に掘る時、上向きながらピヨンピヨン跳ねる。左右に掘る時、
-/// 横にドリルをぐいぐい。下に掘る時、下向きながらドリルをぐいぐい」)。`drilling_frame`が
-/// `None`なら静止スプライト、`Some(_)`なら`DRILL_ANIM_FRAME_MS`ごとに交互する方向別の
-/// 2フレームを返す(掘削は常にfacing方向に対して行われるため、facingがそのまま
-/// 掘削方向になる)。
-///
-/// 目(oo/OO)を丸括弧で挟んでヘルメットの縁を表現し、進行方向の先端は開けたまま
-/// にする(掘削の刃が突き出る側、TERM独自拡張。#160。ユーザー指摘: 「キャラが
-/// せめて、ドリルかなんか、それっぽいやつにしてほしい ホリススムくんのシルエット
-/// に見えたらなおよし」)。上下は正面から見た形なので左右対称に閉じ、左右は
-/// 進行方向側だけ`<`/`>`のドリル先端を開けておく。
+/// プレイヤーの向き・掘削演出フレームに応じたスプライト(4文字×2行)。`drilling_frame`が
+/// `None`なら静止、`Some(_)`なら方向別の2フレームを交互に返す(掘削は常にfacing方向)。
+/// 目(oo/OO)を丸括弧で挟んでヘルメットの縁とし、左右向きは進行方向側だけ`<`/`>`のドリル先端を開ける。
 fn player_sprite(facing: Direction, drilling_frame: Option<bool>) -> [&'static str; 2] {
     match (facing, drilling_frame) {
         (Direction::Down, Some(true)) => ["(oo)", " || "],
@@ -1934,13 +1781,11 @@ fn player_sprite(facing: Direction, drilling_frame: Option<bool>) -> [&'static s
     }
 }
 
-/// 「わ〜!」スライダー演出中(TERM独自拡張)のプレイヤースプライト。方向によらず
-/// 常にこの驚き顔で表示する。
+/// 「わ〜!」スライダー演出中のプレイヤースプライト。方向によらず常にこの驚き顔で表示する。
 const DODGE_SPRITE: [&str; 2] = ["!OO!", " /\\ "];
 
-/// 落下ブロックに押し潰された際の「潰れた」演出用スプライト(TERM独自拡張、9章)。
-/// GameOverオーバーレイの表示前に一呼吸`CRUSH_FLASH_MS`ぶんだけ表示する。1行目に
-/// ×印を並べ、2行目は空白にすることで平たく潰れた見た目を表現する。
+/// 落下ブロックに押し潰された際の「潰れた」演出用スプライト(9章)。GameOverオーバーレイの
+/// 表示前に`CRUSH_FLASH_MS`ぶんだけ表示する。1行目に×印を並べ、2行目は空白にして平たく潰れた見た目にする。
 fn draw_crushed_sprite(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
     for (dx, ch) in "××××".chars().enumerate() {
         put(buf, x + dx as u16, y, ch, colors::CRUSH_FLASH_FG, bg);
@@ -2031,9 +1876,7 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game, autoplay_enabled: boo
     );
     write_line(buf, inner, &mut row, "", label_style);
 
-    // #85(揺れているブロックが浮いたまま落下しない)の調査用(TERM独自拡張。
-    // ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
-    // ブロック状態遷移ログ(debug_log)の記録と突き合わせるための番号を表示する。
+    // ブロック状態遷移ログ(debug_log)の記録と突き合わせるためのフレーム番号を表示する。
     write_line(buf, inner, &mut row, "FRAME", label_style);
     write_line(
         buf,
@@ -2043,8 +1886,8 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game, autoplay_enabled: boo
         label_style,
     );
 
-    // オートプレイ・無敵の状態表示(TERM独自拡張。#218)。どちらもデバッグ機能なので、
-    // 有効な間だけ行を足す(通常プレイのHUDは今まで通りの見た目のまま)。
+    // オートプレイ・無敵の状態表示。どちらもデバッグ機能なので、有効な間だけ行を足す
+    // (通常プレイのHUDの見た目は変えない)。
     if autoplay_enabled || game.is_invincible() {
         write_line(buf, inner, &mut row, "", label_style);
         let debug_style = Style::default()
@@ -2142,11 +1985,9 @@ fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hints: &[&str]) {
     frame.render_widget(paragraph, overlay_area);
 }
 
-/// チェックポイント(100mごと)到達演出のバナー(TERM独自拡張。#178。ユーザー指摘:
-/// 「100mごとのゴールSEと演出、アニメーションする」)。`draw_overlay`より一回り小さい
-/// 箱を短時間(`checkpoint_flash_depth_m`がSomeの間)だけ中央に重ねるだけで、盤面
-/// 自体(`draw_field`)は裏で通常通り動き続ける(押し潰し演出等と同じく、周囲の
-/// 落下アニメーションを止めない設計方針)。
+/// チェックポイント(100mごと)到達演出のバナー。`draw_overlay`より一回り小さい箱を
+/// `checkpoint_flash_depth_m`がSomeの間だけ中央に重ねる。盤面(`draw_field`)は裏で
+/// 通常通り動き続ける(押し潰し演出等と同じく、周囲の落下アニメーションを止めない設計方針)。
 fn draw_checkpoint_banner(frame: &mut Frame, area: Rect, depth_m: usize) {
     let banner_area = centered_rect(30, 12, area);
     frame.render_widget(Clear, banner_area);
@@ -2173,8 +2014,8 @@ fn draw_checkpoint_banner(frame: &mut Frame, area: Rect, depth_m: usize) {
     frame.render_widget(paragraph, banner_area);
 }
 
-/// GameOverダイアログ(TERM独自拡張)。「タイトルへ戻る」「その場から復活」の2択を
-/// 表示し、現在選択中の項目を反転表示(カーソル代わり)する。
+/// GameOverダイアログ。「タイトルへ戻る」「その場から復活」の2択を表示し、
+/// 現在選択中の項目を反転表示(カーソル代わり)する。
 fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoice) {
     let overlay_area = centered_rect(40, 25, area);
     frame.render_widget(Clear, overlay_area);
@@ -2225,8 +2066,7 @@ mod tests {
 
     #[test]
     fn player_sprite_lines_are_always_exactly_one_logical_cell_wide() {
-        // #160でヘルメットの縁(丸括弧)を追加した際、幅がCELL_W(4文字)からずれると
-        // 隣のセルとの描画位置がずれてしまうため回帰確認する。
+        // スプライトの幅がCELL_W(4文字)からずれると隣のセルとの描画位置がずれてしまうため回帰確認する。
         let directions = [
             Direction::Up,
             Direction::Down,
@@ -2249,19 +2089,14 @@ mod tests {
 
     #[test]
     fn player_sprite_keeps_the_eyes_open_on_the_leading_edge_facing_the_drill_direction() {
-        // ユーザー指摘: 「キャラがせめて、ドリルかなんか、それっぽいやつにして
-        // ほしい ホリススムくんのシルエットに見えたらなおよし」(#160)。ヘルメットの
-        // 縁(丸括弧)は進行方向側を開けたままにし、ドリルの刃が突き出る側だと
-        // わかるようにする。
+        // ヘルメットの縁(丸括弧)は進行方向側を開けたままにし、ドリルの刃が突き出る側だとわかるようにする。
         assert!(player_sprite(Direction::Left, None)[0].starts_with('<'));
         assert!(player_sprite(Direction::Right, None)[0].ends_with('>'));
     }
 
     #[test]
     fn star_glyph_toggles_every_sparkle_period_starting_from_visible() {
-        // ユーザー指摘: 「スターブロックは消えるまえからキラキラしてほしい」。
-        // 画面内に入った直後(visible_ms=0)から既にキラキラの切り替えが起きている
-        // ことを確認する。
+        // 画面内に入った直後(visible_ms=0)から既にキラキラの切り替えが起きていることを確認する。
         assert_eq!(star_glyph(0), '☆');
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS - 1), '☆');
         assert_eq!(star_glyph(STAR_SPARKLE_PERIOD_MS), '★');
@@ -2271,11 +2106,8 @@ mod tests {
 
     #[test]
     fn star_sparkle_content_staggers_the_four_positions_instead_of_flashing_in_unison() {
-        // ユーザー指摘: 「スター化したブロックはもっとキラキラしたモーションして
-        // ほしい 本当に氷見たく いまのままだとただの白い正方形だ」。4マスが完全に
-        // 同時に切り替わってしまうと結局「均一な四角」にしか見えないため、位置に
-        // よって☆/★の切り替わるタイミングがずれている(=ある瞬間には両方の記号が
-        // 混在する)ことを確認する。
+        // 4マスが同時に切り替わると均一な四角にしか見えないため、位置によって☆/★の
+        // 切り替わるタイミングがずれている(=ある瞬間には両方の記号が混在する)ことを確認する。
         let mut saw_mixed = false;
         for visible_ms in (0..STAR_SPARKLE_PERIOD_MS).step_by(10) {
             let content = star_sparkle_content(visible_ms);
@@ -2293,8 +2125,7 @@ mod tests {
 
     #[test]
     fn star_block_has_its_corners_cut_to_the_field_background_not_a_flat_square() {
-        // ユーザー指摘: 「いまのままだとただの白い正方形だ」。AIR(#128)・アイテム
-        // (#132)と同じく、四隅がフィールド背景色まで欠き取られていることを確認する。
+        // AIR・アイテムと同じく、四隅がフィールド背景色まで欠き取られていることを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
         let bg = colors::star_bg(0, STAR_VISIBLE_GRACE_MS, STAR_MELT_DURATION_MS);
@@ -2311,10 +2142,8 @@ mod tests {
 
     #[test]
     fn bomb_roll_is_bouncing_up_hops_multiple_times_while_settling_by_the_end() {
-        // ユーザー指摘: 「爆弾がぽーんぽーんぽんぽんころころ...って弾ませながら
-        // モーションがないと回転寿司みたいにすーって入ってきちゃ駄目」。転がる
-        // 区間(t=0.0〜1.0)の間に複数回跳ね、設置直前(t=1.0)には必ず地面に
-        // 着地している(跳ねていない)ことを確認する。
+        // 転がる区間(t=0.0〜1.0)の間に複数回跳ね、設置直前(t=1.0)には
+        // 必ず地面に着地している(跳ねていない)ことを確認する。
         assert!(bomb_roll_is_bouncing_up(0.0), "転がり始めは跳ねているはず");
         assert!(
             !bomb_roll_is_bouncing_up(0.2),
@@ -2333,10 +2162,8 @@ mod tests {
 
     #[test]
     fn draw_bomb_sprite_fills_the_whole_cell_with_body_color_not_just_the_glyphs() {
-        // ユーザー指摘: 「爆弾、背景と同化してるから、もっと輪郭くっきり」。以前は
-        // グリフ以外の部分がフィールド背景色のまま透過していたため、本体の輪郭が
-        // 背景に溶け込んで見えていた。セル全体の背景が本体色で塗りつぶされている
-        // ことを確認する。
+        // グリフ以外がフィールド背景色のまま透過すると輪郭が背景に溶け込むため、
+        // セル全体の背景が本体色で塗りつぶされていることを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
         draw_bomb_sprite(
@@ -2362,7 +2189,6 @@ mod tests {
 
     #[test]
     fn bomb_body_color_flashes_red_only_once_the_fuse_is_almost_out() {
-        // ユーザー指摘: 「爆発直前で爆弾がチカチカ激しく赤く光るようにして」(#138)。
         // 残り時間が`BOMB_DANGER_MS`を超えている間は通常色のまま、
         // それを切ったら警告色(赤)と通常色を激しく切り替えることを確認する。
         assert_eq!(
@@ -2391,10 +2217,8 @@ mod tests {
         );
     }
 
-    /// テスト用: プレイヤー周辺(±`STAR_VISIBLE_RANGE_ROWS`)を`fill_col`以外は全て
-    /// 岩で埋め、指定の1マスだけをEmptyにしたうえで`debug_place_bomb`を呼び、
-    /// その1マスへ確実にボムを設置する(`debug_place_bomb_spawns_at_the_only_empty_cell_within_visible_range`
-    /// と同じ考え方)。
+    /// テスト用: プレイヤー周辺(±`STAR_VISIBLE_RANGE_ROWS`)を全て岩で埋め、指定の1マスだけを
+    /// Emptyにしたうえで`debug_place_bomb`を呼び、その1マスへ確実にボムを設置する。
     fn place_bomb_at(game: &mut Game, row: usize, fill_col: usize) {
         let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
         for r in (game.player.row - range)..=(game.player.row + range) {
@@ -2408,9 +2232,8 @@ mod tests {
 
     #[test]
     fn off_screen_bomb_column_flashes_red_only_while_blink_is_on() {
-        // ユーザー指摘(#175): 「知らない間に画面外に爆弾がいるので縦列を赤く
-        // ピカピカさせること」。top_rowより浅い(=まだスクロールインしていない
-        // 画面外)位置にあるボムの列は、点滅周期に応じて赤く塗られる。
+        // top_rowより浅い(=まだスクロールインしていない画面外)位置にあるボムの列は、
+        // 点滅周期に応じて赤く塗られる。
         let mut game = Game::new(1);
         game.player.row = 500;
         place_bomb_at(&mut game, 490, 3); // top_row(495)より浅い = 画面外
@@ -2475,8 +2298,7 @@ mod tests {
 
     #[test]
     fn draw_bomb_sprite_crackle_alternates_the_spark_glyph_and_position_over_time() {
-        // ユーザー指摘: 「火花ちりちりアニメーションさせて」。異なる`crackle_ms`を
-        // 渡すと、火花の位置(左右どちらのマス)かグリフが変わることを確認する。
+        // 異なる`crackle_ms`を渡すと、火花の位置(左右どちらのマス)かグリフが変わることを確認する。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf_a = Buffer::empty(inner);
         draw_bomb_sprite(
@@ -2530,9 +2352,8 @@ mod tests {
 
     #[test]
     fn fill_bedrock_ground_paints_the_whole_cell_with_the_ground_texture_colors() {
-        // ユーザー指摘(#182): 「最終ゴールは地底の地面を表示してクリアした感じにして
-        // ほしい」。地底の地面セルは単色の空白ではなく、専用の色(BEDROCK_GROUND_BG/FG)
-        // でハッチング模様に塗りつぶされることを確認する。
+        // 地底の地面セルは単色の空白ではなく、専用の色(BEDROCK_GROUND_BG/FG)で
+        // ハッチング模様に塗りつぶされることを確認する。
         let inner = Rect::new(0, 0, CELL_W, CELL_H);
         let mut buf = Buffer::empty(inner);
 
@@ -2548,10 +2369,8 @@ mod tests {
     #[test]
     fn is_checkpoint_safe_zone_row_covers_only_the_checkpoint_safe_zone_band_excluding_the_bonus_floor()
      {
-        // ユーザー指摘(#186): 「100mごとの先はどうせクリアするのでいったん何もなし
-        // (地面みたいにしてほしい)」。各チェックポイント(100mごと)通過後の安全地帯
-        // (CHECKPOINT_SAFE_ZONE_M行)だけが対象で、その手前・その先・500mの
-        // ボーナスフロアは対象外のはず。
+        // 各チェックポイント(100mごと)通過後の安全地帯(CHECKPOINT_SAFE_ZONE_M行)だけが
+        // 対象で、その手前・その先・500mのボーナスフロアは対象外のはず。
         assert!(!is_checkpoint_safe_zone_row(0));
         assert!(!is_checkpoint_safe_zone_row(99));
         assert!(is_checkpoint_safe_zone_row(100));
@@ -2570,9 +2389,7 @@ mod tests {
 
     #[test]
     fn falling_diamond_still_shows_its_glyph_not_just_a_flat_fill() {
-        // ユーザー指摘: 「落下アニメーションで模様が消えて、色味だけでしか認識できない」
-        // 「あいまいな物体が落ちているように見える」。落下中も静止時と同じグリフ
-        // (ダイヤなら◆)で描画されることを確認する。
+        // 落下中も静止時と同じグリフ(ダイヤなら◆)で描画されることを確認する。
         let mut game = Game::new(1);
         for row in game.board.rows.iter_mut() {
             for cell in row.iter_mut() {
@@ -2602,12 +2419,8 @@ mod tests {
 
     #[test]
     fn falling_block_that_auto_vanishes_on_the_same_tick_it_lands_still_renders_its_fall() {
-        // ユーザー指摘(#172): 「崩れてきたブロックが、接地する1コマ前でスルスルと
-        // 消えてしまう」。着地と同一tickで4連結自動消滅すると盤面は既にEmptyになるが、
-        // それ以前は`draw_falling_blocks`が「盤面がEmpty=描画すべきものがない」と
-        // 早合点して落下描画自体を丸ごとスキップしていた(実際には最後まで落ちきる
-        // 見た目を出したい)。落下中も消滅直前の色ブロックの背景色で描画され続ける
-        // ことを確認する。
+        // 着地と同一tickで4連結自動消滅すると盤面は既にEmptyになるが、落下中は
+        // 消滅直前の色ブロックの背景色で最後まで描画され続けることを確認する。
         let mut game = Game::new(1);
         // row2を最深行にする(=常に支持される)ことで、着地を待つ静的な赤ブロックの
         // 支えを岩ブロックなしに単純化する(board.rsの`empty_board`系テストと同じ考え方)。
@@ -2630,7 +2443,7 @@ mod tests {
         }
 
         // 揺れ(SHAKE_TICKS)を経て、row0→row1→row2と2マス連続で落下しきる分の
-        // 時間を与える(#31: 落下開始後は毎マス揺れ直さず連続で落ち続ける)。
+        // 時間を与える(落下開始後は毎マス揺れ直さず連続で落ち続ける)。
         let tick = (crate::constants::SHAKE_TICKS as u64 + 2) * crate::constants::FALL_TICK_MS + 10;
         game.update(std::time::Duration::from_millis(tick));
 
@@ -2662,10 +2475,7 @@ mod tests {
 
     #[test]
     fn oxygen_capsule_has_its_corners_cut_to_the_field_background_not_a_flat_square() {
-        // ユーザー指摘: 「AIRはカプセルの形状をしていてほしい 正方形ではなくて」。
-        // #106時点は角の罫線glyphを丸めるだけでセル自体の背景は正方形のまま
-        // 塗りつぶされていたため、依然として正方形に見えていた。四隅のセルの
-        // 背景色がフィールド背景色(`FIELD_EMPTY_BG`)まで欠き取られていることを
+        // 四隅のセルの背景色がフィールド背景色(`FIELD_EMPTY_BG`)まで欠き取られていることを
         // 確認する(中央2列×2行だけが酸素カプセルの地色`OXYGEN_BG`のまま残るはず)。
         let inner = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(inner);
@@ -2698,8 +2508,7 @@ mod tests {
 
     #[test]
     fn item_blocks_have_their_corners_cut_to_the_field_background_not_a_flat_square() {
-        // ユーザー指摘: 「C/R/Kアイテムもアイテムっぽい形状に変えよう」(#132)。
-        // AIR(#128)と同じく、C/R/Kアイテムも四隅がフィールド背景色まで欠き取られ、
+        // AIRと同じく、C/R/Kアイテムも四隅がフィールド背景色まで欠き取られ、
         // 単なる正方形の塗りつぶしでなくなっていることを確認する。
         let items = [
             (
@@ -2740,12 +2549,11 @@ mod tests {
         }
     }
 
-    // --- 設定画面のカーソル移動(TERM独自拡張) ---
+    // --- 設定画面のカーソル移動 ---
 
     #[test]
     fn settings_choice_cycle_back_is_the_exact_reverse_of_cycle() {
-        // ユーザー指摘: 「設定画面でカーソル↑おしても下いくんやけど」。cycle_back()は
-        // cycle()の逆方向であり、どの項目から始めても cycle().cycle_back() で元へ戻る。
+        // cycle_back()はcycle()の逆方向であり、どの項目から始めても cycle().cycle_back() で元へ戻る。
         let all = [
             SettingsChoice::Music,
             SettingsChoice::Se,
@@ -2772,7 +2580,7 @@ mod tests {
         }
     }
 
-    // --- モードセレクト画面(TERM独自拡張。#112) ---
+    // --- モードセレクト画面 ---
 
     #[test]
     fn course_choice_toggle_swaps_between_easy_and_normal() {
@@ -2799,10 +2607,8 @@ mod tests {
 
     #[test]
     fn title_screen_text_overlay_fits_within_a_reasonably_sized_terminal() {
-        // #148でアートは画面いっぱいに表示する方式に変えたため、合計行数の
-        // 心配は「ロゴ+案内文パネルが画面の縦幅に収まるか」だけになった
-        // (以前はここにアートの行数も加算していたが、アートはもう別途行数を
-        // 消費しない)。55行はごく一般的なターミナルウィンドウの高さの目安(#127)。
+        // アートは画面いっぱいに表示するため別途行数を消費せず、確認すべきは
+        // 「ロゴ+案内文パネルが画面の縦幅に収まるか」だけ。55行は一般的なターミナルの高さの目安。
         const ASSUMED_COMMON_TERMINAL_H: u16 = 55;
 
         let mut text_lines = build_title_logo_lines().to_vec();
@@ -2824,8 +2630,7 @@ mod tests {
 
     #[test]
     fn title_art_lines_fills_the_exact_requested_terminal_size() {
-        // #148: アートは画面いっぱいに表示するため、行数・幅とも要求した
-        // 端末サイズと1:1で一致するはず。
+        // アートは画面いっぱいに表示するため、行数・幅とも要求した端末サイズと1:1で一致するはず。
         let lines = title_art_lines(100, 40);
         assert_eq!(lines.len(), 40);
         assert_eq!(lines[0].spans.len(), 100);
@@ -2833,9 +2638,7 @@ mod tests {
 
     #[test]
     fn title_art_lines_cache_returns_the_same_size_on_repeated_calls() {
-        // 同じ端末サイズでの再呼び出しはキャッシュから返されるが、内容(サイズ)は
-        // 変わらないはず(TERM独自拡張。#148。`draw_title`は毎フレーム呼ばれるため
-        // 再デコードを避けるキャッシュを持つ)。
+        // 同じ端末サイズでの再呼び出しはキャッシュから返されるが、内容(サイズ)は変わらないはず。
         let first = title_art_lines(80, 24);
         let second = title_art_lines(80, 24);
         assert_eq!(first.len(), second.len());
@@ -2844,10 +2647,9 @@ mod tests {
 
     #[test]
     fn help_screen_box_is_tall_enough_for_the_jukebox_section() {
-        // #151でジュークボックス欄(見出し1+空行1+曲4行)を追加した際、枠の高さが
-        // 実際の内容行数を収められているか回帰確認する。操作17行+ジュークボックス
-        // 6行+空行1+末尾1行=25行、枠(上下)2行込みで27行必要。
-        const REQUIRED_CONTENT_LINES: u16 = 25;
+        // 枠の高さが実際の内容行数(操作欄+ジュークボックス欄+空行+末尾行)を収められているか
+        // 回帰確認する。内容行数が増えたらこの定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 26;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let help_area = centered_rect(90, 90, frame_rect);
@@ -2861,13 +2663,9 @@ mod tests {
 
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
-        // ユーザー指摘: 「設定画面から時間要素の細かいものが結構消えてるぞ」。設定項目が
-        // 増えるたびに枠の高さが実際の内容行数を収められているか回帰確認する
-        // (#108でアイテム3種のrate行を追加した際、枠が足りず下部のms_line(落下速度等)が
-        // クリップして見えなくなっていた)。見出し1+空行1+MUSIC/SE(2)+岩/AIR/スター/
-        // ダイヤ(4)+アイテム3種(3)+色数(1)+色結合(1)+列数(1)+落下速度系4種(4)+
-        // ボム出現頻度(1)+DEBUG LOG(1、#167)+空行1+ヘルプ2行(2)=24行、
-        // 枠(上下)2行込みで26行必要。今後さらに設定を追加したらこの定数も増やすこと。
+        // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
+        // クリップして見えなくなる)。見出し1+空行1+設定項目19+空行1+案内2行=24行、
+        // 枠(上下)2行込みで26行必要。設定を追加したらこの定数も増やすこと。
         const REQUIRED_CONTENT_LINES: u16 = 24;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
@@ -2880,12 +2678,11 @@ mod tests {
         );
     }
 
-    // --- フィールド幅(列数)可変レイアウト(TERM独自拡張) ---
+    // --- フィールド幅(列数)可変レイアウト ---
 
     #[test]
     fn field_pane_w_and_total_screen_w_scale_with_field_width() {
-        // ユーザー指摘: 「設定値に列の数を変更できるようにして」。列数が増えれば
-        // フィールドペイン・フレーム全体の幅も広くなることを確認する。
+        // 列数が増えればフィールドペイン・フレーム全体の幅も広くなることを確認する。
         assert!(field_pane_w(20) > field_pane_w(12));
         assert!(field_pane_w(12) > field_pane_w(6));
         assert!(total_screen_w(20) > total_screen_w(12));
@@ -2901,17 +2698,9 @@ mod tests {
 
     #[test]
     fn compute_layout_visible_rows_never_exceeds_the_spawn_rate_reroll_safe_margin() {
-        // ユーザー報告: 「掘っていないのに設置済みブロックが消える/落下する」(#83)。
-        // 原因調査の結果、プレイ中の配分率再抽選(reroll_spawn_rates_from)が
-        // `player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`より先だけを書き換える
-        // 前提になっているが、この定数(以前は40)が縮退表示(9.8、幅不足のターミナル
-        // では可視行数がターミナルの実高さから動的に計算される)の可視行数と
-        // 独立に固定されていたため、非常に縦長のターミナルでは可視行数がこの定数を
-        // 上回り、画面内の未掘削ブロックまで書き換わってしまうバグがあった。
-        // 現実的なターミナルサイズの範囲(幅は縮退表示に入りやすい50〜120、高さは
-        // 十分余裕を見て300行まで)・全field_width設定で、可視行数が安全マージンを
-        // 超えないことを回帰確認する。field_widthが大きいほどtotal_wも大きくなり
-        // 縮退表示に入りやすくなるため、設定可能な全範囲を確認する。
+        // プレイ中の配分率再抽選(reroll_spawn_rates_from)は`player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`
+        // より先だけを書き換える前提なので、縮退表示(9.8)で可視行数がこのマージンを上回ると画面内の
+        // 未掘削ブロックまで書き換わる。現実的な端末サイズ・全field_widthで超えないことを回帰確認する。
         for field_width in crate::constants::FIELD_WIDTH_MIN..=crate::constants::FIELD_WIDTH_MAX {
             for width in (50..120u16).step_by(5) {
                 for height in (16..300u16).step_by(4) {
@@ -2929,7 +2718,7 @@ mod tests {
         }
     }
 
-    // --- 揺れ(ぐらぐら)アニメーションのジッター(TERM独自拡張) ---
+    // --- 揺れ(ぐらぐら)アニメーションのジッター ---
 
     #[test]
     fn shake_jitter_x_is_always_within_one_character() {
@@ -2985,12 +2774,9 @@ mod tests {
 
     #[test]
     fn horizontally_connected_same_color_cells_form_one_unbroken_border_without_a_seam() {
-        // 縦方向には繋がっていない(上下ともEmpty)横1行だけの連結の場合、角(x=3, x=4)は
-        // 「上下どちらも非接続」なので内部fill(空白)にはならず、どちらも同じ'─'になる
-        // (spec.md 9.3の角判定は縦横2方向の組み合わせで決まり、内部fillは両方向とも
-        // 接続している場合のみ)。ここで確認したいのは、これが2マスにまたがる
-        // "1本の途切れないボーダー"として繋がって見えること、すなわち継ぎ目に
-        // 縦線'│'が入って区切られてしまわないこと。
+        // 上下が非接続の横1行だけの連結では、継ぎ目の角(x=3, x=4)は内部fill(空白)にならず
+        // どちらも'─'になる(spec.md 9.3: 内部fillは縦横両方向とも接続している場合のみ)。
+        // 継ぎ目に縦線'│'が入って区切られず、1本の途切れないボーダーに見えることを確認する。
         let mut board = board_with(3);
         board.rows[1][0] = BoardCell::Color(ColorKind::Red);
         board.rows[1][1] = BoardCell::Color(ColorKind::Red);
@@ -3034,10 +2820,8 @@ mod tests {
 
     #[test]
     fn horizontally_connected_diamond_cells_form_one_unbroken_border_without_a_seam() {
-        // ユーザー指摘: 「ダイヤブロックの見た目を岩ボコのような形状にして」(#141)。
         // 岩ブロック・色ブロックと同じく、隣接するダイヤブロック同士は境界を消して
-        // 1つの塊に見えるようにする。継ぎ目に縦線'│'が入って区切られないことを
-        // 確認する。
+        // 1つの塊に見えるようにする。継ぎ目に縦線'│'が入って区切られないことを確認する。
         let mut board = board_with(3);
         board.rows[1][0] = BoardCell::Diamond;
         board.rows[1][1] = BoardCell::Diamond;
@@ -3059,9 +2843,7 @@ mod tests {
 
     #[test]
     fn horizontally_isolated_diamond_cell_keeps_its_border() {
-        // ユーザー指摘: 「ダイヤブロックの見た目を岩ボコのような形状にして」(#141)。
-        // 隣がダイヤブロックでなければ(#141以前と同じく)角の丸みが残ることを
-        // 確認する。
+        // 隣がダイヤブロックでなければ角の丸みが残ることを確認する。
         let mut board = board_with(3);
         board.rows[1][0] = BoardCell::Diamond;
         board.rows[1][1] = BoardCell::Rock { hits: 0 }; // ダイヤではないので接続しない
