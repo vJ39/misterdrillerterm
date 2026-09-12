@@ -247,13 +247,15 @@ pub enum GameEvent {
     /// 発生する(実際に加算されたかは呼び出し側では区別しない、既存の`LifeLost`等と
     /// 同じ考え方)。
     ExtraLifeAtLevel { level: usize },
-    /// ライフを1つ失ったが、まだライフが残っている(その場で酸素全回復して再開)
-    LifeLost,
+    /// ライフを1つ失ったが、まだライフが残っている(その場で酸素全回復して再開)。
+    /// `cause`はソークテストが死因の内訳を数えるための記録用(TERM独自拡張。#221)で、
+    /// SE再生など通常の処理では参照しない。
+    LifeLost { cause: MissCause },
     /// 「天に召される」演出が終わり、その場に復活した瞬間(TERM独自拡張。ユーザー指摘:
     /// 「死んで、復活したときのSEほしい」)
     Revived,
-    /// 最後のライフを失い、ゲームオーバーになった
-    GameOverMiss,
+    /// 最後のライフを失い、ゲームオーバーになった。`cause`は`LifeLost`と同じ記録用。
+    GameOverMiss { cause: MissCause },
     /// 深度1000m到達でゲームクリアした
     Cleared,
     /// アイテムブロックを取得し、対応する効果が発動した(TERM独自拡張。ユーザー指摘:
@@ -967,7 +969,7 @@ impl Game {
             debug_assert!(game_over, "lives<=1のはずなのでlose_lifeは必ずtrueを返す");
             self.status = GameStatus::GameOver;
             self.game_over_selection = GameOverChoice::BackToTitle;
-            events.push(GameEvent::GameOverMiss);
+            events.push(GameEvent::GameOverMiss { cause });
             return;
         }
 
@@ -975,7 +977,7 @@ impl Game {
         // 死亡SEはミスが発生した瞬間に即座に鳴らす(TERM独自拡張。ユーザー指摘:
         // 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSE鳴らして
         // ほしい」。演出完了まで3秒近く無音だったバグの修正)。
-        events.push(GameEvent::LifeLost);
+        events.push(GameEvent::LifeLost { cause });
         self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
     }
 
@@ -1857,7 +1859,10 @@ impl Game {
     /// デバッグショートカットで調整した`block_fall_tick_ms`を「深度0mでの速度」
     /// として扱い、`FALL_SPEED_DEPTH_MAX_SPEEDUP`まで深度に応じて短縮する
     /// (`DEBUG_FALL_TICK_MS_MIN`を下回らない)。
-    fn effective_block_fall_tick_ms(&self) -> u64 {
+    ///
+    /// オートプレイ(`autoplay.rs`)が「頭上のブロックが何ms後に落ちてくるか」を見積もる
+    /// ために参照するため、モジュール内に閉じず`pub(crate)`にしている(TERM独自拡張。#221)。
+    pub(crate) fn effective_block_fall_tick_ms(&self) -> u64 {
         let fraction = depth_fraction(self.player.depth_m());
         let speedup = 1.0 - fraction * (1.0 - FALL_SPEED_DEPTH_MAX_SPEEDUP);
         ((self.block_fall_tick_ms as f32 * speedup) as u64).max(DEBUG_FALL_TICK_MS_MIN)
@@ -1968,6 +1973,13 @@ impl Game {
         self.player_fall_tick_ms = ms.clamp(DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_MS_MAX);
     }
 
+    /// 現在の横移動クールダウン間隔(ms)。オートプレイ(`autoplay.rs`)が「横へ1マス
+    /// 逃げるのに何msかかるか」を頭上の落下ブロックの到達時間と比べるために参照する
+    /// (TERM独自拡張。#221)。
+    pub fn move_cooldown_ms(&self) -> u64 {
+        self.move_cooldown_ms
+    }
+
     /// 横移動のクールダウン間隔を直接指定する(起動時、Settingsから読み込んだ値を適用する
     /// 用途。TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
     /// 範囲外の値は`MOVE_COOLDOWN_MS_MIN`〜`MAX`にクランプする。
@@ -2061,6 +2073,7 @@ impl Game {
         self.item_unify_colors_rate_percent = item_unify_colors_rate_percent;
         self.item_starify_screen_rate_percent = item_starify_screen_rate_percent;
         self.board.reroll_overlays_from_row(
+            &mut self.rng,
             from_row,
             rock_rate_percent,
             air_rate_percent,
@@ -2091,6 +2104,7 @@ impl Game {
             return;
         }
         self.board.top_up_items(
+            &mut self.rng,
             self.player.row,
             self.item_top_up_frontier_row,
             target_row,
@@ -2228,6 +2242,7 @@ impl Game {
         let gap_end_row = (zone_end_row + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
         if at_m == BONUS_FLOOR_DEPTH_M {
             self.board.reroll_overlays_in_row_range(
+                &mut self.rng,
                 zone_start_row,
                 zone_end_row,
                 100,
@@ -2285,12 +2300,14 @@ impl Game {
 
     /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
     /// ランダムに選んだ2色だけへ揃える。Playing中のみ有効。
+    ///
+    /// 抽選にはOS乱数ではなくゲーム開始時のシードから作った`self.rng`を使う(#221)。
+    /// 同じシード・同じ入力列なら盤面が完全に再現されるようにするため。
     pub fn debug_unify_nearby_colors(&mut self) -> Vec<GameEvent> {
         if self.status != GameStatus::Playing {
             return Vec::new();
         }
-        use rand::RngExt;
-        let mut rng = rand::rng();
+        let rng = &mut self.rng;
 
         let all = ColorKind::ALL;
         let first = all[rng.random_range(0..all.len())];
@@ -2984,7 +3001,11 @@ mod tests {
             game.player.lives, lives_before,
             "演出完了までライフ減算は遅延されるはず"
         );
-        assert!(events.iter().any(|e| matches!(e, GameEvent::LifeLost)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. }))
+        );
 
         game.update(Duration::from_millis(
             crate::constants::CRUSH_ASCEND_MS + 10,
@@ -3002,7 +3023,11 @@ mod tests {
         let events = game.update(Duration::from_secs(1));
 
         assert_eq!(game.status, GameStatus::GameOver);
-        assert!(events.iter().any(|e| matches!(e, GameEvent::GameOverMiss)));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::GameOverMiss { .. }))
+        );
     }
 
     // --- 無敵(ミス無効) / オートプレイの土台(TERM独自拡張。#218) ---
@@ -3044,7 +3069,7 @@ mod tests {
         assert!(
             !events.iter().any(|e| matches!(
                 e,
-                GameEvent::LifeLost | GameEvent::GameOverMiss | GameEvent::Revived
+                GameEvent::LifeLost { .. } | GameEvent::GameOverMiss { .. } | GameEvent::Revived
             )),
             "ミス関連の既存イベントは一切発生しないはず: {events:?}"
         );
@@ -3149,7 +3174,11 @@ mod tests {
             "爆風はBombBlastとして回避されるはず: {events:?}"
         );
         assert_eq!(game.player.lives, lives_before);
-        assert!(!events.contains(&GameEvent::LifeLost));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. }))
+        );
     }
 
     #[test]
@@ -3178,7 +3207,9 @@ mod tests {
         let events = game.update(Duration::from_secs(1));
 
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "無敵を切れば通常どおりミスするはず: {events:?}"
         );
         assert!(game.is_dying());
@@ -4433,11 +4464,10 @@ mod tests {
 
         assert_eq!(game.player.row, 13);
         assert_eq!(game.player.col, col);
-        assert!(
-            !events
-                .iter()
-                .any(|e| matches!(e, GameEvent::LifeLost | GameEvent::GameOverMiss))
-        );
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            GameEvent::LifeLost { .. } | GameEvent::GameOverMiss { .. }
+        )));
     }
 
     #[test]
@@ -5091,7 +5121,9 @@ mod tests {
             (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
         ));
         assert!(
-            events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "押し潰された直後(演出開始時点)にLifeLostが発火するはず"
         );
         assert_eq!(
@@ -5103,7 +5135,9 @@ mod tests {
             crate::constants::CRUSH_ASCEND_MS + 10,
         ));
         assert!(
-            !events.iter().any(|e| matches!(e, GameEvent::LifeLost)),
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "演出完了時に重複してLifeLostが発火してはいけない"
         );
         assert_eq!(game.player.lives, 1, "演出完了時にライフは減るはず");
@@ -5618,11 +5652,11 @@ mod tests {
     fn debug_unify_nearby_colors_repaints_to_exactly_two_colors_and_never_vanishes() {
         // ユーザー指摘: 「単にブロックの色を2色に変換するだけでよくて、消滅させなくて
         // いい」。ランダムな2色のみへ塗り替えることは行うが、塗り替えによって新たに
-        // 4連結以上になった箇所があっても即座には自動消滅させない(色の選択はOS乱数の
-        // ため非決定的。十分な回数試行して両方の性質を確認する)。
+        // 4連結以上になった箇所があっても即座には自動消滅させない(色の選択はシードから
+        // 決まるため、シードを変えて十分な回数試行し両方の性質を確認する)。
         let mut saw_four_or_more_connected_and_intact = false;
-        for _ in 0..300 {
-            let mut game = Game::new(1);
+        for trial in 0..300 {
+            let mut game = Game::new(trial);
             clear_board(&mut game);
             game.player.row = 500;
             game.player.col = 5;
@@ -6459,6 +6493,7 @@ mod tests {
 
     #[test]
     fn destroyed_items_free_up_the_window_top_up_capacity() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
         // #213の副作用確認。アイテム出現数の窓単位補充(#210/#211)は現存個数を
         // 都度数え直す方式なので、爆風でアイテムがEmptyになれば補充枠も自動的に
         // 回復する(補充側のコードは変更していない)。
@@ -6483,7 +6518,7 @@ mod tests {
             }
         }
 
-        game.board.top_up_items(100, 200, 260, 2000, 0, 0);
+        game.board.top_up_items(&mut rng, 100, 200, 260, 2000, 0, 0);
         assert_eq!(
             count_clear_above(&game, 200, 260),
             0,
@@ -6494,7 +6529,7 @@ mod tests {
         for i in 0..crate::constants::ITEM_MAX_COUNT_ON_BOARD {
             game.board.rows[100 + i][0] = Cell::Empty;
         }
-        game.board.top_up_items(100, 200, 260, 2000, 0, 0);
+        game.board.top_up_items(&mut rng, 100, 200, 260, 2000, 0, 0);
 
         assert!(
             count_clear_above(&game, 200, 260) > 0,
@@ -7020,7 +7055,9 @@ mod tests {
 
         assert!(events.contains(&GameEvent::BombExploded));
         assert!(
-            events.contains(&GameEvent::LifeLost),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "爆風に巻き込まれたら押し潰し相当のミスになるはず: {events:?}"
         );
     }
@@ -7046,7 +7083,9 @@ mod tests {
 
         let events = game.update(Duration::from_millis(60));
         assert!(
-            events.contains(&GameEvent::LifeLost),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "フィールド幅の反対端でも爆風に巻き込まれるはず: {events:?}"
         );
     }
@@ -7072,7 +7111,9 @@ mod tests {
 
         let events = game.update(Duration::from_millis(60));
         assert!(
-            events.contains(&GameEvent::LifeLost),
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "画面内の距離(BOMB_BLAST_ROW_RANGE)ちょうどは爆風の範囲内で巻き込むはず: {events:?}"
         );
     }
@@ -7095,7 +7136,9 @@ mod tests {
 
         let events = game.update(Duration::from_millis(60));
         assert!(
-            !events.contains(&GameEvent::LifeLost),
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeLost { .. })),
             "画面内(BOMB_BLAST_ROW_RANGE)を1マス超えたらプレイヤーを巻き込まないはず: {events:?}"
         );
     }

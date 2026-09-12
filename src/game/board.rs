@@ -576,8 +576,14 @@ impl Board {
     /// 補充する。窓内(`window_start_row`〜`frontier_row`)の既存個数を数え、不足分だけ
     /// 未抽選領域`[frontier_row, target_row)`へ追加抽選する(Empty・Itemセルは対象外)。
     /// 窓が進むと補充余地が生まれ「盤面全体で生涯N個」でなく「常に前方に最大N個」になる。
+    ///
+    /// `rng`は呼び出し元(`Game`)がゲーム開始時のシードから作って持ち回す乱数源。
+    /// OS乱数から都度作り直すと同じシードでも盤面が再現されないため、必ず共有の系列を
+    /// 消費する(#221。ソークテストで失敗したシードを再現するために必須)。
+    #[allow(clippy::too_many_arguments)]
     pub fn top_up_items(
         &mut self,
+        rng: &mut ChaCha8Rng,
         window_start_row: usize,
         frontier_row: usize,
         target_row: usize,
@@ -588,9 +594,6 @@ impl Board {
         if target_row <= frontier_row {
             return;
         }
-        use rand::RngExt;
-        let seed: u64 = rand::rng().random();
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
         // window_start_rowがfrontier_rowより先に進んでいる場合、確定済みの窓内は
         // 実質空なので、カウント対象の開始行はfrontier_rowを超えないようにする。
@@ -621,7 +624,7 @@ impl Board {
                     continue;
                 }
                 if let Some(effect) = roll_item_effect_only(
-                    &mut rng,
+                    rng,
                     item_clear_above_rate_percent,
                     item_unify_colors_rate_percent,
                     item_starify_screen_rate_percent,
@@ -636,7 +639,9 @@ impl Board {
     /// `from_row`以降の未掘削マス(Empty以外)の色・岩・AIR・スター・ダイヤ内訳を配分率
     /// (%、100=通常)で丸ごと再抽選する。元の内容を問わず対象にするため、初期生成で既定率
     /// のまま確定していたセルにも設定値が正しく反映される(掘削済みEmptyのみ、プレイヤーが
-    /// 見た/触れた状態を壊さないよう対象外)。再現性は求めず呼び出しごとに新しい乱数系列を使う。
+    /// 見た/触れた状態を壊さないよう対象外)。
+    ///
+    /// `rng`は呼び出し元(`Game`)が持ち回す共有の乱数源(`top_up_items`と同じ理由。#221)。
     ///
     /// `color_count`(1〜4)は色抽選を`ColorKind::ALL`の先頭N色に制限する(範囲外はクランプ)。
     /// 深度が進むほど色ブロックはばらけ、岩は隣接ボーナスで固まる難易度カーブを持つ。
@@ -644,6 +649,7 @@ impl Board {
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_from_row(
         &mut self,
+        rng: &mut ChaCha8Rng,
         from_row: usize,
         rock_rate_percent: u32,
         air_rate_percent: u32,
@@ -658,6 +664,7 @@ impl Board {
     ) {
         let to_row = self.rows.len();
         self.reroll_overlays_in_row_range(
+            rng,
             from_row,
             to_row,
             rock_rate_percent,
@@ -679,6 +686,7 @@ impl Board {
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_overlays_in_row_range(
         &mut self,
+        rng: &mut ChaCha8Rng,
         from_row: usize,
         to_row: usize,
         rock_rate_percent: u32,
@@ -692,9 +700,6 @@ impl Board {
         color_cluster_rate_percent: u32,
         gravity: &GravityState,
     ) {
-        use rand::RngExt;
-        let seed: u64 = rand::rng().random();
-        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let color_count = (color_count as usize).clamp(1, ColorKind::ALL.len());
         // 盤面全体(from_rowより前の既存アイテムも含む)の既存個数を先に数えてから
         // 上限を計算する。
@@ -777,7 +782,7 @@ impl Board {
                 let allow_star = was_rock_or_diamond && !gravity.is_shaking((row, col));
 
                 self.rows[row][col] = overlay_rock_oxygen_diamond_with_rates(
-                    &mut rng,
+                    rng,
                     fresh_color,
                     row,
                     rock_rate_percent,
@@ -793,7 +798,7 @@ impl Board {
                 );
             }
 
-            ensure_row_is_not_fully_blocked_by_rock(&mut self.rows[row], &mut rng, color_count);
+            ensure_row_is_not_fully_blocked_by_rock(&mut self.rows[row], rng, color_count);
         }
     }
 }
@@ -1416,12 +1421,26 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_leaves_rows_before_from_row_untouched() {
+        let mut rng = ChaCha8Rng::seed_from_u64(25);
         let mut board = empty_board(5);
         for col in 0..FIELD_WIDTH {
             board.rows[0][col] = Cell::Color(ColorKind::Red); // from_rowより手前
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new()); // 岩/AIR/スター/ダイヤの確率を0に
+        board.reroll_overlays_from_row(
+            &mut rng,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        ); // 岩/AIR/スター/ダイヤの確率を0に
 
         for col in 0..FIELD_WIDTH {
             assert_eq!(
@@ -1434,6 +1453,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_also_rerolls_cells_already_committed_to_an_overlay() {
+        let mut rng = ChaCha8Rng::seed_from_u64(24);
         // 初期生成で既に岩/AIR/スター/ダイヤとして確定していたセルも、Empty以外なら
         // 元の種類を問わず再抽選対象になることを確認する。
         let mut board = empty_board(1);
@@ -1445,7 +1465,20 @@ mod tests {
 
         // 岩/AIR/スター/ダイヤの配分率を全て0にすれば、Empty以外の全セルは必ず
         // Color(通常の色ブロック)へ再抽選される。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         for col in 0..4 {
             assert!(
@@ -1463,6 +1496,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_never_overwrites_existing_item_blocks() {
+        let mut rng = ChaCha8Rng::seed_from_u64(23);
         // 既に配置済みのアイテムブロックは、配分率の再抽選で上書きされず
         // 「確定した内容」としてそのまま残ることを確認する。
         let mut board = empty_board(1);
@@ -1471,6 +1505,7 @@ mod tests {
         board.rows[0][2] = Cell::Item(ItemEffect::StarifyScreen);
 
         board.reroll_overlays_from_row(
+            &mut rng,
             0,
             300,
             300,
@@ -1503,6 +1538,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_higher_rock_rate_yields_more_rock_cells_on_average() {
+        let mut rng = ChaCha8Rng::seed_from_u64(22);
         fn all_color_board(rows: usize) -> Board {
             let mut b = empty_board(rows);
             for row in 0..rows {
@@ -1522,9 +1558,35 @@ mod tests {
         }
 
         let mut low = all_color_board(500);
-        low.reroll_overlays_from_row(0, 20, 100, 100, 100, 0, 0, 0, 4, 100, &GravityState::new());
+        low.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            20,
+            100,
+            100,
+            100,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
         let mut high = all_color_board(500);
-        high.reroll_overlays_from_row(0, 300, 100, 100, 100, 0, 0, 0, 4, 100, &GravityState::new());
+        high.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            300,
+            100,
+            100,
+            100,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let (low_count, high_count) = (count_rocks(&low), count_rocks(&high));
         assert!(
@@ -1535,6 +1597,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_star_rate_zero_produces_no_star_cells() {
+        let mut rng = ChaCha8Rng::seed_from_u64(21);
         // スター配分率0%なら、通常なら出現するはずのスターブロックが一切生成されない
         // ことを確認する。
         let mut board = empty_board(500);
@@ -1544,7 +1607,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 0, 100, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            100,
+            100,
+            0,
+            100,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let star_count = board
             .rows
@@ -1560,6 +1636,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_spawns_all_three_kinds_of_item_blocks() {
+        let mut rng = ChaCha8Rng::seed_from_u64(20);
         // 出現率はごく低確率の値のため、十分な行数で統計的にアイテム3種とも
         // 出現することを確認する。
         let mut board = empty_board(5000);
@@ -1570,6 +1647,7 @@ mod tests {
         }
 
         board.reroll_overlays_from_row(
+            &mut rng,
             0,
             100,
             100,
@@ -1617,6 +1695,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_item_rate_percent_controls_each_item_independently() {
+        let mut rng = ChaCha8Rng::seed_from_u64(19);
         // アイテムごとに配分率が独立していること: ClearAboveだけ0%にすれば出現せず、
         // 他の2種は100%のまま出現し続けることを確認する。
         let mut board = empty_board(5000);
@@ -1627,6 +1706,7 @@ mod tests {
         }
 
         board.reroll_overlays_from_row(
+            &mut rng,
             0,
             100,
             100,
@@ -1671,6 +1751,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_never_exceeds_the_per_item_type_cap_on_the_board() {
+        let mut rng = ChaCha8Rng::seed_from_u64(18);
         // 出現率を極端に高くしても、盤面全体で種類ごとに上限個数を超えないことを確認する。
         let mut board = empty_board(5000);
         for row in 0..5000 {
@@ -1679,7 +1760,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 300, 300, 300, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            300,
+            300,
+            300,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         for effect in [
             ItemEffect::ClearAbove,
@@ -1714,10 +1808,12 @@ mod tests {
 
     #[test]
     fn item_rate_zero_at_new_game_start_removes_items_generated_by_board_generate() {
+        let mut rng = ChaCha8Rng::seed_from_u64(17);
         // Board::generate直後に新規ゲーム開始時と同じreroll(item rate=0)を適用すれば、
         // アイテムブロックが1つも残らないことを確認する。
         let mut board = Board::generate(1, 2000, FIELD_WIDTH);
         board.reroll_overlays_from_row(
+            &mut rng,
             2,
             100,
             100,
@@ -1746,6 +1842,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_counts_pre_existing_items_toward_the_cap() {
+        let mut rng = ChaCha8Rng::seed_from_u64(16);
         // 既に盤面上にあるアイテムの個数も上限に含めて計算し、残り枠ぶんしか
         // 新規出現させないことを確認する。
         let mut board = empty_board(5000);
@@ -1759,7 +1856,20 @@ mod tests {
             board.rows[0][i] = Cell::Item(ItemEffect::ClearAbove);
         }
 
-        board.reroll_overlays_from_row(1, 0, 0, 0, 0, 300, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            1,
+            0,
+            0,
+            0,
+            0,
+            300,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let count = board.count_item(ItemEffect::ClearAbove);
         assert!(
@@ -1770,6 +1880,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_never_converts_existing_color_or_oxygen_cells_into_stars() {
+        let mut rng = ChaCha8Rng::seed_from_u64(15);
         // スターへ変わるのは岩とダイヤのみ。既存のColor/Oxygenセルはスター配分率を
         // 上限にしてもスターへ変わらないことを確認する。
         let mut board = empty_board(3);
@@ -1778,7 +1889,20 @@ mod tests {
             board.rows[1][col] = Cell::Oxygen;
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            300,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         for row in 0..2 {
             for col in 0..FIELD_WIDTH {
@@ -1793,6 +1917,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_can_convert_existing_rock_or_diamond_cells_into_stars() {
+        let mut rng = ChaCha8Rng::seed_from_u64(14);
         // 既存のRock/Diamondセルは、スター配分率を上限にすればスターへ変わり得る
         // ことを統計的に確認する(0件は不自然)。
         let mut board = empty_board(500);
@@ -1806,7 +1931,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            300,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let star_count = board
             .rows
@@ -1822,6 +1960,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_never_converts_shaking_cells_into_stars() {
+        let mut rng = ChaCha8Rng::seed_from_u64(13);
         // 元がRockなら本来スター化対象だが、揺れ中のセルは除外されることを確認する。
         let mut board = empty_board(1);
         for col in 0..FIELD_WIDTH {
@@ -1832,7 +1971,7 @@ mod tests {
             gravity.shaking_cells.insert((0, col));
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &gravity);
+        board.reroll_overlays_from_row(&mut rng, 0, 0, 0, 300, 0, 0, 0, 0, 4, 100, &gravity);
 
         let star_count = board
             .rows
@@ -1845,6 +1984,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_diamond_rate_zero_produces_no_diamond_cells() {
+        let mut rng = ChaCha8Rng::seed_from_u64(12);
         // ダイヤ配分率0%なら、通常なら出現するはずのダイヤブロックが一切生成されない
         // ことを確認する。
         let mut board = empty_board(500);
@@ -1854,7 +1994,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 100, 100, 100, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            100,
+            100,
+            100,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let diamond_count = board
             .rows
@@ -2037,6 +2190,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_color_count_restricts_the_palette_to_the_first_n_colors() {
+        let mut rng = ChaCha8Rng::seed_from_u64(11);
         // ユーザー指摘: 「出現する色ブロックの色数を設定で選べるようにしたい(1〜4)」。
         // color_countを指定すると、ColorKind::ALLの先頭からその数だけに色ブロックの
         // 抽選が制限されることを確認する(岩/AIR/スター/ダイヤは0%にして純粋に
@@ -2048,7 +2202,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 2, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            2,
+            100,
+            &GravityState::new(),
+        );
 
         let mut colors_seen: Vec<ColorKind> = Vec::new();
         for cell in board.rows.iter().flatten() {
@@ -2068,6 +2235,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_color_count_one_produces_a_single_color() {
+        let mut rng = ChaCha8Rng::seed_from_u64(10);
         let mut board = empty_board(200);
         for row in 0..200 {
             for col in 0..FIELD_WIDTH {
@@ -2075,7 +2243,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 1, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            100,
+            &GravityState::new(),
+        );
 
         for cell in board.rows.iter().flatten() {
             // アイテムブロック(TERM独自拡張)は岩/AIR/スター/ダイヤの配分率とは独立した
@@ -2090,6 +2271,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_color_clustering_weakens_with_depth() {
+        let mut rng = ChaCha8Rng::seed_from_u64(9);
         // ユーザー指摘: 「階層が進むにつれて…初期配置されるブロックがあまり結合状態に
         // なく、個別でばらばらであり…難易度をあげていってほしい」。深度が浅いほど
         // 左隣の色を継承しやすくまとまりが強く、深いほど独立抽選に近づきバラバラに
@@ -2135,7 +2317,20 @@ mod tests {
             }
         }
         // 岩/AIR/スター/ダイヤは無しにして、純粋に色の連結だけを観測する。
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let shallow_avg = avg_run_length_in_range(&board, 2..200);
         let deep_avg = avg_run_length_in_range(&board, 800..1000);
@@ -2148,6 +2343,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_color_cluster_rate_percent_scales_clustering_strength() {
+        let mut rng = ChaCha8Rng::seed_from_u64(8);
         // ユーザー指摘: 「ブロック配置の結合関係の割合を設定できるようにして」。
         // 同じ浅い深度帯でも、color_cluster_rate_percentを0%にすると常に均等
         // ランダム抽選になり、100%(既定)時より横方向のまとまりが明確に弱くなる
@@ -2197,9 +2393,35 @@ mod tests {
         }
 
         let mut zero_rate = make_board();
-        zero_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 0, &GravityState::new());
+        zero_rate.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            0,
+            &GravityState::new(),
+        );
         let mut default_rate = make_board();
-        default_rate.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        default_rate.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let zero_avg = avg_run_length_in_range(&zero_rate, 2..200);
         let default_avg = avg_run_length_in_range(&default_rate, 2..200);
@@ -2212,6 +2434,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_never_produces_a_same_color_run_beyond_the_spec_limit() {
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
         // ユーザー報告(#114): 「8000フレーム付近で縦に大量消失してった」の根本原因調査で、
         // reroll_overlays_from_row(新規ゲーム開始時に必ず盤面全体へ適用される)が
         // 初期生成(generate_base_colors)の同色ラン上限(横4・縦3、spec.md 3.3)を
@@ -2225,7 +2448,20 @@ mod tests {
             }
         }
 
-        board.reroll_overlays_from_row(0, 0, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         for row in 2..500 {
             let mut run_color: Option<ColorKind> = None;
@@ -2272,6 +2508,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_keeps_same_color_connected_groups_reasonably_small() {
+        let mut rng = ChaCha8Rng::seed_from_u64(6);
         // #118の実測検証: ラン上限移植前は実プレイで86セルの巨大な同色塊(#114、
         // frame636)が観測されていた。横4・縦3のラン上限を課すことで、最も結合が
         // 強くなる条件(浅い深度・全配分率100%)でも連結グループが現実的な大きさに
@@ -2283,6 +2520,7 @@ mod tests {
             }
         }
         board.reroll_overlays_from_row(
+            &mut rng,
             0,
             100,
             100,
@@ -2320,6 +2558,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_rock_clustering_strengthens_with_depth() {
+        let mut rng = ChaCha8Rng::seed_from_u64(5);
         // ユーザー指摘: 「Xブロックが結合で大量にあったりするように」。深度が深いほど
         // 岩ブロックの塊が大きくなりやすいことを確認する(TERM独自拡張の難易度カーブ)。
         fn avg_rock_group_size_in_range(board: &Board, rows: std::ops::Range<usize>) -> f64 {
@@ -2358,7 +2597,20 @@ mod tests {
             }
         }
         // 岩の出現率を上限(300%)にして、隣接ボーナスの効果を観測しやすくする。
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            300,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         let shallow_avg = avg_rock_group_size_in_range(&board, 2..200);
         let deep_avg = avg_rock_group_size_in_range(&board, 800..1000);
@@ -2376,11 +2628,11 @@ mod tests {
         // (「絶対無理」)。既定設定(rock_rate_percent=100%)の最深帯でも、岩マスの
         // 割合が画面全体を覆ってしまわないことを統計的に確認する。
         //
-        // reroll_overlays_from_rowは呼び出しごとに新しい乱数系列を使う(再現性を
-        // 求めない設計)ため、1回きりの試行では閾値ぎりぎりでたまたま通ってしまう
-        // (またはたまたま落ちる)ことがある。複数回試行した平均で判定し、統計的な
-        // ふらつきに左右されない検証にする。
-        fn rock_fraction_in_deepest_band() -> f64 {
+        // 1回きりの試行では閾値ぎりぎりでたまたま通ってしまう(またはたまたま落ちる)
+        // ことがあるため、シードを変えた複数回の平均で判定し、統計的なふらつきに
+        // 左右されない検証にする。
+        fn rock_fraction_in_deepest_band(seed: u64) -> f64 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
             let mut board = empty_board(1000);
             for row in 0..1000 {
                 for col in 0..FIELD_WIDTH {
@@ -2388,6 +2640,7 @@ mod tests {
                 }
             }
             board.reroll_overlays_from_row(
+                &mut rng,
                 0,
                 100,
                 100,
@@ -2416,7 +2669,7 @@ mod tests {
 
         const TRIALS: usize = 20;
         let avg_fraction: f64 = (0..TRIALS)
-            .map(|_| rock_fraction_in_deepest_band())
+            .map(|trial| rock_fraction_in_deepest_band(trial as u64))
             .sum::<f64>()
             / TRIALS as f64;
         assert!(
@@ -2471,6 +2724,7 @@ mod tests {
 
     #[test]
     fn reroll_overlays_from_row_never_produces_a_row_fully_blocked_by_rock() {
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
         // 岩の出現率を上限(300%)・最大深度(塊化ボーナス最大)にしても、横一列が
         // 岩ブロックだけで完全に埋まることは無いことを確認する。
         let mut board = empty_board(1000);
@@ -2479,7 +2733,20 @@ mod tests {
                 board.rows[row][col] = Cell::Color(ColorKind::Red);
             }
         }
-        board.reroll_overlays_from_row(0, 300, 0, 0, 0, 0, 0, 0, 4, 100, &GravityState::new());
+        board.reroll_overlays_from_row(
+            &mut rng,
+            0,
+            300,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            4,
+            100,
+            &GravityState::new(),
+        );
 
         for row in 800..1000 {
             let all_rock =
@@ -3887,6 +4154,7 @@ mod tests {
 
     #[test]
     fn no_group_remains_unsupported_forever_after_reroll_at_realistic_depth() {
+        let mut rng = ChaCha8Rng::seed_from_u64(2);
         // ユーザー報告(スクリーンショット、深度418m Lv.14付近): 支えを失っているはずの
         // ブロックが崩れず浮いたままになる箇所がある。既存のno_group_remains_unsupported_
         // forever_on_random_boardsはBoard::generate直後(=reroll前)の浅い盤面(60行)しか
@@ -3897,6 +4165,7 @@ mod tests {
             let mut board = Board::generate(seed, 70, FIELD_WIDTH);
             let gravity_for_reroll = GravityState::new();
             board.reroll_overlays_from_row(
+                &mut rng,
                 2,
                 100,
                 100,
@@ -4139,6 +4408,7 @@ mod tests {
 
     #[test]
     fn diamond_count_is_conserved_across_many_gravity_ticks_after_reroll_at_realistic_depth() {
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
         // #85再調査: 上のテスト(reroll前の浅い盤面)では再現しなかったため、実プレイに近い
         // 条件(reroll_overlays_from_row適用後、ダイヤ出現率を上げた深い深度相当)でも
         // 同じ不変条件(ダイヤ総数の保存)を確認する。
@@ -4146,6 +4416,7 @@ mod tests {
             let mut board = Board::generate(seed, 70, FIELD_WIDTH);
             let gravity_for_reroll = GravityState::new();
             board.reroll_overlays_from_row(
+                &mut rng,
                 2,
                 100,
                 100,

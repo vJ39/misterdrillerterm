@@ -377,22 +377,102 @@ pub const BOARD_SNAPSHOT_ROWS_BELOW_PLAYER: usize = 5;
 /// 参照するため、main.rsのローカル定数ではなくここで一元管理する。
 pub const FRAME_INTERVAL_MS: u64 = 33;
 
-/// オートプレイがAIR(酸素カプセル)探索へ切り替える残量。これを下回ると、通常の
-/// 下降より近傍のAIR確保を優先する。
-pub const AUTOPLAY_OXYGEN_SEEK_THRESHOLD: f32 = 50.0;
-
-/// 岩ブロックを掘る(5回ヒット・酸素を消費する)ことを許容する酸素残量の下限。
-/// これを下回っている間は、迂回できる岩は掘らずに横へ回り込む。
-pub const AUTOPLAY_OXYGEN_ROCK_BUDGET: f32 = 40.0;
-
-/// AIR探索で見る、プレイヤーより深い側の行数。
+/// 列採点で先読みする、プレイヤーより深い側の行数。この行数までの「岩に当たらず
+/// 掘り進める連続行数」が列スコアの基礎点になる。
 pub const AUTOPLAY_LOOKAHEAD_ROWS: usize = 14;
 
-/// ボムの起爆残り時間がこれ以下になったら回避行動へ移る(ms)。
-pub const AUTOPLAY_BOMB_EVADE_MS: u32 = 2500;
+// --- 酸素の使いどころ(#221) -------------------------------------------------
+// 岩1個の破壊は酸素20%+5ヒット分の時間を使い、深度0mなら70行ぶん・最深でも30行ぶんの
+// 下降と釣り合う。対して横1列の迂回は1行ぶんにも満たない。どちらが安いかを固定値では
+// なく`rock_cost_rows`/`detour_cost_rows`の比較で毎回決めるため、閾値の定数は置かず、
+// 判断に必要な「AIRを拾う価値」「緊急とみなす残量」だけを定数にする。
+
+/// AIRへ寄り道する価値があるとみなす最低回復量(%)。回復量は`min(50, 100-残量)`で
+/// 上限クランプされるため、満タンに近いほど小さくなる。これを下回るAIRは無視する。
+pub const AUTOPLAY_AIR_MIN_GAIN: f32 = 10.0;
+
+/// 平常時にAIRのために横へ逸れてよい最大列数。これを超えて離れたAIRは列スコアへ
+/// 加点しない(緊急時はこの制限を外す)。
+pub const AUTOPLAY_AIR_DETOUR_MAX_COLS: usize = 4;
+
+/// 「この秒数ぶんの自然減少を賄えるか」で緊急判定する地平線(秒)。残量が
+/// `深度別の減少速度 × この秒数`を下回ったら緊急とみなす。深度0mで12%、最深で30%
+/// (=`OXYGEN_WARNING_THRESHOLD`)に一致する。
+pub const AUTOPLAY_EMERGENCY_HORIZON_SEC: f32 = 6.0;
+
+/// 緊急時にAIRを探す先読み行数。平常時(`AUTOPLAY_LOOKAHEAD_ROWS`)より深くまで見る。
+pub const AUTOPLAY_EMERGENCY_AIR_LOOKAHEAD_ROWS: usize = 28;
+
+/// 緊急時にAIR加点へ掛ける倍率。多少遠回りでも確保しに行かせる。
+pub const AUTOPLAY_EMERGENCY_AIR_SCORE_MULTIPLIER: f32 = 3.0;
+
+// --- 列スコアリング(#221) ---------------------------------------------------
+// 単位は「行」。基礎点が`clear_run`(掘り進める行数、最大`AUTOPLAY_LOOKAHEAD_ROWS`)
+// なので、各加減点も「何行ぶんの価値か」で揃えている。
+
+/// AIRの実効回復量(%)を列スコア(行単位)へ換算する除数。回復50%(=残量50%以下)で
+/// 16.7行ぶんとなり、先読み範囲いっぱいの直進(14行)より価値が高くなる。逆に
+/// `AUTOPLAY_AIR_MIN_GAIN`(10%)ちょうどなら3.3行ぶんで、3列より遠い寄り道には
+/// 見合わなくなる。「残量が減るほど寄り道の許容距離が伸びる」挙動がこの1つの除数で決まる。
+pub const AUTOPLAY_SCORE_AIR_DIVISOR: f32 = 3.0;
+
+/// 経路上のアイテムブロック(頭上クリア/スター化)への加点。どちらも進路を大きく
+/// 拓くため、先読み範囲いっぱい(14行)に迫る価値を与える。2色化は効果が進路と
+/// 無関係なため加点しない。
+pub const AUTOPLAY_SCORE_ITEM_BONUS: f32 = 10.0;
+
+/// 横に1列離れるごとの減点。移動そのものの所要時間より大きめに置き、僅かな得点差で
+/// ふらふら横移動しないようにする。
+pub const AUTOPLAY_SCORE_LATERAL_PER_COL: f32 = 1.0;
+
+/// 空洞へ飛び込んで自由落下する列への、無防備な1行あたりの減点係数。
+///
+/// 自由落下中は横移動が効かず、掘っても落下は速くならない。しかもブロックの落下tickは
+/// 深度で最大2.5倍まで短くなるのにプレイヤーの自由落下tickは一定なので、深いほど落下中に
+/// 頭上の塊との差を詰められる。実際の減点はこの係数×「落下中に詰められる行数」なので、
+/// 深度0m(両者同速)では0になり、深いほど自動的に効くようになる。
+pub const AUTOPLAY_SCORE_VOID_EXPOSURE: f32 = 1.0;
+
+/// 頭上に落下予定の塊を抱えた列への減点の最大値。余裕が少ないほど満額に近づく
+/// (`AUTOPLAY_THREAT_MIN_SLACK_ROWS`を割り込む列はそもそも候補から外す)。
+pub const AUTOPLAY_SCORE_THREAT_PENALTY: f32 = 6.0;
+
+/// 頭上の塊との間に最低限保っておく余裕(行数)の下限。1手ぶん動いた後に残る行数で測る。
+///
+/// 実際の必要量は「1手動くのに要する時間 ÷ ブロックの落下tick」の
+/// `AUTOPLAY_THREAT_REACTION_STEPS`手ぶんで、深いほど大きくなる(ブロックの落下tickだけが
+/// 深度で短くなるため、同じ時間でも詰められる行数が増える)。この定数はその下限。
+pub const AUTOPLAY_THREAT_MIN_SLACK_ROWS: f32 = 3.0;
+
+/// 頭上の塊から逃げ始めるまでに、何手ぶんの余裕を残しておくか。
+///
+/// 1手で足りるように見えても、入力クールダウンが明けるのを待つ空振りフレームが挟まるため
+/// 実際には間に合わない(実測した押し潰しの6割強が「危険は検知できているのに、逃げる
+/// 入力が通る前に潰される」パターンだった)。
+pub const AUTOPLAY_THREAT_REACTION_STEPS: f32 = 3.0;
+
+/// 列採点の候補範囲(現在列の左右何列まで見るか)。escalation1以上・緊急時は全幅へ広げる。
+pub const AUTOPLAY_COLUMN_SCAN_RADIUS: usize = 4;
+
+/// 目的列を乗り換えるのに必要なスコア差(ヒステリシス)。これ未満の差では今の目的列を
+/// 保ち、AIRと危険回避の間で左右に往復するのを防ぐ。
+pub const AUTOPLAY_COLUMN_SWITCH_MARGIN: f32 = 3.0;
+
+/// 頭上の落下脅威を探す行数(画面高さぶん)。支持された固体ブロックに当たった時点で
+/// 遮蔽されているとみなして打ち切る。
+pub const AUTOPLAY_THREAT_SCAN_ROWS: usize = 14;
 
 /// 位置が変わらないままこのフレーム数が過ぎたら、行動の段階(escalation)を1つ上げる。
 pub const AUTOPLAY_STUCK_FRAMES: u32 = 90;
+
+/// 行(深度)が進まないままこのフレーム数が過ぎたら、行動の段階(escalation)を1つ上げる。
+/// 横移動が自由になると位置(row,col)は変わり続けるため、位置ベースの
+/// `AUTOPLAY_STUCK_FRAMES`だけでは「同じ行を横に往復し続ける」手詰まりを検出できない。
+/// 33ms/フレーム換算で約9秒。
+pub const AUTOPLAY_DESCENT_WATCHDOG_FRAMES: u32 = 270;
+
+/// ボムの起爆残り時間がこれ以下になったら回避行動へ移る(ms)。
+pub const AUTOPLAY_BOMB_EVADE_MS: u32 = 2500;
 
 /// 無敵OFFのままGameOverになった場合、自動でReviveするまでの待ち時間(ms)。
 pub const AUTOPLAY_REVIVE_DELAY_MS: u64 = 1500;

@@ -160,6 +160,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 // 操作したら、そこから引き継ぐのではなくタイトルへ戻す(TERM独自拡張。
                 // #218。デモを見ていた人の割り込みは「やめる」意思表示とみなす)。
                 if autopilot_is_attract_demo {
+                    // アトラクトモードは無人デモの安全策として無敵を強制ONにしている。
+                    // 人が割り込んだこの時点でデモ開始前の状態へ戻す。
+                    if let Some(pilot) = autopilot.take() {
+                        game.set_invincible(pilot.restore_invincible());
+                    }
                     back_to_title = true;
                     break;
                 }
@@ -428,21 +433,21 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     | InputAction::FaceUp
                     | InputAction::FaceDown
                     | InputAction::Drill => {
-                        if let Some(pilot) = autopilot.take() {
-                            game.set_invincible(pilot.restore_invincible());
-                        }
+                        // 人が操作した時点でオートプレイは解除する。無敵はGキーが
+                        // 単独で管理するため、ここでは変更しない(#221)。
+                        autopilot = None;
                         let events = game.apply_input(action);
                         handle_events(&events, mixer.as_ref(), &se_enabled);
                     }
-                    // T: オートプレイのON/OFF。ONにするときは現在の無敵状態を覚えて
-                    // おいてから無敵もONにし、OFFに戻すときは覚えておいた状態へ戻す。
-                    InputAction::DebugToggleAutopilot => match autopilot.take() {
-                        Some(pilot) => game.set_invincible(pilot.restore_invincible()),
-                        None => {
-                            autopilot = Some(autoplay::Autopilot::new(game.is_invincible()));
-                            game.set_invincible(true);
-                        }
-                    },
+                    // T: オートプレイのON/OFF。無敵は連動させず、Gキーの状態をそのまま
+                    // 残す(#221。AIが無敵に頼らず生き延びられるかをTだけで試せるように
+                    // するため。無人のアトラクトモードだけは安全策として無敵もONにする)。
+                    InputAction::DebugToggleAutopilot => {
+                        autopilot = match autopilot.take() {
+                            Some(_) => None,
+                            None => Some(autoplay::Autopilot::new(game.is_invincible())),
+                        };
+                    }
                     // G: 無敵の単独トグル。オートプレイとは独立して切り替えられる。
                     InputAction::DebugToggleInvincible => {
                         game.set_invincible(!game.is_invincible());
@@ -837,9 +842,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 // コースでそのまま開始し、無敵ONのオートプレイに操作を任せる。
                 let mut game =
                     start_new_game(rng.random(), &settings, settings.last_course_depth_m);
+                // 無人で回り続けるデモなので、手動のTキー(#221で無敵と切り離した)とは
+                // 違い、ここだけは安全策として無敵も自動でONにする。
                 game.set_invincible(true);
-                // デモ終了時に無敵を戻す先は「無敵OFF」。デモ用に作ったゲームは
-                // どのみち破棄されるが、解除経路を手動時と揃えておく。
+                // 新規に作ったゲームなので、デモ開始前の無敵状態は常にOFF。
                 autopilot = Some(autoplay::Autopilot::new(false));
                 autopilot_is_attract_demo = true;
                 title_idle = Duration::ZERO;
@@ -1201,9 +1207,10 @@ fn handle_events(events: &[GameEvent], mixer: Option<&Mixer>, se_enabled: &Arc<A
             GameEvent::OxygenWarningTick => audio::sfx::play_oxygen_warning(mixer),
             GameEvent::LevelUp { .. } => audio::sfx::play_level_up(mixer),
             GameEvent::ExtraLifeAtLevel { .. } => audio::sfx::play_extra_life(mixer),
-            GameEvent::LifeLost => audio::sfx::play_life_lost(mixer),
+            // 死因(cause)はソークテストの集計専用で、SE再生では区別しない。
+            GameEvent::LifeLost { .. } => audio::sfx::play_life_lost(mixer),
             GameEvent::Revived => audio::sfx::play_revive(mixer),
-            GameEvent::GameOverMiss => audio::sfx::play_miss(mixer),
+            GameEvent::GameOverMiss { .. } => audio::sfx::play_miss(mixer),
             GameEvent::Cleared => audio::sfx::play_clear_fanfare(mixer),
             GameEvent::ItemCollected(_) => audio::sfx::play_item_collected(mixer),
             GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer),
