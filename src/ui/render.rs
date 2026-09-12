@@ -1027,27 +1027,7 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             } else {
                 x
             };
-            // 優先順: クリア後の盤面の底(フィールドより深い行)は地底の地面 > 爆風直後の
-            // セルは炎色で一瞬覆う > 消滅直後のセルはフラッシュしてから背景色へ消える >
-            // チェックポイント安全地帯のEmptyは地面ビジュアル > 通常描画。
-            if game.status == GameStatus::Cleared && board_row >= game.board.depth_rows() {
-                fill_bedrock_ground(buf, draw_x, y);
-            } else if let Some((t, tier)) = game.explosion_flash_progress((board_row, col)) {
-                fill_block(
-                    buf,
-                    draw_x,
-                    y,
-                    colors::explosion_flame_bg(tier, t, natural_cell_bg(cell)),
-                );
-            } else if cell == BoardCell::Empty
-                && let Some(t) = game.vanish_flash_progress((board_row, col))
-            {
-                fill_block(buf, draw_x, y, colors::vanish_flash_bg(t));
-            } else if cell == BoardCell::Empty && is_checkpoint_safe_zone_row(board_row) {
-                fill_bedrock_ground(buf, draw_x, y);
-            } else {
-                draw_logical_cell(buf, draw_x, y, &game.board, board_row, col, cell);
-            }
+            draw_static_cell(buf, draw_x, y, game, (board_row, col), cell, &moved_map);
         }
     }
 
@@ -1055,6 +1035,51 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     draw_bombs(buf, inner, top_row, visible_rows, game);
     draw_player(buf, inner, top_row, game);
     draw_off_screen_bomb_warnings(buf, inner, top_row, visible_rows, game);
+}
+
+/// 盤面のセル1マスぶんを、その場(静止位置)に描画する。落下補間中のブロックは
+/// `draw_falling_blocks`が別途上から重ねるため、ここでは扱わない。
+///
+/// 優先順: クリア後の盤面の底(フィールドより深い行)は地底の地面 > 爆風直後のセルは
+/// 炎色で一瞬覆う > フラッシュ中のセルはフラッシュしてから背景色へ消える > 消滅は
+/// 確定したが落下ブロックの到着待ちのセルは消滅前の見た目のまま(#234) >
+/// チェックポイント安全地帯のEmptyは地面ビジュアル > 通常描画。
+fn draw_static_cell(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    game: &Game,
+    pos: Pos,
+    cell: BoardCell,
+    moved_map: &HashMap<Pos, Pos>,
+) {
+    let (board_row, col) = pos;
+    if game.status == GameStatus::Cleared && board_row >= game.board.depth_rows() {
+        fill_bedrock_ground(buf, x, y);
+    } else if let Some((t, tier)) = game.explosion_flash_progress(pos) {
+        fill_block(
+            buf,
+            x,
+            y,
+            colors::explosion_flame_bg(tier, t, natural_cell_bg(cell)),
+        );
+    } else if cell == BoardCell::Empty
+        && let Some(t) = game.vanish_flash_progress(pos)
+    {
+        fill_block(buf, x, y, colors::vanish_flash_bg(t));
+    } else if cell == BoardCell::Empty
+        && !moved_map.contains_key(&pos)
+        && let Some(kind) = game.pending_vanish_kind(pos)
+    {
+        // 消滅は確定したが、一緒に消える落下ブロックがまだ空中にいる間(TERM独自拡張。
+        // #234)。落下してくる側は`draw_falling_blocks`が補間位置へ描くのでここでは
+        // 扱わず、その場に留まっている側だけを消滅前の見た目のまま描き続ける。
+        draw_logical_cell(buf, x, y, &game.board, board_row, col, kind);
+    } else if cell == BoardCell::Empty && is_checkpoint_safe_zone_row(board_row) {
+        fill_bedrock_ground(buf, x, y);
+    } else {
+        draw_logical_cell(buf, x, y, &game.board, board_row, col, cell);
+    }
 }
 
 /// 画面外(まだスクロールインしていない、`top_row`より浅い行)にボムがある場合、
@@ -1346,11 +1371,12 @@ fn draw_falling_blocks(
         } else {
             BoardCell::Empty
         };
-        // 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyだが消滅フラッシュはまだ残っている。
-        // 盤面から読めない間は消滅直前の種類で補い、最後まで落ちきってからフラッシュへ移る見た目にする。
+        // 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyだが、フラッシュはまだ
+        // 始まっていない(落下補間の完了を待っている)。盤面から読めない間は消滅直前の
+        // 種類で補い、最後まで落ちきってからフラッシュへ移る見た目にする。
         let cell = match cell {
             BoardCell::Empty => {
-                let resolved = game.recently_vanished_kind((to_row, to_col));
+                let resolved = game.pending_vanish_kind((to_row, to_col));
                 // このフォールバック分岐に入ったこと(補えたか/スキップしたか)をログに残す。
                 // 稀なケースでしか通らないため、毎フレーム描画中でも記録量は少ない。
                 game.log_render_fallback((to_row, to_col), (from_row, from_col), resolved);
@@ -3127,5 +3153,114 @@ mod tests {
 
         assert_eq!(buf.cell(Position::new(3, 0)).unwrap().symbol(), "╮");
         assert_eq!(buf.cell(Position::new(3, 1)).unwrap().symbol(), "╯");
+    }
+
+    // -----------------------------------------------------------------------
+    // 落下tick間隔を遅くした際の「落下→消滅」演出(#234)
+    // -----------------------------------------------------------------------
+
+    /// テスト用ヘルパー: 「(0,0)の赤ブロックが2マス落下し、着地先(2,0)で(2,1)(2,2)(2,3)と
+    /// 4連結して消滅する」3行の盤面を、指定した落下tick間隔で作り、着地・消滅した直後の
+    /// フレームまで1フレーム(33ms)ずつ進める。
+    fn landed_and_vanished_game(block_fall_tick_ms: u64) -> Game {
+        let mut game = Game::new(1);
+        game.set_block_fall_tick_ms(block_fall_tick_ms);
+        game.board.rows.truncate(3);
+        for row in game.board.rows.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = BoardCell::Empty;
+            }
+        }
+        game.player.row = 0;
+        game.player.col = 5;
+        game.board.rows[0][0] = BoardCell::Color(ColorKind::Red);
+        for col in 1..=3 {
+            game.board.rows[2][col] = BoardCell::Color(ColorKind::Red);
+        }
+
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+        for _ in 0..400 {
+            game.update(frame);
+            let landed = game
+                .recently_moved_blocks()
+                .iter()
+                .any(|&(to, _)| to == (2, 0));
+            if landed && game.board.cell(2, 0) == BoardCell::Empty {
+                return game;
+            }
+        }
+        panic!("着地と同一tickでの4連結消滅が起きなかった");
+    }
+
+    #[test]
+    fn falling_block_that_auto_vanishes_on_landing_still_renders_its_fall_at_a_slow_tick_rate() {
+        // #234。tick=600msでは、消滅フラッシュ(従来200ms固定)が落下補間(600ms)より先に
+        // 終わってしまい、落下中のブロックが道のりの4割弱で空中から消えていた。
+        // 補間が半分ほど進んだ時点でも、まだ赤ブロックとして描かれ続けることを確認する。
+        let mut game = landed_and_vanished_game(600);
+
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+        while game.block_fall_progress() < 0.5 {
+            game.update(frame);
+        }
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+        assert!(
+            moved_map.contains_key(&(2, 0)),
+            "テスト前提: まだ着地セルの落下補間が続いていること"
+        );
+
+        let inner = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(inner);
+        draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
+
+        let red_bg = colors::fill_color(ColorKind::Red);
+        assert!(
+            buf.content
+                .iter()
+                .any(|cell| cell.bg == red_bg && cell.symbol() != " "),
+            "tick=600msでも落下中は赤ブロックとして描画され続けるはず"
+        );
+    }
+
+    #[test]
+    fn static_cell_of_a_pending_vanish_keeps_its_look_until_the_flash_begins() {
+        // #234。一緒に消える静止セル(着地セル自身ではない側)も、落下ブロックが到着する
+        // までは消滅前の見た目のままで、到着してからフラッシュへ移ることを確認する。
+        let mut game = landed_and_vanished_game(600);
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+        assert!(
+            !moved_map.contains_key(&(2, 1)),
+            "テスト前提: (2,1)は落下していない静止セルであること"
+        );
+
+        // 1セルぶんだけのバッファにして、描画結果をセル全体で検証できるようにする。
+        let inner = Rect::new(0, 0, CELL_W, CELL_H);
+        let red_bg = colors::fill_color(ColorKind::Red);
+
+        let mut buf = Buffer::empty(inner);
+        draw_static_cell(&mut buf, 0, 0, &game, (2, 1), BoardCell::Empty, &moved_map);
+        assert!(
+            buf.content.iter().any(|cell| cell.bg == red_bg),
+            "落下ブロックの到着待ちの間は、消滅前の赤ブロックのまま描かれるはず"
+        );
+
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+        for _ in 0..40 {
+            if game.vanish_flash_progress((2, 1)).is_some() {
+                break;
+            }
+            game.update(frame);
+        }
+        let t = game
+            .vanish_flash_progress((2, 1))
+            .expect("到着後はフラッシュに入っているはず");
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+        let mut buf = Buffer::empty(inner);
+        draw_static_cell(&mut buf, 0, 0, &game, (2, 1), BoardCell::Empty, &moved_map);
+        let flash_bg = colors::vanish_flash_bg(t);
+        assert!(
+            buf.content.iter().all(|cell| cell.bg == flash_bg),
+            "到着後は消滅フラッシュの背景色で塗られるはず"
+        );
     }
 }

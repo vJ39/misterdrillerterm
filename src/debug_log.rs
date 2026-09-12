@@ -194,10 +194,10 @@ impl DebugLog {
     /// Emptyになっている(着地と同一tickで自動消滅した等)場面に遭遇したことを記録する
     /// (TERM独自拡張。#172の再発疑い調査用。ユーザー指摘: 「このやり取りが何回か
     /// 続いており解決できてないので...不足要素をロギングしよう」)。
-    /// `resolved_kind`は`recently_vanished_kind`で補えた場合の種類(補えなければNone
+    /// `resolved_kind`は`pending_vanish_kind`で補えた場合の種類(補えなければNone
     /// =描画を丸ごとスキップした)。`progress`は`block_fall_progress()`(0.0〜1.0)、
-    /// `flash_remaining_ms`はこの時点で残っていた消滅フラッシュの残り時間(msの整数化。
-    /// 対象自体が無ければNone)。
+    /// `flash_remaining_ms`はこの時点で残っていた消滅演出の残り時間(フラッシュ開始
+    /// 待ちを含む合計。msの整数化。対象自体が無ければNone)。
     #[allow(clippy::too_many_arguments)]
     pub fn log_render_fallback(
         &self,

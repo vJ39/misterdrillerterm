@@ -15,24 +15,25 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
-    BLOCK_VANISH_FLASH_MS, BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER, BOARD_SNAPSHOT_ROWS_BELOW_PLAYER,
-    BOARD_SNAPSHOT_TICK_INTERVAL, BOMB_BLAST_COL_RANGE, BOMB_BLAST_ROW_RANGE, BOMB_DANGER_MS,
-    BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS, BOMB_FUSE_TICK_INTERVAL_MS,
-    BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS, BOMB_SETTLE_TICK_MS,
-    BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS, BOMB_SPAWN_DEPTH_MAX_BONUS,
-    BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT, CHAIN_VANISH_INTERVAL_MS_DEFAULT,
-    CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_MIN, CHECKPOINT_FLASH_MS,
-    CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_GAP_M, CRUSH_ASCEND_MS,
-    CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS,
-    DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_STEP_MS,
-    DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS, DODGE_RECOVERY_MS_DEFAULT,
-    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS, DRILL_ANIM_FRAME_MS,
-    DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
-    INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT,
-    LIVES_MAX, MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX,
-    MOVE_COOLDOWN_MS_MIN, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD,
-    PLAYER_SCREEN_ROWS_ABOVE, REWIND_STOCK_INITIAL, REWIND_STOCK_MAX_DEFAULT,
-    REWIND_STOCK_PER_CHECKPOINT, SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS, depth_fraction,
+    BLOCK_VANISH_FLASH_MIN_MS, BLOCK_VANISH_FLASH_MS, BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER,
+    BOARD_SNAPSHOT_ROWS_BELOW_PLAYER, BOARD_SNAPSHOT_TICK_INTERVAL, BOMB_BLAST_COL_RANGE,
+    BOMB_BLAST_ROW_RANGE, BOMB_DANGER_MS, BOMB_ENTER_MS, BOMB_EXPLOSION_FLASH_MS, BOMB_FUSE_MS,
+    BOMB_FUSE_TICK_INTERVAL_MS, BOMB_MAX_COUNT_ON_BOARD, BOMB_ROLL_MS, BOMB_SETTLE_MS,
+    BOMB_SETTLE_TICK_MS, BOMB_SPAWN_BASE_PROB, BOMB_SPAWN_CHECK_INTERVAL_MS,
+    BOMB_SPAWN_DEPTH_MAX_BONUS, BONUS_FLOOR_DEPTH_M, BONUS_FLOOR_ITEM_AIR_RATE_PERCENT,
+    CHAIN_VANISH_INTERVAL_MS_DEFAULT, CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_MIN,
+    CHECKPOINT_FLASH_MS, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M, CHECKPOINT_ZONE_GAP_M,
+    CRUSH_ASCEND_MS, CRUSH_FLASH_MS, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
+    DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_MS_MIN,
+    DEBUG_SHAKE_DURATION_STEP_MS, DEBUG_UNIFY_COLORS_RANGE_ROWS, DODGE_DETECT_WINDOW_MS,
+    DODGE_RECOVERY_MS_DEFAULT, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, DODGE_SLIDE_MS,
+    DRILL_ANIM_FRAME_MS, DRILL_ANIM_MS, FALL_SPEED_DEPTH_MAX_SPEEDUP, FALL_TICK_MS,
+    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS,
+    INVULNERABILITY_TICKS, LIVES_DEFAULT, LIVES_MAX, MOVE_ANIM_DURATION_MS,
+    MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN,
+    OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD, PLAYER_SCREEN_ROWS_ABOVE,
+    REWIND_STOCK_INITIAL, REWIND_STOCK_MAX_DEFAULT, REWIND_STOCK_PER_CHECKPOINT, SHAKE_DURATION_MS,
+    STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
 use board::{
     BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
@@ -308,6 +309,25 @@ pub enum MissCause {
     BombBlast,
 }
 
+/// 消滅フラッシュ演出1セルぶんの進行状態(TERM独自拡張。#234)。
+///
+/// 重力tickで消えたセルは、その瞬間にはまだ落下ブロックが空中にいる(落下補間の途中)。
+/// 着地tickの瞬間から光り始めると「まだ到着していないブロックの着地先が先に光る」ため、
+/// 補間が終わるまでの待ち時間(`delay`)を持たせ、到着してからフラッシュを始める。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VanishedCell {
+    pos: board::Pos,
+    /// 消滅直前のセルの種類。待機中はこの見た目のまま描き続ける。
+    kind: Cell,
+    /// フラッシュ開始までの待ち。重力tickで消えた場合は落下補間が終わるまで(≒1tick)、
+    /// それ以外(掘削・スター溶解・ボム爆風等)は0。
+    delay: Duration,
+    /// フラッシュの残り時間。`delay`が0になってから減り始める。
+    remaining: Duration,
+    /// このセルのフラッシュ全長(進捗計算用)。実効tickで変わるためセルごとに保持する。
+    total: Duration,
+}
+
 impl MissCause {
     /// デバッグログ(`miss_events`テーブル)へ記録する際の原因名(TERM独自拡張。#218)。
     fn as_str(self) -> &'static str {
@@ -442,10 +462,10 @@ pub struct Game {
     /// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う)。次のティックが
     /// 来るまでの間、描画側がこれと`block_fall_progress()`を使って補間する。
     last_block_moves: Vec<BlockMove>,
-    /// 直近に消滅した(自動消滅・スター溶解)セルの座標と、消滅フラッシュ演出の残り時間
+    /// 直近に消滅した(自動消滅・スター溶解)セルと、消滅フラッシュ演出の進行状態
     /// (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
     /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
-    recently_vanished: Vec<(board::Pos, Duration, Cell)>,
+    recently_vanished: Vec<VanishedCell>,
     /// ボム爆発の爆風が届いた直後のセルと、炎の演出の残り時間・爆心地からの距離
     /// (TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、ボンバーマンTERMの
     /// ように炎アニメーションほしい」)。距離(0=爆心地、遠いほど大きい)で炎の色調を
@@ -1031,7 +1051,10 @@ impl Game {
                 // その場合は消滅フラッシュを二重に積まない。
                 if cell != Cell::Empty {
                     self.board.set(pos.0, pos.1, Cell::Empty);
-                    self.note_vanished_cells([(pos, cell)]);
+                    // 押し潰しは重力tick内で起きるため、押し潰したブロック自身も
+                    // まだ落下補間の途中にいる。到着を待ってからフラッシュする(#234)。
+                    let delay = self.gravity_vanish_delay();
+                    self.note_vanished_cells([(pos, cell)], delay);
                 }
             }
             // 上向き掘削が押し潰しに終わった場合は盤面が変化していない(掘削自体が
@@ -1324,11 +1347,20 @@ impl Game {
         self.crush_flash_remaining = self.crush_flash_remaining.saturating_sub(delta);
         self.checkpoint_flash_remaining = self.checkpoint_flash_remaining.saturating_sub(delta);
         self.render_anim_elapsed += delta.as_secs_f32();
-        for (_, remaining, _) in self.recently_vanished.iter_mut() {
-            *remaining = remaining.saturating_sub(delta);
+        // 消滅フラッシュは、まず開始待ち(`delay`)を消化し、余った時間だけフラッシュ本体
+        // (`remaining`)を進める(TERM独自拡張。#234)。待機中はまだ落下ブロックが空中に
+        // いるため、光り始めずに消滅直前の見た目を保持する。
+        for entry in self.recently_vanished.iter_mut() {
+            let mut rest = delta;
+            if entry.delay > Duration::ZERO {
+                let consumed = rest.min(entry.delay);
+                entry.delay -= consumed;
+                rest -= consumed;
+            }
+            entry.remaining = entry.remaining.saturating_sub(rest);
         }
         self.recently_vanished
-            .retain(|&(_, remaining, _)| remaining > Duration::ZERO);
+            .retain(|e| e.delay > Duration::ZERO || e.remaining > Duration::ZERO);
         for (_, remaining, _) in self.recently_exploded.iter_mut() {
             *remaining = remaining.saturating_sub(delta);
         }
@@ -1336,6 +1368,15 @@ impl Game {
             .retain(|&(_, remaining, _)| remaining > Duration::ZERO);
 
         if self.status != GameStatus::Playing {
+            // GameOverになった瞬間に落下中だったブロック(押し潰したブロック自身を含む)の
+            // 補間を、着地位置まで進め切ってから止める(TERM独自拡張。#234)。ここで
+            // 早期returnすると`fall_tick_accum`が進まず、空中の中途半端な位置で凍り付いた
+            // ままフラッシュ→GameOverオーバーレイへ移ってしまう。一時停止(Paused)は
+            // 対象外(再開時に大きなdeltaがまとめて来てtickが飛ぶのを避けるため)。
+            if self.status == GameStatus::GameOver {
+                let tick = Duration::from_millis(self.effective_block_fall_tick_ms());
+                self.fall_tick_accum = (self.fall_tick_accum + delta).min(tick);
+            }
             return events;
         }
 
@@ -1429,6 +1470,11 @@ impl Game {
             // 何もしない=従来通り即座に解決する)。
             if self.chain_pause_remaining > Duration::ZERO {
                 self.chain_pause_remaining = self.chain_pause_remaining.saturating_sub(tick);
+                // 足止めするtickでも、前tickの落下補間はここで完了として確定させる
+                // (TERM独自拡張。#234)。`last_block_moves`を残したままにすると、
+                // 足止め中に同じ移動の補間が0から再生され、着地済みのブロックが
+                // 巻き戻って見えてしまう。
+                self.last_block_moves.clear();
                 continue;
             }
 
@@ -1437,8 +1483,7 @@ impl Game {
             // その間に別の塊が同じ地点へ落ちてきても二重にライフを失わないよう、
             // 演出中は無敵として扱う(既存の`invulnerability_ticks_remaining`と同じ仕組み)。
             let invulnerable = self.invulnerability_ticks_remaining > 0 || self.is_dying();
-            let shake_ticks =
-                (self.shake_duration_ms / effective_tick_ms.max(1)).min(u8::MAX as u64) as u8;
+            let shake_ticks = self.shake_ticks();
             let result = physics::process_gravity_tick(
                 &mut self.board,
                 &mut self.player,
@@ -1503,8 +1548,11 @@ impl Game {
                     blocks: result.auto_vanished_rock_blocks,
                 });
             }
-            self.note_vanished_cells(result.vanished_cells);
-            self.purge_checkpoint_zone_debris();
+            // 重力tickで消えたセルは、落下補間が終わる(=次のtickが来る)まで待ってから
+            // フラッシュを始める(TERM独自拡張。#234)。
+            let vanish_delay = self.gravity_vanish_delay();
+            self.note_vanished_cells(result.vanished_cells, vanish_delay);
+            self.purge_checkpoint_zone_debris(vanish_delay);
             self.log_board_snapshot_if_due();
 
             if (result.auto_vanished_blocks > 0 || result.auto_vanished_rock_blocks > 0)
@@ -1532,7 +1580,8 @@ impl Game {
             events.push(GameEvent::BlockDestroyed {
                 blocks: melted.len(),
             });
-            self.note_vanished_cells(melted);
+            // スター溶解は落下とは無関係にその場で消えるため、待たずに光り始める。
+            self.note_vanished_cells(melted, Duration::ZERO);
         }
 
         // ボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、爆弾をランダムに投げて
@@ -1818,8 +1867,15 @@ impl Game {
     /// 隣接ブロックがあったら、消える演出を延長してそれも消す」)。これにより、重力で
     /// 落下したブロックが着地して連鎖的に4連結消滅した場合、古い方の演出が先に
     /// フェードアウトして途切れず、1つの連続した「連鎖」に見えるようにする。
-    fn note_vanished_cells(&mut self, cells: impl IntoIterator<Item = (board::Pos, Cell)>) {
-        let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS);
+    /// `delay`はフラッシュを始めるまでの待ち時間(TERM独自拡張。#234)。重力tickで
+    /// 消えたセルは落下補間が終わるまで(`gravity_vanish_delay`)待ち、それ以外
+    /// (掘削・スター溶解・頭上クリア・ボム爆風)は待たずに即座に光り始める。
+    fn note_vanished_cells(
+        &mut self,
+        cells: impl IntoIterator<Item = (board::Pos, Cell)>,
+        delay: Duration,
+    ) {
+        let total = Duration::from_millis(self.vanish_flash_duration_ms());
         let new_cells: Vec<(board::Pos, Cell)> = cells.into_iter().collect();
 
         if let Some(log) = &self.debug_log {
@@ -1839,48 +1895,88 @@ impl Game {
                 if let Some(entry) = self
                     .recently_vanished
                     .iter_mut()
-                    .find(|(p, _, _)| *p == neighbor)
+                    .find(|e| e.pos == neighbor && e.delay.is_zero())
                 {
-                    entry.1 = flash;
+                    // 既にフラッシュ中の隣接セルは、新規分がフラッシュを終えるのと
+                    // 同じ時刻まで残り時間を伸ばし、一緒に消えるようにする。まだ待機中
+                    // (delay>0)のセルは、その待ちが終わってから自分のフラッシュを
+                    // 始めればよいので触らない。
+                    entry.remaining = delay + total;
                 }
             }
         }
 
         self.recently_vanished
-            .extend(new_cells.into_iter().map(|(pos, kind)| (pos, flash, kind)));
+            .extend(new_cells.into_iter().map(|(pos, kind)| VanishedCell {
+                pos,
+                kind,
+                delay,
+                remaining: total,
+                total,
+            }));
     }
 
-    /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=消滅直後、1.0=演出完了
-    /// 直前。TERM独自拡張)。対象でなければ`None`を返す。
+    /// 重力tick内で消滅したセルの、フラッシュ開始までの待ち時間(TERM独自拡張。#234)。
+    /// `fall_tick_accum`はこのtickぶんを差し引いた直後の値なので、`tick - accum`が
+    /// そのまま「落下補間が1.0に達するまでの残り実時間」になる。1フレームで複数tickを
+    /// 消化した場合(accum >= tick)は0になり、待たずに即座にフラッシュへ入る。
+    fn gravity_vanish_delay(&self) -> Duration {
+        Duration::from_millis(self.effective_block_fall_tick_ms())
+            .saturating_sub(self.fall_tick_accum)
+    }
+
+    /// 実効tickに応じた消滅フラッシュの長さ(ms、TERM独自拡張。#234)。基準tick
+    /// (`FALL_TICK_MS`)で`BLOCK_VANISH_FLASH_MS`になる比例値で、短すぎて視認できなく
+    /// ならないよう`BLOCK_VANISH_FLASH_MIN_MS`を下限にする。
+    pub(crate) fn vanish_flash_duration_ms(&self) -> u64 {
+        let tick = self.effective_block_fall_tick_ms();
+        (BLOCK_VANISH_FLASH_MS * tick / FALL_TICK_MS).max(BLOCK_VANISH_FLASH_MIN_MS)
+    }
+
+    /// 揺れ時間(`shake_duration_ms`)を実効tick単位へ換算した揺れtick数(TERM独自拡張。
+    /// #234)。揺れ時間が0なら0、0より大きければ最低1tickは揺れる(整数除算で0になると
+    /// 予兆なしにいきなり落ち始めてしまうため)。
+    pub(crate) fn shake_ticks(&self) -> u8 {
+        if self.shake_duration_ms == 0 {
+            return 0;
+        }
+        let tick = self.effective_block_fall_tick_ms().max(1);
+        (self.shake_duration_ms / tick).clamp(1, u8::MAX as u64) as u8
+    }
+
+    /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=フラッシュ開始直後、
+    /// 1.0=演出完了直前。TERM独自拡張)。フラッシュ中のセルのみ`Some`を返し、
+    /// 落下ブロックの到着待ち(`delay`>0)のセルは`None`を返す(#234)。
     pub fn vanish_flash_progress(&self, pos: board::Pos) -> Option<f32> {
-        let flash = Duration::from_millis(BLOCK_VANISH_FLASH_MS)
-            .as_secs_f32()
-            .max(0.001);
         self.recently_vanished
             .iter()
-            .find(|&&(p, _, _)| p == pos)
-            .map(|&(_, remaining, _)| (1.0 - remaining.as_secs_f32() / flash).clamp(0.0, 1.0))
+            .find(|e| e.pos == pos && e.delay.is_zero())
+            .map(|e| {
+                let total = e.total.as_secs_f32().max(0.001);
+                (1.0 - e.remaining.as_secs_f32() / total).clamp(0.0, 1.0)
+            })
     }
 
-    /// 描画側が使う、指定セルで直近に消滅したブロックの種類(TERM独自拡張。#172。
-    /// ユーザー指摘: 「崩れてきたブロックが、接地する1コマ前でスルスルと消えてしまう」)。
-    /// 着地と同一tickで4連結自動消滅した場合、盤面は既にEmptyになっているため、
-    /// `recently_moved_blocks`による落下補間描画が表示すべきグリフを盤面から読めない。
-    /// フラッシュ演出が残っている間はここから消滅直前の種類を取得できる。
-    pub fn recently_vanished_kind(&self, pos: board::Pos) -> Option<Cell> {
+    /// 描画側が使う、消滅は確定したがまだフラッシュに入っていない(落下ブロックの到着
+    /// 待ちの)セルの、消滅直前の種類(TERM独自拡張。#172/#234。ユーザー指摘: 「崩れて
+    /// きたブロックが、接地する1コマ前でスルスルと消えてしまう」)。着地と同一tickで
+    /// 4連結自動消滅した場合、盤面は既にEmptyになっているため、落下補間描画も静的な
+    /// セル描画も表示すべきグリフを盤面から読めない。待機中はここから消滅直前の種類を
+    /// 取得して、到着するまで元の見た目のまま描き続ける。
+    pub fn pending_vanish_kind(&self, pos: board::Pos) -> Option<Cell> {
         self.recently_vanished
             .iter()
-            .find(|&&(p, _, _)| p == pos)
-            .map(|&(_, _, kind)| kind)
+            .find(|e| e.pos == pos && !e.delay.is_zero())
+            .map(|e| e.kind)
     }
 
-    /// 指定セルの消滅フラッシュの残り時間(ms、TERM独自拡張。#174調査用ログの補助)。
-    /// 対象でなければ`None`。
+    /// 指定セルの消滅演出が終わるまでの残り時間(ms、TERM独自拡張。#174調査用ログの
+    /// 補助)。フラッシュ開始待ちも含めた合計を返す。対象でなければ`None`。
     fn recently_vanished_flash_remaining_ms(&self, pos: board::Pos) -> Option<u64> {
         self.recently_vanished
             .iter()
-            .find(|&&(p, _, _)| p == pos)
-            .map(|&(_, remaining, _)| remaining.as_millis() as u64)
+            .find(|e| e.pos == pos)
+            .map(|e| (e.delay + e.remaining).as_millis() as u64)
     }
 
     /// `BOARD_SNAPSHOT_TICK_INTERVAL`ティックごとに、プレイヤー周辺の非Emptyセルを
@@ -2336,7 +2432,7 @@ impl Game {
                 }
             }
         }
-        self.note_vanished_cells(cleared);
+        self.note_vanished_cells(cleared, Duration::ZERO);
 
         // 列ごとに、画面のすぐ外側(just_off_screen_row)を起点に、元の深さ順(浅い方が先)
         // を保ったまま浅い側(まだ画面に入らない側)へ空いているマスを探して詰め直す。
@@ -2411,7 +2507,7 @@ impl Game {
     /// パージする(#190: 地面部分はもう強制的にくり抜かない=プレイヤーが実際に
     /// 掘り進む対象なので対象外。パージ対象はスキマのみ)。500mのボーナスフロアは
     /// アイテム/AIRを意図的に配置する区間のため対象外。
-    fn purge_checkpoint_zone_debris(&mut self) {
+    fn purge_checkpoint_zone_debris(&mut self, vanish_delay: Duration) {
         let width = self.board.width();
         let depth_rows = self.board.depth_rows();
         let mut cleared = Vec::new();
@@ -2433,7 +2529,9 @@ impl Game {
             }
         }
         if !cleared.is_empty() {
-            self.note_vanished_cells(cleared);
+            // 重力tickから呼ばれるため、ちょうどこのtickでスキマへ落ちてきたブロックも
+            // 対象になりうる。落下補間の到着を待ってからフラッシュする(#234)。
+            self.note_vanished_cells(cleared, vanish_delay);
         }
     }
 
@@ -2482,9 +2580,7 @@ impl Game {
         // 消滅させなくていい」というユーザー指摘により廃止した。連結の再計算(揺れ状態の
         // リセット)だけ行い、実際の消滅判定は通常の重力ティック(支えを失って落下・
         // 着地した場合のみ)に委ねる。
-        let current_shake_ticks =
-            (self.shake_duration_ms / self.block_fall_tick_ms.max(1)).min(u8::MAX as u64) as u8;
-        self.gravity_state.reset_shake_progress(current_shake_ticks);
+        self.gravity_state.reset_shake_progress(self.shake_ticks());
 
         Vec::new()
     }
@@ -2586,7 +2682,8 @@ impl Game {
         // 消滅ログ・消滅フラッシュの記録は、下の色ブロック4連結消滅と同じように
         // ループ後にまとめて1回で行う。
         if !destroyed_items.is_empty() {
-            self.note_vanished_cells(destroyed_items);
+            // 爆風による破壊は落下とは無関係にその場で消えるため、待たずに光り始める。
+            self.note_vanished_cells(destroyed_items, Duration::ZERO);
         }
 
         // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅
@@ -2610,7 +2707,7 @@ impl Game {
                 events.push(GameEvent::BlockDestroyed {
                     blocks: group.len(),
                 });
-                self.note_vanished_cells(vanished);
+                self.note_vanished_cells(vanished, Duration::ZERO);
             }
         }
 
@@ -2835,7 +2932,7 @@ fn move_anim_duration_secs() -> f32 {
 mod tests {
     use super::*;
     use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
-    use crate::constants::{ROCK_HITS_TO_BREAK, SHAKE_TICKS};
+    use crate::constants::{FRAME_INTERVAL_MS, ROCK_HITS_TO_BREAK, SHAKE_TICKS};
     use board::{Cell, ColorKind};
 
     /// テスト用ヘルパー: 盤面全体を`Cell::Empty`にクリアする。`Game::new`はランダム
@@ -4670,13 +4767,13 @@ mod tests {
         // 4連結消滅が起きた場合、先に消えたセルの演出が途切れず1つの連鎖に見えるように
         // する。
         let mut game = Game::new(1);
-        game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))]);
+        game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))], Duration::ZERO);
         game.update(Duration::from_millis(BLOCK_VANISH_FLASH_MS / 2));
         let progress_before = game.vanish_flash_progress((0, 0)).unwrap();
         assert!(progress_before > 0.0, "前提: フラッシュが進行中であること");
 
         // 隣接セル(0,1)が新たに消滅 → (0,0)の残り時間もリセットされて延長されるはず。
-        game.note_vanished_cells(vec![((0, 1), Cell::Color(ColorKind::Red))]);
+        game.note_vanished_cells(vec![((0, 1), Cell::Color(ColorKind::Red))], Duration::ZERO);
         let progress_after = game.vanish_flash_progress((0, 0)).unwrap();
         assert!(
             progress_after < progress_before,
@@ -4691,12 +4788,12 @@ mod tests {
     #[test]
     fn note_vanished_cells_does_not_extend_non_adjacent_still_flashing_cells() {
         let mut game = Game::new(1);
-        game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))]);
+        game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))], Duration::ZERO);
         game.update(Duration::from_millis(BLOCK_VANISH_FLASH_MS / 2));
         let progress_before = game.vanish_flash_progress((0, 0)).unwrap();
 
         // 隣接していない遠いセル(5,5)が消滅しても、(0,0)の演出は延長されないはず。
-        game.note_vanished_cells(vec![((5, 5), Cell::Color(ColorKind::Red))]);
+        game.note_vanished_cells(vec![((5, 5), Cell::Color(ColorKind::Red))], Duration::ZERO);
         let progress_after = game.vanish_flash_progress((0, 0)).unwrap();
         assert!(
             (progress_after - progress_before).abs() < f32::EPSILON,
@@ -7620,5 +7717,271 @@ mod tests {
         assert_eq!(game.bombs.len(), 1, "起爆時間前は消えないはず");
         assert_eq!(game.bombs[0].remaining_ms, BOMB_FUSE_MS - 100);
         assert!(!events.contains(&GameEvent::BombExploded));
+    }
+
+    // -----------------------------------------------------------------------
+    // 落下tick間隔を遅くした際の「落下→消滅」演出(#234)
+    // -----------------------------------------------------------------------
+
+    /// テスト用ヘルパー: 盤面を3行に切り詰め、最深行(row2)を常に支持される足場にした上で、
+    /// 「(0,0)の色ブロックが2マス落下し、着地先(2,0)で(2,1)(2,2)(2,3)と4連結して消滅する」
+    /// 盤面を作る。落下tick間隔だけをパラメータで変えて、演出の破綻を比較できるようにする。
+    fn landing_vanish_game(block_fall_tick_ms: u64) -> Game {
+        let mut game = Game::new(1);
+        game.set_block_fall_tick_ms(block_fall_tick_ms);
+        game.board.rows.truncate(3);
+        clear_board(&mut game);
+        game.player.row = 0;
+        game.player.col = 5; // 落下グループから十分離す
+        game.board.rows[0][0] = Cell::Color(ColorKind::Red);
+        for col in 1..=3 {
+            game.board.rows[2][col] = Cell::Color(ColorKind::Red);
+        }
+        game
+    }
+
+    /// テスト用ヘルパー: `landing_vanish_game`の盤面を1フレーム(33ms)ずつ進め、
+    /// 落下ブロックが着地して4連結消滅するまで到達させる。消滅の判定には静止セル(2,1)を
+    /// 使う(このセルは自分では動かないため、Emptyになるのは4連結消滅した時だけ)。
+    fn advance_to_landing_vanish(game: &mut Game) {
+        let frame = Duration::from_millis(FRAME_INTERVAL_MS);
+        for _ in 0..400 {
+            game.update(frame);
+            if game.board.cell(2, 1) == Cell::Empty {
+                return;
+            }
+        }
+        panic!("着地と同一tickでの4連結消滅が起きなかった");
+    }
+
+    #[test]
+    fn landing_block_keeps_its_look_until_the_fall_interpolation_finishes_at_any_tick_rate() {
+        // #234。落下tick間隔を上げる(遅くする)と、消滅フラッシュの寿命(200ms固定)が
+        // 1tickぶんの落下補間より短くなり、落下中のブロックが空中で消えていた。
+        // どのtick間隔でも「補間が終わるまでは消滅直前の見た目を保持している」ことを確認する。
+        let frame = Duration::from_millis(FRAME_INTERVAL_MS);
+        for tick_ms in [25u64, 150, 300, 450, 600] {
+            let mut game = landing_vanish_game(tick_ms);
+            let mut vanished = false;
+            let mut checked_frames = 0;
+
+            for _ in 0..400 {
+                game.update(frame);
+                // 着地セルが盤面から消えている(4連結消滅済み)のに、まだ落下補間が
+                // 続いている間は、消滅直前の見た目を保持していなければならない。
+                let still_falling = game
+                    .recently_moved_blocks()
+                    .iter()
+                    .any(|&(to, _)| to == (2, 0));
+                if still_falling && game.board.cell(2, 0) == Cell::Empty {
+                    assert!(
+                        game.pending_vanish_kind((2, 0)).is_some(),
+                        "tick={tick_ms}ms: 落下補間中(progress={})に着地セルの見た目が失われている",
+                        game.block_fall_progress()
+                    );
+                    checked_frames += 1;
+                }
+                if game.board.cell(2, 1) == Cell::Empty {
+                    vanished = true;
+                    if !still_falling {
+                        break;
+                    }
+                }
+            }
+
+            assert!(
+                vanished,
+                "tick={tick_ms}ms: 着地と同一tickでの4連結消滅が起きなかった"
+            );
+            // 1フレーム(33ms)より短いtickでは落下tickがフレーム内で完結してしまい、
+            // 「補間の途中」をフレーム境界で観測できない。それ以外は必ず観測できるはず。
+            if tick_ms > FRAME_INTERVAL_MS {
+                assert!(
+                    checked_frames > 0,
+                    "tick={tick_ms}ms: 落下補間中のフレームを1つも検証できていない"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn vanish_flash_starts_only_after_the_falling_block_has_arrived() {
+        // #234。従来は着地tickの瞬間にフラッシュが始まり、まだ空中にいるブロックの
+        // 着地先が先に光っていた。着地セル・静止セルとも、落下補間が終わる(次のtickが
+        // 来る)まではフラッシュに入らないことを確認する。
+        let mut game = landing_vanish_game(300);
+        advance_to_landing_vanish(&mut game);
+
+        let frame = Duration::from_millis(FRAME_INTERVAL_MS);
+        let mut waited_frames = 0;
+        while game.vanish_flash_progress((2, 0)).is_none() {
+            assert!(
+                game.pending_vanish_kind((2, 0)).is_some(),
+                "フラッシュ前の着地セルは待機中(消滅直前の見た目)であるはず"
+            );
+            assert!(
+                game.vanish_flash_progress((2, 1)).is_none(),
+                "一緒に消える静止セルも、落下ブロックが着くまでは光り始めないはず"
+            );
+            game.update(frame);
+            waited_frames += 1;
+            assert!(
+                waited_frames < 40,
+                "フラッシュが始まらないまま待ち続けている"
+            );
+        }
+
+        assert!(
+            waited_frames >= 2,
+            "tick=300msなら着地から数フレームは待機するはず(実際は{waited_frames}フレーム)"
+        );
+        assert!(
+            game.vanish_flash_progress((2, 0)).unwrap() < 0.3,
+            "フラッシュは始まったばかりのはず"
+        );
+        assert!(
+            game.vanish_flash_progress((2, 1)).is_some(),
+            "静止セルも同じタイミングでフラッシュに入るはず"
+        );
+        assert!(
+            game.pending_vanish_kind((2, 0)).is_none(),
+            "フラッシュに入ったら待機中ではなくなるはず"
+        );
+    }
+
+    #[test]
+    fn vanish_flash_duration_scales_with_the_effective_fall_tick() {
+        // #234。フラッシュの長さを基準tick(FALL_TICK_MS)での`BLOCK_VANISH_FLASH_MS`から
+        // 実効tickに比例させ、遅いtickでは伸ばす。短すぎて視認できなくならないよう下限を持つ。
+        let mut game = Game::new(1);
+
+        game.set_block_fall_tick_ms(FALL_TICK_MS);
+        let at_default = game.vanish_flash_duration_ms() as i64;
+        assert!(
+            (at_default - BLOCK_VANISH_FLASH_MS as i64).abs() <= 3,
+            "既定tickでは従来どおり約{BLOCK_VANISH_FLASH_MS}msのはず(実際は{at_default}ms)"
+        );
+
+        game.set_block_fall_tick_ms(600);
+        let at_slowest = game.vanish_flash_duration_ms() as i64;
+        assert!(
+            (at_slowest - 800).abs() <= 5,
+            "tick=600msでは4倍の約800msへ伸びるはず(実際は{at_slowest}ms)"
+        );
+
+        game.set_block_fall_tick_ms(DEBUG_FALL_TICK_MS_MIN);
+        assert_eq!(
+            game.vanish_flash_duration_ms(),
+            BLOCK_VANISH_FLASH_MIN_MS,
+            "最速tickでは比例値が下限(3フレーム)を下回るため下限で止まるはず"
+        );
+    }
+
+    #[test]
+    fn shake_ticks_never_drops_to_zero_while_a_shake_duration_is_set() {
+        // #234。揺れtick数は整数除算のため、tick間隔が揺れ時間を超えると0になり
+        // 「予兆なしでいきなり落ちる」状態だった。揺れ時間が設定されている限り最低1tickは揺れる。
+        let mut game = Game::new(1);
+        for tick_ms in [150u64, 300, 450, 500, 600] {
+            game.set_block_fall_tick_ms(tick_ms);
+            assert!(
+                game.shake_ticks() >= 1,
+                "tick={tick_ms}ms: 揺れ時間が設定されているのに揺れtickが0になっている"
+            );
+        }
+
+        game.set_block_fall_tick_ms(FALL_TICK_MS);
+        assert_eq!(
+            game.shake_ticks(),
+            SHAKE_TICKS,
+            "既定tickでは従来どおりの揺れtick数のはず"
+        );
+
+        game.set_shake_duration_ms(0);
+        assert_eq!(game.shake_ticks(), 0, "揺れ時間0なら揺れないはず");
+    }
+
+    #[test]
+    fn shake_ticks_uses_the_depth_adjusted_tick_everywhere_it_is_needed() {
+        // #234。`debug_unify_nearby_colors`の揺れリセットだけが深度補正前の生の
+        // `block_fall_tick_ms`で換算しており、重力tick側の基準と食い違っていた。
+        // 換算を1つの関数に統一し、深度が進んでも両者が同じ値を見ることを確認する。
+        let mut game = Game::new(1);
+        game.player.row = 999; // 最深部=実効tickが最大まで短縮される
+        game.set_block_fall_tick_ms(FALL_TICK_MS);
+
+        let effective = game.effective_block_fall_tick_ms();
+        assert!(
+            effective < FALL_TICK_MS,
+            "テスト前提: 深度によって実効tickが短縮されていること"
+        );
+        assert_eq!(
+            game.shake_ticks(),
+            (game.shake_duration_ms() / effective) as u8,
+            "揺れtick数は深度補正後の実効tickで換算するはず"
+        );
+    }
+
+    #[test]
+    fn a_chain_pause_tick_finalizes_the_previous_fall_interpolation() {
+        // #234(副産物)。連鎖インターバルで足止めするtickは`last_block_moves`を
+        // 更新しないまま次のtickへ進むため、足止め中に前tickの落下補間が0から
+        // 再生され、着地済みのブロックが巻き戻って見えていた。
+        let mut game = Game::new(5);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.chain_vanish_interval_ms = 300;
+        game.chain_pause_remaining = Duration::from_millis(300);
+        game.last_block_moves = vec![((10, 1), (9, 1))];
+
+        game.update(Duration::from_millis(game.effective_block_fall_tick_ms()));
+
+        assert!(
+            game.recently_moved_blocks().is_empty(),
+            "足止めtickが来た時点で前tickの補間は完了として確定させるはず"
+        );
+    }
+
+    #[test]
+    fn fall_interpolation_keeps_advancing_after_game_over() {
+        // #234(副産物)。`update`が`status != Playing`で早期returnするため、押し潰しで
+        // GameOverになった瞬間の落下補間が途中で凍り付き、押し潰したブロックが空中に
+        // 止まったままフラッシュへ移っていた。
+        let mut game = Game::new(1);
+        game.set_block_fall_tick_ms(300);
+        game.status = GameStatus::GameOver;
+        assert!(
+            game.block_fall_progress() < 0.2,
+            "テスト前提: 補間が始まったばかりであること"
+        );
+
+        for _ in 0..12 {
+            game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+        }
+        assert_eq!(
+            game.block_fall_progress(),
+            1.0,
+            "GameOver後も落下補間は着地位置まで進み切るはず"
+        );
+    }
+
+    #[test]
+    fn fall_interpolation_stays_frozen_while_paused() {
+        // 一時停止中まで補間を進めると、再開時に大きなdeltaがまとめて来てtickが飛ぶ。
+        // GameOver(見た目を最後まで見せる)とは区別し、Pausedでは止めたままにする。
+        let mut game = Game::new(1);
+        game.set_block_fall_tick_ms(300);
+        game.status = GameStatus::Paused;
+        let before = game.block_fall_progress();
+
+        for _ in 0..12 {
+            game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+        }
+        assert_eq!(
+            game.block_fall_progress(),
+            before,
+            "一時停止中は落下補間も止まったままのはず"
+        );
     }
 }
