@@ -554,17 +554,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
             if !back_to_title {
                 // オートプレイ(TERM独自拡張。#218)。盤面から決めた仮想入力を、人の
-                // 操作と同じ経路へ流し込む。GameOverからの自動復活だけはダイアログの
-                // 選択操作にあたるため、Confirmをrevive()の呼び出しへ読み替える。
+                // 操作と同じ経路へ流し込む。GameOver中は何も返さないため、ダイアログは
+                // 人間がプレイしたときと同じように表示されたまま操作を待つ(#225)。
                 if let Some(pilot) = autopilot.as_mut() {
                     for action in pilot.decide(game) {
-                        let events = match action {
-                            InputAction::Confirm => {
-                                game.revive();
-                                Vec::new()
-                            }
-                            other => game.apply_input(other),
-                        };
+                        let events = game.apply_input(action);
                         handle_events(
                             &events,
                             mixer.as_ref(),
@@ -1012,29 +1006,10 @@ fn start_new_game(seed: u64, settings: &Settings, depth_goal_m: usize) -> Game {
     // 調査用のブロック状態遷移ログをタイトルからのゲーム開始時に毎回作り直す。
     // 設定画面のトグルで無効化していれば記録自体を行わない。
     game.refresh_debug_log(settings.debug_log_enabled);
-    // 速度系デバッグショートカットの調整値は設定ファイルに永続化されており
-    // (settings.rs)、新しいゲーム開始時にも引き継ぐ。
-    game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
-    game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
-    game.set_shake_duration_ms(settings.shake_duration_ms);
-    game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
-    game.set_move_cooldown_ms(settings.move_cooldown_ms);
-    game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
-    game.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
-    // Xブロック/AIR/スター/ダイヤの配分率設定も、新規ゲーム開始時に
-    // 安全地帯明け(行2)以降の全体へ反映する。
-    game.reroll_spawn_rates_from(
-        2,
-        settings.rock_spawn_rate_percent,
-        settings.air_spawn_rate_percent,
-        settings.star_spawn_rate_percent,
-        settings.diamond_spawn_rate_percent,
-        settings.item_clear_above_rate_percent,
-        settings.item_unify_colors_rate_percent,
-        settings.item_starify_screen_rate_percent,
-        settings.color_count,
-        settings.color_cluster_rate_percent,
-    );
+    // 速度系デバッグショートカットの調整値と出現率の配分は設定ファイルに永続化されており
+    // (settings.rs)、新しいゲーム開始時にも引き継ぐ。オートプレイのソークテストが実機と
+    // 同じ盤面を測れるよう、反映処理はGame側(`apply_settings`)に置いて共有している(#225)。
+    game.apply_settings(settings);
     game
 }
 

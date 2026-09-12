@@ -36,6 +36,32 @@
 //!    実効回復量(`min(50, 100-残量)`)が`AUTOPLAY_AIR_MIN_GAIN`以上なら平常時から
 //!    列スコアへ加点して寄り道する。
 //!
+//! # 酸素切れ死への対策(#225)
+//!
+//! 通常のライフ予算(自動Revive無し)で測り直したところ、ユーザーの実設定(`Profile::harsh`)
+//! では完走2/32・死因の95%が酸素切れだった。効いた修正は次の4つ。
+//!
+//! 1. **揺れ猶予の見積り誤りを直した**(最大の要因)。`column_threat`が返す脅威には
+//!    「既に落ちてくる塊」と「こちらがその列へ掘り込んで初めて支えを失う塊」の2種類が
+//!    あるのに、後者にも猶予0を与えていた。実際には支えを失ってから`shake_duration_ms`
+//!    ぶん揺れてからでないと落ちてこないため、横へ掘り抜ける列がほぼ全て「入った瞬間に
+//!    潰される」と誤判定され、迂回路が候補から消えて岩を割るしかなくなっていた
+//!    (`shake_allowance_ms`の`pending`)
+//! 2. **岩を割る前に酸素が払えるか見る**。緊急判定は残量が減ってから反応するので、判定に
+//!    入る前に岩1個で20%持っていかれると手遅れになる。払えないなら`conserve_oxygen`
+//!    (迂回→着地を待つ→段差登り)へ逃がす(`rock_is_affordable`)
+//! 3. **経路上の岩を「禁止」から「有料」にした**。「横に1個割れば直進できる列」が候補に
+//!    すら上がらなかったため、`lateral_rock_count`ぶんの減点として縦の岩と同じ土俵に載せる
+//! 4. **岩で買った前進を停滞判定の「前進」に数えない**。数えると岩を割るたびに段階が0へ
+//!    戻り、横方向の岩掘りが解禁される段階へ永久に到達しなかった
+//!    (`AUTOPLAY_ROCK_STREAK_ESCALATE`)
+//!
+//! 逆に**採らなかった**案も実測で判断している。頭上の塊に対する必要余裕
+//! (`min_slack_rows`)を割り込む列を「却下せず減点で残す」・隣接列への移動時間見積りから
+//! 安全マージンを外す、のいずれも酸素切れは減るが、減ったぶんがそのまま押し潰し死に
+//! 変わった(1走あたり1.66回→2.47〜4.59回)。安全側の基準は緩めず、見積りの誤りだけを
+//! 直すのが正解だった。
+//!
 //! 経路探索はA*等を使わず、毎フレーム「現在行から先読み範囲で各列を採点→最良列へ
 //! 横移動→着いたら掘る」を繰り返す(`score_columns`)。目的列には
 //! `AUTOPLAY_COLUMN_SWITCH_MARGIN`のヒステリシスを効かせ、AIRと危険回避の間で
@@ -45,22 +71,26 @@
 //! 抜くとそのマスは消えるため、移る前の盤面では支えられて見えるブロックが、移った
 //! 瞬間に落ちてくる。実測ではこれが押し潰しの最多パターンだった。
 //!
-//! 到達度は`soak_short_course_quality`(300m)と
-//! `soak_full_course_without_invincibility`(1000m)に実測値付きで記録している。
+//! 到達度は`soak_short_course_within_life_budget`(300m)・
+//! `soak_full_course_within_life_budget`(1000m)・
+//! `soak_harsh_profile_within_life_budget`(ユーザーの実設定)に実測値付きで記録している。
+//! いずれも通常のライフ予算内(`RevivePolicy::Never`)で測る。
 //!
 //! 無敵(`Game::set_invincible`)とは独立したトグルで、Tキーはオートプレイだけを
 //! 切り替える(#221。無敵はGキーが単独で管理する)。無人で回り続けるアトラクト
-//! モードだけは安全策として無敵も併用する。
+//! モードだけは安全策として無敵も併用する。GameOverになったら何も返さず、人間が
+//! プレイしたときと同じようにダイアログを出したまま操作を待つ(#225)。
 
 use crate::constants::{
     AUTOPLAY_AIR_DETOUR_MAX_COLS, AUTOPLAY_AIR_MIN_GAIN, AUTOPLAY_BOMB_EVADE_MS,
     AUTOPLAY_COLUMN_SCAN_RADIUS, AUTOPLAY_COLUMN_SWITCH_MARGIN, AUTOPLAY_DESCENT_WATCHDOG_FRAMES,
     AUTOPLAY_EMERGENCY_AIR_LOOKAHEAD_ROWS, AUTOPLAY_EMERGENCY_AIR_SCORE_MULTIPLIER,
-    AUTOPLAY_EMERGENCY_HORIZON_SEC, AUTOPLAY_LOOKAHEAD_ROWS, AUTOPLAY_REVIVE_DELAY_MS,
+    AUTOPLAY_EMERGENCY_HORIZON_SEC, AUTOPLAY_LOOKAHEAD_ROWS, AUTOPLAY_ROCK_STREAK_ESCALATE,
     AUTOPLAY_SCORE_AIR_DIVISOR, AUTOPLAY_SCORE_ITEM_BONUS, AUTOPLAY_SCORE_LATERAL_PER_COL,
     AUTOPLAY_SCORE_THREAT_PENALTY, AUTOPLAY_SCORE_VOID_EXPOSURE, AUTOPLAY_STUCK_FRAMES,
-    AUTOPLAY_THREAT_MIN_SLACK_ROWS, AUTOPLAY_THREAT_REACTION_STEPS, AUTOPLAY_THREAT_SCAN_ROWS,
-    BOMB_BLAST_ROW_RANGE, FRAME_INTERVAL_MS, INPUT_COOLDOWN_MS, OXYGEN_CAPSULE_RESTORE,
+    AUTOPLAY_THREAT_MAX_SLACK_ROWS, AUTOPLAY_THREAT_MIN_SLACK_ROWS, AUTOPLAY_THREAT_REACTION_STEPS,
+    AUTOPLAY_THREAT_SCAN_ROWS, AUTOPLAY_WAIT_FOR_THREAT_MAX_MS, BOMB_BLAST_ROW_RANGE,
+    FRAME_INTERVAL_MS, INPUT_COOLDOWN_MS, OXYGEN_CAPSULE_RESTORE,
     OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_DECAY_PER_SEC, OXYGEN_MAX, ROCK_BREAK_OXYGEN_PENALTY,
     ROCK_HITS_TO_BREAK, depth_fraction,
 };
@@ -98,8 +128,17 @@ pub struct Autopilot {
     /// 手詰まりの度合い。0=通常、1=逆側を試し採点を全幅へ広げる、2=岩も選択肢に入れる、
     /// 3=段差登りを試みる。行が進んだ時点で0へ戻る。
     escalation: u8,
-    /// GameOverになってから経過したフレーム数(自動Reviveまでの待ち時間の計測用)。
-    game_over_frames: u32,
+    /// 岩を割って買った前進が何行ぶん続いているか(#225)。停滞ベースの判定は岩で1行
+    /// 進んだだけでも「前進」とみなして`escalation`を0へ戻すため、これが無いと横方向の
+    /// 岩掘りが解禁される段階(2)へ実質到達できない。
+    rock_bought_rows: u8,
+    /// 直前に`BreakRock`を選んでおり、その行前進がまだ計上されていないか(#225)。
+    /// 岩が砕けた次のフレームは自由落下待ち(`Idle`)になるため、「前フレームの意図」だけ
+    /// 見ても岩で買った前進を取りこぼす。
+    rock_break_pending: bool,
+    /// 酸素温存のためその場で待ったフレーム数(#225)。待ち続けて酸素切れになるのを
+    /// 防ぐため、`AUTOPLAY_WAIT_FOR_THREAT_MAX_MS`ぶんで打ち切る。
+    waiting_frames: u32,
 }
 
 /// そのフレームでオートプレイが何をしようとしたか(TERM独自拡張。#218)。
@@ -126,8 +165,8 @@ pub enum Intent {
     DigSideways,
     /// 手詰まりからの脱出として段差を登る
     EscapeClimb,
-    /// GameOverから自動で復活する
-    Revive,
+    /// 岩を割る酸素が無いので、頭上の塊が着地して道が空くのをその場で待つ
+    WaitOut,
 }
 
 /// 頭上から落ちてくる塊の情報(TERM独自拡張。#221)。
@@ -137,6 +176,10 @@ struct ColumnThreat {
     dist: usize,
     /// まだ揺れ(落下開始前の猶予)の最中か。落下中ならfalse。
     shaking: bool,
+    /// 今はまだ支えられていて、こちらがその列へ掘り込んだ瞬間に支えを失う塊か。
+    /// この場合、落下が始まるのは揺れ(`shake_duration_ms`)が明けてからなので、
+    /// 猶予を丸ごと見込める(#225)。
+    pending: bool,
 }
 
 /// 1つの列の採点結果(TERM独自拡張。#221)。
@@ -164,7 +207,9 @@ impl Autopilot {
             last_row: 0,
             frames_without_descent: 0,
             escalation: 0,
-            game_over_frames: 0,
+            rock_bought_rows: 0,
+            rock_break_pending: false,
+            waiting_frames: 0,
         }
     }
 
@@ -186,27 +231,24 @@ impl Autopilot {
     /// 通してから動くため、目的が違う行動どうしで左右に往復することがない。
     pub fn decide_with_intent(&mut self, game: &Game) -> (Intent, Vec<InputAction>) {
         match game.status {
-            GameStatus::GameOver => {
-                // 無敵OFFのまま死んだ場合の保険。すぐ復活させると死因の瞬間が
-                // 見えないため、少し待ってからEnter(=Reviveの選択確定)を押す。
-                // GameOverダイアログの初期選択は「タイトルへ戻る」なので、
-                // main.rs側でConfirmをRevive呼び出しへ読み替える。
-                self.game_over_frames = self.game_over_frames.saturating_add(1);
-                if u64::from(self.game_over_frames) * FRAME_INTERVAL_MS >= AUTOPLAY_REVIVE_DELAY_MS
-                {
-                    self.game_over_frames = 0;
-                    return (Intent::Revive, vec![InputAction::Confirm]);
-                }
-                return (Intent::Idle, Vec::new());
-            }
+            // GameOver中は何もしない(#225)。以前はここで1.5秒待って自動Reviveしていたが、
+            // 通常ライフ予算での完走率が測れなくなり「死んだのに見えないまま自動継続」して
+            // いた。人間が操作したときと全く同じにGameOverダイアログを出したまま待つ。
+            GameStatus::GameOver => return (Intent::Idle, Vec::new()),
             GameStatus::Playing => {}
             // 一時停止中・クリア後は操作しない(クリア到達後はその場で待機する)。
             GameStatus::Paused | GameStatus::Cleared => return (Intent::Idle, Vec::new()),
         }
-        self.game_over_frames = 0;
 
         self.note_progress(game.player.position());
+        let decision = self.decide_while_playing(game);
+        self.note_decision(&decision.0);
+        decision
+    }
 
+    /// `decide_with_intent`の本体(プレイ中のみ)。優先順の分岐だけを持ち、判断結果の
+    /// 記録(`note_decision`)は呼び出し側がまとめて行う。
+    fn decide_while_playing(&mut self, game: &Game) -> (Intent, Vec<InputAction>) {
         if let Some(actions) = self.defuse_adjacent_bomb(game) {
             return (Intent::DefuseBomb, actions);
         }
@@ -234,6 +276,23 @@ impl Autopilot {
         self.descend(game)
     }
 
+    /// そのフレームの判断を次フレームのために記録する(#225)。
+    ///
+    /// - 岩を割った直後は`rock_break_pending`を立てておく。岩が砕けた次のフレームは
+    ///   自由落下待ち(`Idle`)になるため、「前フレームの意図」だけ見ると岩で買った前進を
+    ///   `note_progress`が取りこぼす。
+    /// - 待ち(`WaitOut`)は連続フレーム数を数え、上限を超えたら待つのをやめる。
+    fn note_decision(&mut self, intent: &Intent) {
+        if *intent == Intent::BreakRock {
+            self.rock_break_pending = true;
+        }
+        self.waiting_frames = if *intent == Intent::WaitOut {
+            self.waiting_frames.saturating_add(1)
+        } else {
+            0
+        };
+    }
+
     /// 進捗を記録し、手詰まりが続けば`escalation`を1段上げる。
     ///
     /// 「進捗」は位置の変化(`AUTOPLAY_STUCK_FRAMES`)と行の前進
@@ -252,6 +311,18 @@ impl Autopilot {
             self.last_row = pos.0;
             self.frames_without_descent = 0;
             self.escalation = 0;
+            // 岩を割って買った前進は「前進」に数えない(#225)。数えてしまうと、岩を
+            // 割るたびに段階が0へ戻り、横方向の岩掘りが解禁される段階(2)へ永久に
+            // 到達しない(実測で全岩破壊判断のうちescalation1以上は0件だった)。
+            if self.rock_break_pending {
+                self.rock_break_pending = false;
+                self.rock_bought_rows = self.rock_bought_rows.saturating_add(1);
+                if self.rock_bought_rows >= AUTOPLAY_ROCK_STREAK_ESCALATE {
+                    self.escalation = self.escalation.max(1);
+                }
+            } else {
+                self.rock_bought_rows = 0;
+            }
             return;
         }
         self.frames_without_descent = self.frames_without_descent.saturating_add(1);
@@ -428,11 +499,16 @@ impl Autopilot {
             match game.board.cell(row, col) {
                 Cell::Empty | Cell::Oxygen | Cell::Item(_) => continue,
                 _ => {
-                    let unstable = game.is_cell_unstable(row, col)
-                        || is_unsupported_after_removal(game, &vacated, (row, col));
-                    return unstable.then(|| ColumnThreat {
+                    let already_unstable = game.is_cell_unstable(row, col);
+                    // 「今は支えられているが、こちらが掘り込めば支えを失う」塊。実際に
+                    // 崩れ始めるのはこちらが掘り抜いた後で、しかもその後さらに揺れの
+                    // 猶予がある(physics: 支えを失った直後は即落下せず揺れる)。
+                    let pending = !already_unstable
+                        && is_unsupported_after_removal(game, &vacated, (row, col));
+                    return (already_unstable || pending).then(|| ColumnThreat {
                         dist,
                         shaking: game.is_cell_shaking(row, col),
+                        pending,
                     });
                 }
             }
@@ -502,7 +578,9 @@ impl Autopilot {
         }
         // 移動している間にも盤面は動く(途中の列でブロックが落ち始める、掘った先が
         // 崩れる)ため、見積りは安全側へ倍にしておく。実測でも、ぴったりの見積りにすると
-        // 「間に合うつもりで動き出して間に合わない」押し潰しが倍近くに増えた。
+        // 「間に合うつもりで動き出して間に合わない」押し潰しが倍近くに増えた。隣接列だけ
+        // 倍率を外す案も#225で実測したが、やはり押し潰しが1.66→2.47回/走へ増えたため
+        // 距離によらず倍のままにしている。
         total * 2
     }
 
@@ -658,6 +736,12 @@ impl Autopilot {
         // 現在列はほぼ常に「脅威あり」なので、脅威の有無や距離をそのまま減点にすると
         // 現在列だけが永久に不利になり、AIが毎フレーム横へ逃げて前へ進まなくなる。
         // 余裕そのもので測れば、振り切れる見込みがある限り減点は0になる。
+        //
+        // 必要な余裕(`min_slack_rows`)を割り込む列は候補から外す。この基準を緩めて
+        // 「減点はするが候補には残す」方式も実測したが、緩めたぶんがそのまま押し潰し死に
+        // 変わった(1走あたり1.66回→4.12〜4.59回)ため採らない。候補が空になる問題は
+        // 基準を緩めてではなく、揺れ猶予の見積り誤り(`shake_allowance_ms`)を直して
+        // 解決している(#225)。
         let threat_penalty = match self.column_threat(game, c, row) {
             None => 0.0,
             Some(threat) => {
@@ -666,7 +750,7 @@ impl Autopilot {
                 if slack < minimum {
                     return None;
                 }
-                let comfort = slack / min_slack_rows(game) - 1.0;
+                let comfort = slack / minimum - 1.0;
                 AUTOPLAY_SCORE_THREAT_PENALTY * (1.0 - comfort).clamp(0.0, 1.0)
             }
         };
@@ -750,6 +834,20 @@ impl Autopilot {
         let void_penalty = commitment_fall_rows(game, c) as f32
             * fall_rows_lost_per_row(game)
             * AUTOPLAY_SCORE_VOID_EXPOSURE;
+        // 経路上の岩は「禁止」ではなく「有料」として扱う(#225)。縦に割る岩と同じ
+        // `rock_cost_rows`で数えることで、「横へ1個割って直進する」と「縦に割り続ける」が
+        // 同じ土俵で比較される。以前は経路に岩があるだけで到達不能扱いにしていたため、
+        // 1個割れば抜けられる列が候補にすら上がらなかった(実測で既定62%・harsh80%の
+        // 岩破壊場面にそういう列が存在した)。
+        // 緊急時に岩を安く見積もる(設計案のF6)のは実測で逆効果だった。酸素が乏しい
+        // ときこそ20%の出費は重く、harsh設定で酸素切れが1走あたり0.3回増えた(#225)。
+        let lateral_rocks = self.lateral_rock_count(game, c);
+        // 払えない岩は縦も横も同じ20%。`descend`側だけで止めると、横へ岩を割りに行く
+        // 経路が素通しになって酸素の歯止めが効かない(#225)。
+        if lateral_rocks > 0 && !rock_is_affordable(game) {
+            return None;
+        }
+        let lateral_rock_penalty = lateral_rocks as f32 * rock_cost_rows(game);
 
         Some(ColumnScore {
             col: c,
@@ -759,14 +857,40 @@ impl Autopilot {
                 - rock_penalty
                 - stay_penalty
                 - void_penalty
-                - rock_below_penalty,
+                - rock_below_penalty
+                - lateral_rock_penalty,
             air,
         })
     }
 
-    /// 現在行を横に進んで`c`列へ到達できるか。途中に岩(escalation2未満)・静止ボムが
-    /// あるか、頭上の塊に潰される列を踏むなら通れない。落下中は横移動自体が通らない
-    /// ため、現在列以外は到達不能とする。
+    /// 現在行を横に進んで`c`列へ着くまでに、経路上で割ることになる岩の数。
+    /// 目的列そのもののマスも含む(そこも通り抜ける必要があるため)。
+    fn lateral_rock_count(&self, game: &Game, c: usize) -> usize {
+        let (row, col) = game.player.position();
+        let step: isize = if c < col { -1 } else { 1 };
+        let mut cursor = col;
+        let mut rocks = 0;
+        while cursor != c {
+            let Some(next) = cursor.checked_add_signed(step) else {
+                break;
+            };
+            if next >= game.board.width() {
+                break;
+            }
+            if matches!(game.board.cell(row, next), Cell::Rock { .. }) {
+                rocks += 1;
+            }
+            cursor = next;
+        }
+        rocks
+    }
+
+    /// 現在行を横に進んで`c`列へ到達できるか。静止ボムで塞がっているか、入った瞬間に
+    /// 潰される列を踏むなら通れない。落下中は横移動自体が通らないため、現在列以外は
+    /// 到達不能とする。
+    ///
+    /// 経路上の岩はここでは弾かない(#225)。岩は通れないのではなく酸素20%を払えば通れる
+    /// ものなので、`score_column`が`lateral_rock_count`ぶんの減点として扱う。
     fn lateral_path_is_open(
         &self,
         game: &Game,
@@ -791,9 +915,6 @@ impl Autopilot {
                 return false;
             }
             if settled_bomb_at(game, (row, next)) {
-                return false;
-            }
-            if matches!(game.board.cell(row, next), Cell::Rock { .. }) && self.escalation < 2 {
                 return false;
             }
             if !safe
@@ -862,11 +983,93 @@ impl Autopilot {
                 Intent::DigDown,
                 self.drill_vertically(game, Direction::Down),
             ),
+            // 岩は「今の酸素で払えるか」を見てから割る(#225)。ここが無条件だったため、
+            // 緊急判定(`oxygen_reserve`)に入るより前に岩1個で20%を一気に持っていかれ、
+            // 気づいた時には手遅れの残量になっていた(酸素切れ死の直前5秒間に割った岩は
+            // 中央値4個=80%)。
+            Cell::Rock { .. } if !rock_is_affordable(game) => self.conserve_oxygen(game),
             Cell::Rock { .. } => (
                 Intent::BreakRock,
                 self.drill_vertically(game, Direction::Down),
             ),
         }
+    }
+
+    /// 直下が岩だが、割ると酸素が緊急域へ落ちる場面での代替手段(#225)。
+    ///
+    /// 岩1個の20%に対し、自然減少は2〜5%/秒。数秒の遠回りや待ちの方がはるかに安いので、
+    /// 「横へ迂回する→頭上の塊が着地するのを待つ→段差を登る」の順に試し、どれも無理な
+    /// ときだけ最後の手段として割る。割った瞬間に致死圏へ入る残量なら、それすらしない。
+    fn conserve_oxygen(&self, game: &Game) -> (Intent, Vec<InputAction>) {
+        let col = game.player.col;
+
+        // 1. 岩を踏まずに行ける横の候補列があればそちらへ。ここで岩のある経路を選ぶと
+        //    縦に割るのと同じ20%を払うことになるので、無料の経路だけを見る。
+        let mut best: Option<ColumnScore> = None;
+        for candidate in self
+            .score_columns(game)
+            .iter()
+            .filter(|s| s.col != col && self.lateral_rock_count(game, s.col) == 0)
+        {
+            if best.is_none_or(|current| self.is_better(col, candidate, &current)) {
+                best = Some(*candidate);
+            }
+        }
+        if let Some(target) = best {
+            return self.step_toward(game, &target);
+        }
+
+        // 2. 隣が落ちてくる塊で塞がっているだけなら、着地して道が空くまでその場で待つ。
+        if u64::from(self.waiting_frames) * FRAME_INTERVAL_MS < AUTOPLAY_WAIT_FOR_THREAT_MAX_MS
+            && self.threat_settles_soon(game)
+        {
+            return (Intent::WaitOut, Vec::new());
+        }
+
+        // 3. 段差を登って別の場所からやり直す。
+        if let Some(actions) = self.escape_climb(game) {
+            return (Intent::EscapeClimb, actions);
+        }
+
+        // 4. 最後の手段。ただし割った時点で致死圏に入るなら、自分から即死を選ばない。
+        if rock_break_is_lethal(game) {
+            return (Intent::Idle, Vec::new());
+        }
+        (
+            Intent::BreakRock,
+            self.drill_vertically(game, Direction::Down),
+        )
+    }
+
+    /// 隣の列を塞いでいる塊が、待てば着地して道が空くか(#225)。
+    ///
+    /// 着地までの見込み(揺れの残り+落下距離×ブロックの落下tick)が
+    /// `AUTOPLAY_WAIT_FOR_THREAT_MAX_MS`以内なら待つ価値がある。岩で塞がれている側は
+    /// 待っても変わらないので数えない。
+    ///
+    /// こちらが掘り込んで初めて落ちる塊(`pending`)も数に入れている。「待っても勝手には
+    /// 落ちてこないのだから除くべき」と考えて除いてみたが、実測では既定設定の押し潰し死が
+    /// 1走あたり1.47回→1.97回へ悪化した(#225)。隣に落下予定の塊がある間ひと呼吸置く
+    /// こと自体に、盤面が落ち着くのを待つ効果がある。
+    fn threat_settles_soon(&self, game: &Game) -> bool {
+        let (row, col) = game.player.position();
+        if !game.player_is_grounded() {
+            return false;
+        }
+        let block_tick = game.effective_block_fall_tick_ms().max(1);
+        [Direction::Left, Direction::Right]
+            .into_iter()
+            .filter_map(|dir| neighbor(game, (row, col), dir))
+            .filter(|target| !matches!(game.board.cell(target.0, target.1), Cell::Rock { .. }))
+            .filter_map(|target| self.column_threat(game, target.1, row))
+            .any(|threat| {
+                let shake_ms = if threat.shaking {
+                    game.shake_duration_ms()
+                } else {
+                    0
+                };
+                shake_ms + threat.dist as u64 * block_tick <= AUTOPLAY_WAIT_FOR_THREAT_MAX_MS
+            })
     }
 
     /// 手詰まり脱出用の段差登り。頭上が空いている場合のみ、`side_preference`へ
@@ -977,6 +1180,25 @@ fn is_emergency(game: &Game) -> bool {
     game.player.oxygen < oxygen_reserve(game.player.depth_m())
 }
 
+/// 岩1個ぶんの酸素(直接消費20%+割り切るまでの自然減少)を払っても、緊急域
+/// (`oxygen_reserve`)より上に居られるか(#225)。
+///
+/// 緊急判定そのものは残量が減ってから初めて反応するため、判定に入る前に岩1個で20%を
+/// 持っていかれると手遅れになる(実測では緊急判定に入った時点で既に中央値22%、harsh設定
+/// では10.6%しか残っていなかった)。割る前にこの1歩先を見る。
+fn rock_is_affordable(game: &Game) -> bool {
+    let depth = game.player.depth_m();
+    let drill_ms = f32::from(ROCK_HITS_TO_BREAK) * drill_action_ms() as f32;
+    let spent = ROCK_BREAK_OXYGEN_PENALTY + oxygen_decay_per_sec(depth) * (drill_ms / 1000.0);
+    game.player.oxygen - spent >= oxygen_reserve(depth)
+}
+
+/// 岩を割った時点で緊急域に入る(=即死または致死圏)残量か(#225)。ここまで減っていたら、
+/// 他に手が無くても自分から割りにはいかない。
+fn rock_break_is_lethal(game: &Game) -> bool {
+    game.player.oxygen <= oxygen_reserve(game.player.depth_m()) + ROCK_BREAK_OXYGEN_PENALTY
+}
+
 /// AIRを1個取ったときの実効回復量(%)。上限100でクランプされるため、満タンに近いほど
 /// 小さくなる。
 fn air_gain(oxygen: f32) -> f32 {
@@ -995,10 +1217,17 @@ fn row_time_ms(game: &Game) -> f32 {
 /// 1手動くのに要する時間をブロックの落下tickで割って行数へ換算し、その
 /// `AUTOPLAY_THREAT_REACTION_STEPS`手ぶんを要求する。深いほどブロックだけが速く落ちる
 /// ようになるため、必要な行数も自動的に増える。
+///
+/// 上限(`AUTOPLAY_THREAT_MAX_SLACK_ROWS`)を設けるのは、横移動を遅く・ブロック落下を速く
+/// 設定すると要求が際限なく伸びてしまうため(#225)。実測では横移動120ms・落下75msの設定で
+/// 6.1〜8.8行を要求し、頭上に塊がある列がほぼ全て候補から外れて岩を割るしかなくなっていた。
 fn min_slack_rows(game: &Game) -> f32 {
     let reaction_ms = (game.move_cooldown_ms() + FRAME_INTERVAL_MS) as f32;
     let block_tick = game.effective_block_fall_tick_ms().max(1) as f32;
-    (AUTOPLAY_THREAT_REACTION_STEPS * reaction_ms / block_tick).max(AUTOPLAY_THREAT_MIN_SLACK_ROWS)
+    (AUTOPLAY_THREAT_REACTION_STEPS * reaction_ms / block_tick).clamp(
+        AUTOPLAY_THREAT_MIN_SLACK_ROWS,
+        AUTOPLAY_THREAT_MAX_SLACK_ROWS,
+    )
 }
 
 /// 自由落下1行につき、頭上の塊に詰められる行数。ブロックの落下tickは深度で最大2.5倍まで
@@ -1051,10 +1280,19 @@ fn drill_action_ms() -> u64 {
     INPUT_COOLDOWN_MS + FRAME_INTERVAL_MS
 }
 
-/// 揺れ中の塊が落ち始めるまでに見込める猶予(ms)。残りの揺れ時間は外から分からない
-/// ため、期待値として半分を見込む。
+/// その塊が落ち始めるまでに見込める猶予(ms)。
+///
+/// - こちらが掘り込んで初めて支えを失う塊(`pending`)は、崩れ始めるのがこちらの掘削の
+///   後で、しかも支えを失ってから`shake_duration_ms`ぶん揺れてからでないと落ちてこない
+///   (physics側の仕様)。猶予を丸ごと見込める(#225)。**以前はここを0にしていた**ため、
+///   横へ掘り抜ける列がほぼ全て「入った瞬間に潰される」と判定され、迂回路が候補から
+///   消えて岩を割るしかなくなっていた。酸素切れ死の最大の原因がこの見積り誤り
+/// - 既に揺れている塊は残り時間が外から分からないため、期待値として半分を見込む
+/// - 既に落下中の塊には猶予が無い
 fn shake_allowance_ms(game: &Game, threat: &ColumnThreat) -> u64 {
-    if threat.shaking {
+    if threat.pending {
+        game.shake_duration_ms()
+    } else if threat.shaking {
         game.shake_duration_ms() / 2
     } else {
         0
@@ -1213,6 +1451,7 @@ mod tests {
     use crate::constants::{FIELD_WIDTH_DEFAULT, OXYGEN_WARNING_THRESHOLD};
     use crate::game::board::ColorKind;
     use crate::game::{Bomb, GameEvent, MissCause};
+    use crate::settings::Settings;
 
     /// 手詰まり判定で`escalation`が1段上がるまでに必要な`decide`の呼び出し回数。
     /// 初回は「前フレームと位置が違う」扱いでカウンタが初期化されるため、その1回と、
@@ -1269,23 +1508,22 @@ mod tests {
         assert_eq!(pilot.decide(&game), Vec::new());
     }
 
+    /// GameOverになったら何もしない(#225)。以前は1.5秒待って自動Reviveしていたが、
+    /// それでは通常のライフ予算内の完走率が測れず、「死んだのに見えないまま自動継続」
+    /// していた。人間がプレイしたときと同じくダイアログを出したまま操作を待つ。
     #[test]
-    fn decide_waits_then_presses_confirm_to_revive_after_game_over() {
-        // 無敵OFFのまま死んだ場合の保険。すぐには復活させず、
-        // AUTOPLAY_REVIVE_DELAY_MSぶん待ってからEnter(Confirm)を出す。
+    fn decide_never_touches_the_game_over_dialog() {
         let mut game = game_at(2, 500, 5);
         game.status = GameStatus::GameOver;
         let mut pilot = Autopilot::new(false);
 
-        let frames_to_wait = AUTOPLAY_REVIVE_DELAY_MS / FRAME_INTERVAL_MS;
-        for frame in 0..frames_to_wait {
+        for frame in 0..200 {
             assert_eq!(
-                pilot.decide(&game),
-                Vec::new(),
-                "frame={frame}: 待機中は何も押さないはず"
+                pilot.decide_with_intent(&game),
+                (Intent::Idle, Vec::new()),
+                "frame={frame}: GameOver中は何も押さないはず"
             );
         }
-        assert_eq!(pilot.decide(&game), vec![InputAction::Confirm]);
     }
 
     #[test]
@@ -1388,6 +1626,261 @@ mod tests {
                 "岩の代償は先読み範囲より大きく、他に手が無い時しか選ばれないはず"
             );
         }
+    }
+
+    // --- 酸素を見てから岩を割る(#225 F1) -----------------------------------
+
+    /// 岩の代償を払うと緊急域へ落ちる残量では、横に安全な迂回路がある限りそちらへ向かう。
+    #[test]
+    fn decide_detours_instead_of_breaking_a_rock_it_cannot_afford() {
+        let mut game = grounded_game_at(40, 500, 5);
+        game.board.rows[501][5] = Cell::Rock { hits: 0 };
+        // 右隣は歩いて入れて、その先も掘り進められる(=安全な迂回路)。
+        game.board.rows[500][6] = Cell::Empty;
+        game.board.rows[501][6] = Cell::Color(ColorKind::Red);
+        // 「割ったら緊急域へ落ちる」ぎりぎりの残量(致死圏よりは上)にする。
+        game.player.oxygen =
+            oxygen_reserve(game.player.depth_m()) + ROCK_BREAK_OXYGEN_PENALTY + 1.0;
+        assert!(
+            !rock_is_affordable(&game),
+            "前提: 岩を割ると緊急域へ落ちる残量"
+        );
+        let mut pilot = Autopilot::new(false);
+
+        let (intent, _) = pilot.decide_with_intent(&game);
+        assert_ne!(intent, Intent::BreakRock, "払えない岩は割らないはず");
+    }
+
+    /// 酸素が十分あれば、同じ盤面でも従来通り岩を割って進んでよい。
+    #[test]
+    fn decide_still_breaks_an_affordable_rock_when_there_is_no_way_around() {
+        let mut game = game_at(41, 500, 5);
+        for col in 0..game.board.width() {
+            game.board.rows[501][col] = Cell::Rock { hits: 0 };
+        }
+        assert!(rock_is_affordable(&game), "前提: 満タンなら岩は払える");
+        let mut pilot = Autopilot::new(false);
+
+        assert_eq!(pilot.decide_with_intent(&game).0, Intent::BreakRock);
+    }
+
+    /// 割った時点で緊急域に入る残量では、他に手が無くても自分から岩を割りにはいかない。
+    #[test]
+    fn decide_refuses_to_break_a_rock_that_would_be_immediately_lethal() {
+        let mut game = game_at(42, 500, 5);
+        // 直下も両隣も岩の完全な行き止まり。通常なら割るしかない場面。
+        game.board.rows[501][5] = Cell::Rock { hits: 0 };
+        game.board.rows[500][4] = Cell::Rock { hits: 0 };
+        game.board.rows[500][6] = Cell::Rock { hits: 0 };
+        game.player.oxygen = oxygen_reserve(game.player.depth_m()) + 1.0;
+        assert!(
+            rock_break_is_lethal(&game),
+            "前提: 割ったら緊急域へ落ちる残量"
+        );
+        let mut pilot = Autopilot::new(false);
+
+        assert_ne!(
+            pilot.decide_with_intent(&game).0,
+            Intent::BreakRock,
+            "自分から即死を選ばないはず"
+        );
+    }
+
+    /// 岩が払えないとき、隣が落下中の塊で塞がっているだけなら着地を待つ。
+    /// 自然減少(2〜5%/秒)は岩1個の20%よりずっと安い。
+    #[test]
+    fn decide_waits_for_a_falling_block_to_land_rather_than_paying_for_a_rock() {
+        let mut game = game_at(43, 500, 5);
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 直下は岩=足場でもある
+        // 左右とも、頭上に落ちてくる塊を抱えていて今は入れない。
+        for col in [4, 6] {
+            game.board.rows[500][col] = Cell::Empty;
+            game.board.rows[499][col] = Cell::Color(ColorKind::Blue); // 支えなし
+        }
+        game.player.oxygen =
+            oxygen_reserve(game.player.depth_m()) + ROCK_BREAK_OXYGEN_PENALTY + 1.0;
+        assert!(!rock_is_affordable(&game), "前提: 岩は払えない");
+        let mut pilot = Autopilot::new(false);
+
+        let (intent, actions) = pilot.decide_with_intent(&game);
+        assert_eq!(intent, Intent::WaitOut);
+        assert_eq!(actions, Vec::new(), "待つ間は何も押さない");
+    }
+
+    /// 待ちは`AUTOPLAY_WAIT_FOR_THREAT_MAX_MS`で打ち切る。待ち続けて酸素切れになるより、
+    /// 打ち切って他の手(段差登り・最後の手段の岩)へ進む。
+    #[test]
+    fn waiting_for_a_threat_is_bounded_so_the_pilot_never_stalls_until_it_suffocates() {
+        let mut game = game_at(44, 500, 5);
+        game.board.rows[501][5] = Cell::Rock { hits: 0 };
+        for col in [4, 6] {
+            game.board.rows[500][col] = Cell::Empty;
+            game.board.rows[499][col] = Cell::Color(ColorKind::Blue);
+        }
+        game.player.oxygen =
+            oxygen_reserve(game.player.depth_m()) + ROCK_BREAK_OXYGEN_PENALTY + 1.0;
+        let mut pilot = Autopilot::new(false);
+
+        let budget_frames = AUTOPLAY_WAIT_FOR_THREAT_MAX_MS / FRAME_INTERVAL_MS;
+        for _ in 0..=budget_frames {
+            pilot.decide_with_intent(&game);
+        }
+        assert_ne!(
+            pilot.decide_with_intent(&game).0,
+            Intent::WaitOut,
+            "予算を使い切ったら待つのをやめるはず"
+        );
+    }
+
+    // --- 横の岩は禁止ではなく有料(#225 F2) ---------------------------------
+
+    /// 「横へ1個割れば直進できる列」と「縦に岩を割り続ける列」を同じ土俵で比較する。
+    /// 以前は経路上に岩があるだけで到達不能扱いで、候補にすら上がらなかった。
+    #[test]
+    fn a_column_behind_one_rock_is_reachable_and_priced_rather_than_forbidden() {
+        let mut game = grounded_game_at(45, 500, 5);
+        game.board.rows[500][6] = Cell::Rock { hits: 0 }; // 横1個だけ岩
+        let pilot = Autopilot::new(false);
+
+        assert_eq!(
+            pilot.lateral_rock_count(&game, 6),
+            1,
+            "経路上の岩は数えられるはず"
+        );
+        let safe: Vec<bool> = (5..=6)
+            .map(|c| pilot.column_is_safe_to_enter(&game, c))
+            .collect();
+        assert!(
+            pilot.lateral_path_is_open(&game, 6, &safe, 5),
+            "岩があっても到達不能にはしない(有料なだけ)"
+        );
+    }
+
+    /// 縦に岩を割り続けるより、横1個で抜けて直進できる方を選ぶ。
+    #[test]
+    fn decide_prefers_paying_for_one_sideways_rock_over_a_column_of_rocks() {
+        let mut game = game_at(46, 500, 5);
+        // 現在列は下へ岩が続く。左も岩で塞ぐ。
+        for row in 501..=506 {
+            game.board.rows[row][5] = Cell::Rock { hits: 0 };
+        }
+        game.board.rows[500][4] = Cell::Rock { hits: 0 };
+        game.board.rows[501][4] = Cell::Rock { hits: 0 };
+        // 右は岩1個の向こうが素通しで、その先も掘り進められる。
+        game.board.rows[500][6] = Cell::Rock { hits: 0 };
+        for row in 501..=514 {
+            game.board.rows[row][6] = if row % 2 == 0 {
+                Cell::Color(ColorKind::Red)
+            } else {
+                Cell::Color(ColorKind::Green)
+            };
+        }
+        let mut pilot = Autopilot::new(false);
+
+        let (intent, actions) = pilot.decide_with_intent(&game);
+        assert_eq!(intent, Intent::BreakRock);
+        assert_eq!(
+            actions,
+            vec![InputAction::MoveRight],
+            "縦に割り続けるのではなく、横1個を割って抜ける向きを向くはず"
+        );
+    }
+
+    // --- 岩で買った前進は「前進」に数えない(#225 F5) -----------------------
+
+    #[test]
+    fn rows_bought_by_breaking_rocks_escalate_instead_of_resetting_the_stall_counter() {
+        let mut pilot = Autopilot::new(false);
+        pilot.note_progress((500, 5));
+        assert_eq!(pilot.escalation, 0);
+
+        // 岩を割って1行進む、を繰り返す。停滞判定だけなら毎回「前進」で段階は0のまま。
+        for step in 1..=u32::from(AUTOPLAY_ROCK_STREAK_ESCALATE) {
+            pilot.note_decision(&Intent::BreakRock);
+            pilot.note_progress((500 + step as usize, 5));
+        }
+        assert!(
+            pilot.escalation >= 1,
+            "岩で買った前進が続いたら段階が上がるはず(escalation={})",
+            pilot.escalation
+        );
+
+        // 岩以外で前進したら通常通り0へ戻り、連続回数もリセットされる。
+        pilot.note_decision(&Intent::DigDown);
+        pilot.note_progress((520, 5));
+        assert_eq!(pilot.escalation, 0);
+        assert_eq!(pilot.rock_bought_rows, 0);
+    }
+
+    // --- 安全判定(#225 F3/F4の実測結果) -----------------------------------
+
+    /// 必要な余裕を割り込む列は、減点ではなく却下のままにする。設計案では「致死でない
+    /// 限り候補に残す」としていたが、実測で緩めたぶんがそのまま押し潰し死に変わった
+    /// (1走あたり1.66回→4.12〜4.59回)ため採らなかった。
+    #[test]
+    fn a_column_without_enough_slack_is_rejected_outright_not_merely_penalised() {
+        let mut game = game_at(47, 900, 5);
+        game.board.rows[901][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[899][6] = Cell::Color(ColorKind::Blue); // 右隣の頭上、支えなし
+        let pilot = Autopilot::new(false);
+
+        let slack = pilot.column_slack_rows(&game, 6);
+        assert!(
+            slack < min_slack_rows(&game),
+            "前提: 必要な余裕に届かない列({slack})"
+        );
+        assert!(!pilot.column_is_safe_to_enter(&game, 6));
+        let safe: Vec<bool> = (5..=6)
+            .map(|c| pilot.column_is_safe_to_enter(&game, c))
+            .collect();
+        assert!(
+            pilot.score_column(&game, 6, false, &safe, 5).is_none(),
+            "採点でも候補から外れるはず"
+        );
+    }
+
+    /// 必要な余裕には上限を設ける。横移動が遅い/ブロック落下が速い設定では要求が
+    /// 際限なく伸び、頭上に塊のある列がほぼ全て候補から外れてしまう(#225 F4)。
+    #[test]
+    fn the_required_slack_is_capped_so_slow_settings_do_not_reject_every_column() {
+        let mut game = game_at(48, 999, 5);
+        game.set_move_cooldown_ms(120);
+        game.set_block_fall_tick_ms(75);
+        assert!(
+            min_slack_rows(&game) <= AUTOPLAY_THREAT_MAX_SLACK_ROWS,
+            "上限を超えないはず: {}",
+            min_slack_rows(&game)
+        );
+        assert!(min_slack_rows(&game) >= AUTOPLAY_THREAT_MIN_SLACK_ROWS);
+    }
+
+    /// こちらが掘り込んで初めて支えを失う塊には、揺れの猶予を丸ごと見込む(#225)。
+    /// ここを0にしていたことが酸素切れ死の最大の原因だった。
+    #[test]
+    fn a_block_that_only_loses_support_when_we_dig_in_still_gets_its_full_shake_grace() {
+        let mut game = game_at(49, 500, 5);
+        game.board.rows[500][6] = Cell::Color(ColorKind::Red); // 掘って入るマス(=支え)
+        game.board.rows[499][6] = Cell::Color(ColorKind::Blue); // その上に乗る塊
+        let pilot = Autopilot::new(false);
+
+        let threat = pilot
+            .column_threat(&game, 6, 500)
+            .expect("掘れば支えが消えるので脅威として見える");
+        assert!(threat.pending, "まだ支えられている=pending");
+        assert_eq!(
+            shake_allowance_ms(&game, &threat),
+            game.shake_duration_ms(),
+            "揺れ猶予を丸ごと見込むはず"
+        );
+
+        // 既に浮いている塊は、こちらの掘削と無関係に落ちてくるので猶予は無い。
+        let mut falling = game_at(49, 500, 5);
+        falling.board.rows[499][6] = Cell::Color(ColorKind::Blue);
+        let threat = pilot
+            .column_threat(&falling, 6, 500)
+            .expect("浮いた塊は脅威");
+        assert!(!threat.pending);
+        assert_eq!(shake_allowance_ms(&falling, &threat), 0);
     }
 
     // --- AIRの拾い方(#221 R2/R3) -------------------------------------------
@@ -1541,7 +2034,9 @@ mod tests {
             pilot.column_threat(&game, 6, 500),
             Some(ColumnThreat {
                 dist: 1,
-                shaking: false
+                shaking: false,
+                // 今はAIRに支えられており、AIRを取った瞬間に支えを失う=pending
+                pending: true
             }),
             "AIRを取れば支えが消えるので、移る前から脅威として見えるはず"
         );
@@ -1560,7 +2055,9 @@ mod tests {
             pilot.column_threat(&game, 6, 500),
             Some(ColumnThreat {
                 dist: AUTOPLAY_THREAT_SCAN_ROWS,
-                shaking: false
+                shaking: false,
+                // 既に浮いている(こちらの掘削とは無関係に落ちてくる)
+                pending: false
             })
         );
 
@@ -1693,7 +2190,8 @@ mod tests {
             pilot_view.column_threat(&game, 6, 500),
             Some(ColumnThreat {
                 dist: 1,
-                shaking: false
+                shaking: false,
+                pending: true
             }),
             "掘れば支えが消えることを織り込んで脅威として見えるはず"
         );
@@ -1991,6 +2489,62 @@ mod tests {
 
     // --- ソークテスト -------------------------------------------------------
 
+    /// ソーク1本ぶんの条件(コース・盤面設定)。実機と同じ`Game::apply_settings`を
+    /// 通すため、`Settings`をそのまま持つ(#225)。以前は`Game::new_with_width`直後の
+    /// 盤面をそのまま使っていたため、既定設定の計測ですら出現率の再抽選前の盤面を
+    /// 測っていた。
+    struct Profile {
+        width: usize,
+        depth_goal_m: usize,
+        settings: Settings,
+    }
+
+    impl Profile {
+        /// 既定設定のコース。
+        fn default_course(width: usize, depth_goal_m: usize) -> Self {
+            Profile {
+                width,
+                depth_goal_m,
+                settings: Settings {
+                    field_width: width,
+                    ..Settings::default()
+                },
+            }
+        }
+
+        /// ユーザーが実際に使っている設定(#225の調査で`settings.json`から採取)。
+        /// 幅が広く・AIRが少なく・岩とスターが多く・ブロックの落下が速く・横移動が遅い、
+        /// 既定よりかなり厳しい条件。
+        fn harsh(depth_goal_m: usize) -> Self {
+            const WIDTH: usize = 20;
+            Profile {
+                width: WIDTH,
+                depth_goal_m,
+                settings: Settings {
+                    field_width: WIDTH,
+                    air_spawn_rate_percent: 40,
+                    rock_spawn_rate_percent: 300,
+                    star_spawn_rate_percent: 6000,
+                    diamond_spawn_rate_percent: 300,
+                    block_fall_tick_ms: 75,
+                    player_fall_tick_ms: 100,
+                    shake_duration_ms: 2000,
+                    move_cooldown_ms: 120,
+                    ..Settings::default()
+                },
+            }
+        }
+    }
+
+    /// GameOverになったときの扱い。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RevivePolicy {
+        /// 通常のライフ予算内での結果を測る(実機で人間がプレイするのと同じ)。
+        Never,
+        /// 到達可能性だけを見るため、何度でも復活させる。完走率の意味は持たない。
+        Unlimited,
+    }
+
     /// 1回の自動プレイの結果。
     struct SoakResult {
         cleared: bool,
@@ -2008,12 +2562,19 @@ mod tests {
         fn unharmed(&self) -> bool {
             self.cleared && self.deaths.is_empty()
         }
+
+        /// 原因別の死亡回数。
+        fn deaths_by_cause(&self, cause: MissCause) -> usize {
+            self.deaths.iter().filter(|c| **c == cause).count()
+        }
     }
 
     /// 無敵OFFのオートプレイで1本通しプレイし、結果を集計する。main.rsのメインループと
-    /// 同じ順序(判断→入力→update)で回す。
-    fn play(seed: u64, depth_goal_m: usize, width: usize, max_frames: u32) -> SoakResult {
-        let mut game = Game::new_with_width(seed, width, depth_goal_m);
+    /// 同じ順序(判断→入力→update)で、かつ`start_new_game`と同じ設定反映
+    /// (`Game::apply_settings`)を通して回す。
+    fn play(seed: u64, profile: &Profile, revive: RevivePolicy, max_frames: u32) -> SoakResult {
+        let mut game = Game::new_with_width(seed, profile.width, profile.depth_goal_m);
+        game.apply_settings(&profile.settings);
         let mut pilot = Autopilot::new(false);
         let delta = std::time::Duration::from_millis(FRAME_INTERVAL_MS);
         let mut result = SoakResult {
@@ -2028,13 +2589,7 @@ mod tests {
         for frame in 0..max_frames {
             result.frames = frame + 1;
             for action in pilot.decide(&game) {
-                let events = match action {
-                    InputAction::Confirm => {
-                        game.revive();
-                        Vec::new()
-                    }
-                    other => game.apply_input(other),
-                };
+                let events = game.apply_input(action);
                 for event in &events {
                     // 掘削で壊した岩だけを数える。着地での4連結自動消滅はupdate側で
                     // 起きるため、ここには混ざらない。
@@ -2060,6 +2615,13 @@ mod tests {
                 result.cleared = true;
                 break;
             }
+            if game.status == GameStatus::GameOver {
+                match revive {
+                    RevivePolicy::Never => break,
+                    // オートプレイはもうRevive意図を返さないため、ハーネス側で呼ぶ。
+                    RevivePolicy::Unlimited => game.revive(),
+                }
+            }
         }
         result
     }
@@ -2076,33 +2638,14 @@ mod tests {
         }
     }
 
-    /// 幅12・300mを無敵OFFで完走できること(T1)。通常のテスト実行に含める軽量版。
-    /// 多シードでの品質(`soak_short_course_quality`)とフルコース
-    /// (`soak_full_course_without_invincibility`)は#[ignore]付き。
-    #[test]
-    fn soak_reaches_the_goal_without_invincibility_on_a_short_course() {
-        for seed in [1, 2] {
-            let result = play(seed, 300, FIELD_WIDTH_DEFAULT, 30_000);
-            assert!(
-                result.cleared,
-                "seed={seed}: 無敵なしでゴールまで到達できるはず(到達={}m, {}フレーム)",
-                result.deepest_m, result.frames
-            );
-            assert!(
-                result.deaths.is_empty(),
-                "seed={seed}: 一度も死なずに完走できるはず: {:?}",
-                result.deaths
-            );
-        }
-    }
-
     /// 同じシード・同じ入力列なら、盤面生成もボム抽選もアイテム補充も完全に再現される
     /// こと(T4)。`Board`の再抽選が呼び出しごとにOS乱数から作り直していた頃は、同じ
     /// シードでも結果が揺れてソークテストの失敗を再現できなかった(#221で修正)。
     #[test]
     fn replaying_the_same_seed_reproduces_the_run_exactly() {
-        let first = play(4242, 300, FIELD_WIDTH_DEFAULT, 30_000);
-        let second = play(4242, 300, FIELD_WIDTH_DEFAULT, 30_000);
+        let profile = Profile::default_course(FIELD_WIDTH_DEFAULT, 300);
+        let first = play(4242, &profile, RevivePolicy::Never, 30_000);
+        let second = play(4242, &profile, RevivePolicy::Never, 30_000);
 
         assert_eq!(first.frames, second.frames);
         assert_eq!(first.cleared, second.cleared);
@@ -2123,12 +2666,7 @@ mod tests {
 
         for frame in 0..1500 {
             for action in pilot.decide(&game) {
-                match action {
-                    InputAction::Confirm => game.revive(),
-                    other => {
-                        game.apply_input(other);
-                    }
-                }
+                game.apply_input(action);
             }
             game.update(delta);
 
@@ -2145,31 +2683,30 @@ mod tests {
         }
     }
 
-    /// 300m・幅12を無敵OFFで16シード走らせ、設計が置いた品質基準を満たすことを確認する
-    /// (到達率9割・酸素切れゼロ・無傷完走5割・完走時の岩破壊15回以下)。
+    /// 300m・幅12(既定設定)を無敵OFF・通常のライフ予算(自動Revive無し)で16シード走らせ、
+    /// 設計が置いた品質基準を満たすことを確認する(全シード完走・酸素切れゼロ・
+    /// 無傷完走5割・完走時の岩破壊15回以下)。
     ///
-    /// 実測値(#221時点)は 到達16/16・無傷完走11/16・酸素切れ0・平均岩破壊3.1回・
-    /// 平均1,457フレーム(自由落下の理論下限1,364フレームの107%)。
-    /// 同じ基準をフルコースに当てると届かない(理由は
-    /// `soak_full_course_without_invincibility`のコメント)。
+    /// 実測値(#225時点): 完走16/16・無傷完走11/16・酸素切れ0・完走時の平均岩破壊2.4回・
+    /// 1走あたりの死亡0.38回。
     #[test]
-    #[ignore = "長時間のソークテスト。cargo test --release -- --ignored で実行する"]
-    fn soak_short_course_quality() {
+    fn soak_short_course_within_life_budget() {
         const SEEDS: u64 = 16;
+        let profile = Profile::default_course(FIELD_WIDTH_DEFAULT, 300);
         let results: Vec<(u64, SoakResult)> = (0..SEEDS)
-            .map(|seed| (seed, play(seed, 300, FIELD_WIDTH_DEFAULT, 30_000)))
+            .map(|seed| (seed, play(seed, &profile, RevivePolicy::Never, 30_000)))
             .collect();
         let summary = Summary::of(&results);
-        summary.print("300m", SEEDS);
+        summary.print("300m(既定・ライフ予算内)", SEEDS);
 
         assert!(
             summary.out_of_oxygen.is_empty(),
             "酸素切れで死んだシードがある: {:?}",
             summary.out_of_oxygen
         );
-        assert!(
-            summary.cleared * 10 >= (SEEDS as usize) * 9,
-            "ゴール到達が9割に届いていない: {}/{SEEDS}",
+        assert_eq!(
+            summary.cleared, SEEDS as usize,
+            "通常のライフ予算内で全シード完走できるはず: {}/{SEEDS}",
             summary.cleared
         );
         assert!(
@@ -2184,57 +2721,139 @@ mod tests {
         );
     }
 
-    /// フルコース(1000m・幅12)を無敵OFFで32シード走らせる重量級のソーク(T2)。
+    /// フルコース(1000m・幅12・既定設定)を無敵OFF・通常のライフ予算で32シード走らせる
+    /// 重量級のソーク(T2)。
     ///
     /// 深い場所は浅い場所と質が違う。ブロックの落下tickは深度で最大2.5倍まで短くなるのに
     /// プレイヤーの自由落下tickは一定なので、最深帯ではブロックの方が2.5倍速く落ちる。
     /// 落下中は横移動が効かないため、空洞へ入った時点で頭上の塊に追いつかれる状況が
     /// 構造的に発生する。岩の出現率・酸素の減少速度も深いほど上がる。
     ///
-    /// そのためここでの合格ラインは「ゴールへ到達し続けること」と、改善の実測値からの
-    /// 明確な後退を検出することに置く。設計が置いた品質基準(酸素切れゼロ・無傷完走5割・
-    /// 岩破壊15回以下)は300mでは満たすがフルコースでは届いておらず、
-    /// `soak_short_course_quality`が担当する。
+    /// 押し潰され回数の上限は、ユーザー判断「押し潰し死を一切増やさない」を機械的に
+    /// 検証するためのもの(#225)。基準は**このハーネスで測った修正前の実測値1.78回/走**に
+    /// 置く。設計メモにある3.22回/走は`Game::apply_settings`を通さない旧ハーネスでの値で、
+    /// 実機の盤面(出現率の再抽選後は岩が12.1%→15.8%に増える)とは条件が違うため使わない。
     ///
-    /// 実測値(#221時点、32シード): 到達32/32・無傷完走0/32・1走あたり押し潰され4.2回/
-    /// 酸素切れ1.8回/爆風0.3回・完走時の平均岩破壊36.9回・平均5,589フレーム
-    /// (自由落下の理論下限4,545フレームの123%)。#218時点は無敵OFFでは1本も完走できず
-    /// (8シードすべて535〜789mでゲームオーバー)、岩は1走あたり150〜200個割っていた。
+    /// 実測値(いずれも同じハーネス・32シード):
+    /// - 修正前: 完走6/32・平均到達871m・押し潰され1.78回/酸素切れ3.06回/爆風0.19回・
+    ///   完走時の平均岩破壊50.8回
+    /// - 修正後: 完走8/32・平均到達859m・押し潰され1.47回/酸素切れ3.44回/爆風0.25回・
+    ///   完走時の平均岩破壊43.4回
+    ///
+    /// このコースでは酸素切れが減っていない。実測を重ねた結果、1000mの既定設定では
+    /// 「岩を割る回数を減らす」と「押し潰される回数」がほぼ1対1で入れ替わり、死亡総数が
+    /// 4.7〜5.1回/走で動かないことが分かっている(酸素切れを0.06回/走まで落とす設定も
+    /// 作れたが、その時の押し潰されは4.12回/走だった)。ユーザー判断2(押し潰し死を
+    /// 増やさない)を優先し、押し潰されが基準を下回る範囲で最良の構成を採っている。
+    /// 酸素切れの改善は`soak_harsh_profile_within_life_budget`(ユーザーの実設定)が示す。
     #[test]
     #[ignore = "長時間のソークテスト。cargo test --release -- --ignored で実行する"]
-    fn soak_full_course_without_invincibility() {
+    fn soak_full_course_within_life_budget() {
         const SEEDS: u64 = 32;
+        let profile = Profile::default_course(FIELD_WIDTH_DEFAULT, 1000);
         let results: Vec<(u64, SoakResult)> = (0..SEEDS)
-            .map(|seed| (seed, play(seed, 1000, FIELD_WIDTH_DEFAULT, 120_000)))
+            .map(|seed| (seed, play(seed, &profile, RevivePolicy::Never, 120_000)))
             .collect();
         let summary = Summary::of(&results);
-        summary.print("1000m", SEEDS);
+        summary.print("1000m(既定・ライフ予算内)", SEEDS);
 
+        // ユーザー判断2の機械的な検証。修正前(同ハーネス)の1.78回/走を上回らないこと。
         assert!(
-            summary.cleared * 10 >= (SEEDS as usize) * 9,
-            "ゴール到達が9割に届いていない: {}/{SEEDS}",
+            summary.crush_deaths_per_run() <= 1.78,
+            "押し潰し死が修正前の実測(1.78回/走)を上回っている: {:.2}回/走",
+            summary.crush_deaths_per_run()
+        );
+        assert!(
+            summary.cleared >= 6,
+            "完走が修正前の実測(6/32)を下回っている: {}/{SEEDS}",
             summary.cleared
         );
         assert!(
+            summary.oxygen_deaths_per_run() <= 4.0,
+            "酸素切れ死が実測(3.44回/走)から大きく増えている: {:.2}回/走",
+            summary.oxygen_deaths_per_run()
+        );
+        assert!(
             summary.average_rocks <= 55.0,
-            "完走時の岩破壊が実測(36.9回)から大きく増えている: 平均{:.1}回",
+            "完走時の岩破壊が実測(43.4回)から大きく増えている: 平均{:.1}回",
             summary.average_rocks
         );
-        let deaths_per_run = summary.total_deaths as f64 / SEEDS as f64;
+    }
+
+    /// ユーザーが実際に使っている設定(`Profile::harsh`)で500mを32シード走らせる(#225)。
+    /// 「AIR不足でめっちゃ死ぬ」という指摘の再現条件そのもの。
+    ///
+    /// 実測値(同じハーネス・32シード):
+    /// - 修正前: 完走2/32・平均到達423m・酸素切れ3.81回/走(死因の98%)・押し潰され0.09回/走・
+    ///   完走時の平均岩破壊37.5回
+    /// - 修正後: 完走25/32・平均到達492m・酸素切れ0.81回/走・押し潰され1.28回/走・
+    ///   完走時の平均岩破壊20.1回・無傷完走5/32
+    ///
+    /// 押し潰されが0.09→1.28回/走へ増えて見えるのは、修正前は平均423mで酸素切れになり
+    /// 潰される前に死んでいたため。1走あたりの死亡総数は3.91回→2.12回へ減っている。
+    #[test]
+    #[ignore = "長時間のソークテスト。cargo test --release -- --ignored で実行する"]
+    fn soak_harsh_profile_within_life_budget() {
+        const SEEDS: u64 = 32;
+        let profile = Profile::harsh(500);
+        let results: Vec<(u64, SoakResult)> = (0..SEEDS)
+            .map(|seed| (seed, play(seed, &profile, RevivePolicy::Never, 120_000)))
+            .collect();
+        let summary = Summary::of(&results);
+        summary.print("500m(harsh・ライフ予算内)", SEEDS);
+
         assert!(
-            deaths_per_run <= 9.5,
-            "1走あたりの死亡回数が実測(6.4回)から大きく増えている: {deaths_per_run:.1}回"
+            summary.cleared >= 16,
+            "ユーザーの実設定での完走が16/32に届いていない: {}/{SEEDS}",
+            summary.cleared
         );
+        assert!(
+            summary.oxygen_deaths_per_run() <= 1.5,
+            "酸素切れ死が修正前の実測(3.81回/走)から改善しきれていない: {:.2}回/走",
+            summary.oxygen_deaths_per_run()
+        );
+        assert!(
+            summary.total_deaths as f64 / SEEDS as f64 <= 3.91,
+            "1走あたりの死亡総数が修正前の実測(3.91回/走)を上回っている: {:.2}回/走",
+            summary.total_deaths as f64 / SEEDS as f64
+        );
+    }
+
+    /// 何度でも復活させる前提で、フルコースの終端まで到達し切れること。
+    ///
+    /// **これは通常のライフ予算内での完走率を意味しない**(#225)。以前はこのテストを
+    /// 「到達32/32」と読んでいたが、それは無制限リトライ込みの数字で、実際の
+    /// ライフ予算内の完走率は当時10/32だった。ここで見るのはクラッシュ・不変条件違反の
+    /// 不在と、いつかは終端へ到達できること(=永久に進めなくなる盤面が無いこと)だけ。
+    /// ライフ予算内の品質は`soak_full_course_within_life_budget`が担当する。
+    #[test]
+    #[ignore = "長時間のソークテスト。cargo test --release -- --ignored で実行する"]
+    fn soak_full_course_unlimited_revive_reaches_the_goal_eventually() {
+        const SEEDS: u64 = 8;
+        let profile = Profile::default_course(FIELD_WIDTH_DEFAULT, 1000);
+        for seed in 0..SEEDS {
+            let result = play(seed, &profile, RevivePolicy::Unlimited, 120_000);
+            assert!(
+                result.cleared,
+                "seed={seed}: 無制限に復活できるなら終端まで到達できるはず\
+                 (到達={}m, {}フレーム)",
+                result.deepest_m, result.frames
+            );
+        }
     }
 
     /// ソーク結果の集計。
     struct Summary {
+        seeds: usize,
         cleared: usize,
         unharmed: usize,
         out_of_oxygen: Vec<u64>,
         average_rocks: f64,
         average_frames: f64,
+        average_deepest_m: f64,
         total_deaths: usize,
+        /// 原因別の死亡回数(全シード合計)。
+        deaths_by_cause: Vec<(MissCause, usize)>,
     }
 
     impl Summary {
@@ -2244,7 +2863,14 @@ mod tests {
                 .filter(|(_, r)| r.cleared)
                 .map(|(_, r)| r.rocks_drilled)
                 .collect();
+            let causes = [
+                MissCause::OxygenOut,
+                MissCause::CrushedByFallingBlock,
+                MissCause::DrilledIntoFallingBlock,
+                MissCause::BombBlast,
+            ];
             Summary {
+                seeds: results.len(),
                 cleared: results.iter().filter(|(_, r)| r.cleared).count(),
                 unharmed: results.iter().filter(|(_, r)| r.unharmed()).count(),
                 out_of_oxygen: results
@@ -2255,21 +2881,59 @@ mod tests {
                 average_rocks: rocks.iter().sum::<usize>() as f64 / rocks.len().max(1) as f64,
                 average_frames: results.iter().map(|(_, r)| r.frames as f64).sum::<f64>()
                     / results.len().max(1) as f64,
+                average_deepest_m: results.iter().map(|(_, r)| r.deepest_m as f64).sum::<f64>()
+                    / results.len().max(1) as f64,
                 total_deaths: results.iter().map(|(_, r)| r.deaths.len()).sum(),
+                deaths_by_cause: causes
+                    .into_iter()
+                    .map(|cause| {
+                        let total = results
+                            .iter()
+                            .map(|(_, r)| r.deaths_by_cause(cause))
+                            .sum::<usize>();
+                        (cause, total)
+                    })
+                    .collect(),
             }
+        }
+
+        fn per_run(&self, cause: MissCause) -> f64 {
+            let total = self
+                .deaths_by_cause
+                .iter()
+                .find(|(c, _)| *c == cause)
+                .map_or(0, |(_, n)| *n);
+            total as f64 / self.seeds.max(1) as f64
+        }
+
+        fn oxygen_deaths_per_run(&self) -> f64 {
+            self.per_run(MissCause::OxygenOut)
+        }
+
+        fn crush_deaths_per_run(&self) -> f64 {
+            self.per_run(MissCause::CrushedByFallingBlock)
         }
 
         fn print(&self, course: &str, seeds: u64) {
             println!(
-                "{course}: 到達 {}/{seeds} / 無傷完走 {}/{seeds} / 酸素切れ {}シード / \
-                 完走時の平均岩破壊 {:.1}回 / 平均 {:.0}フレーム / 死亡 計{}回",
+                "{course}: 完走 {}/{seeds} / 無傷完走 {}/{seeds} / 酸素切れ {}シード / \
+                 平均到達 {:.0}m / 完走時の平均岩破壊 {:.1}回 / 平均 {:.0}フレーム / \
+                 死亡 計{}回({:.2}回/走)",
                 self.cleared,
                 self.unharmed,
                 self.out_of_oxygen.len(),
+                self.average_deepest_m,
                 self.average_rocks,
                 self.average_frames,
-                self.total_deaths
+                self.total_deaths,
+                self.total_deaths as f64 / self.seeds.max(1) as f64,
             );
+            for (cause, total) in &self.deaths_by_cause {
+                println!(
+                    "    {cause:?}: 計{total}回 ({:.2}回/走)",
+                    *total as f64 / self.seeds.max(1) as f64
+                );
+            }
         }
     }
 }

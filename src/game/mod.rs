@@ -2021,6 +2021,39 @@ impl Game {
         );
     }
 
+    /// 永続化された設定(速度系・出現率系)を、開始したばかりのゲームへまとめて反映する
+    /// (TERM独自拡張。#225)。
+    ///
+    /// main.rsの`start_new_game`とオートプレイのソークテストの両方がここを通る。以前は
+    /// 反映処理が`start_new_game`にしか無く、ソークテストは`Game::new_with_width`直後の
+    /// 盤面(=出現率の再抽選前)で走っていたため、既定設定の計測ですら実機と違う盤面を
+    /// 測っていた。
+    ///
+    /// デバッグログ(SQLite)の作り直しはここには含めない。設定の反映ではなく記録先の
+    /// 準備であり、テストから呼ぶとファイルを作ってしまうため`start_new_game`に残す。
+    pub fn apply_settings(&mut self, settings: &crate::settings::Settings) {
+        self.set_block_fall_tick_ms(settings.block_fall_tick_ms);
+        self.set_player_fall_tick_ms(settings.player_fall_tick_ms);
+        self.set_shake_duration_ms(settings.shake_duration_ms);
+        self.set_dodge_recovery_ms(settings.dodge_recovery_ms);
+        self.set_move_cooldown_ms(settings.move_cooldown_ms);
+        self.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
+        self.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
+        // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
+        self.reroll_spawn_rates_from(
+            2,
+            settings.rock_spawn_rate_percent,
+            settings.air_spawn_rate_percent,
+            settings.star_spawn_rate_percent,
+            settings.diamond_spawn_rate_percent,
+            settings.item_clear_above_rate_percent,
+            settings.item_unify_colors_rate_percent,
+            settings.item_starify_screen_rate_percent,
+            settings.color_count,
+            settings.color_cluster_rate_percent,
+        );
+    }
+
     /// 現在盤面上にあるボムの一覧(TERM独自拡張。#96)。描画側(render.rs)が参照する。
     pub fn bombs(&self) -> &[Bomb] {
         &self.bombs
