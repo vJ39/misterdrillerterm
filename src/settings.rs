@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use crate::constants::{
     CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M,
     DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT,
+    REWIND_STOCK_MAX_DEFAULT, REWIND_STOCK_MAX_SETTING_MAX, REWIND_STOCK_MAX_SETTING_MIN,
     SHAKE_DURATION_MS, SOUND_VOLUME_PERCENT_DEFAULT, SOUND_VOLUME_PERCENT_MAX,
     SPAWN_RATE_PERCENT_DEFAULT,
 };
@@ -90,6 +91,10 @@ pub struct Settings {
     /// ユーザー指摘: 「起動フローにモードセレクト画面を追加」)。次回起動時の
     /// モードセレクト画面の初期選択として引き継ぐ。
     pub last_course_depth_m: usize,
+    /// フレーム巻き戻し(TERM独自拡張。#233)で持てるストック(使用回数)の上限。
+    /// `REWIND_STOCK_MAX_SETTING_MIN`(0=機能OFF)〜`REWIND_STOCK_MAX_SETTING_MAX`の
+    /// 範囲で設定画面から調整する。
+    pub rewind_stock_max: u8,
 }
 
 impl Default for Settings {
@@ -118,6 +123,7 @@ impl Default for Settings {
             debug_log_enabled: true,
             chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
             last_course_depth_m: COURSE_NORMAL_DEPTH_M,
+            rewind_stock_max: REWIND_STOCK_MAX_DEFAULT,
         }
     }
 }
@@ -213,6 +219,16 @@ impl Settings {
             last_course_depth_m: parse_u64_field(&text, "last_course_depth_m")
                 .map(|v| v as usize)
                 .unwrap_or(default.last_course_depth_m),
+            // 巻き戻しストック上限(#233)は取り得る値が0〜5と狭く、範囲外の値を
+            // そのまま受け入れても設定画面の増減で戻せないだけなので、範囲外なら
+            // 既定値へフォールバックする。
+            rewind_stock_max: parse_u64_field(&text, "rewind_stock_max")
+                .filter(|&v| {
+                    (REWIND_STOCK_MAX_SETTING_MIN as u64..=REWIND_STOCK_MAX_SETTING_MAX as u64)
+                        .contains(&v)
+                })
+                .map(|v| v as u8)
+                .unwrap_or(default.rewind_stock_max),
         }
     }
 
@@ -234,7 +250,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.music_volume_percent,
@@ -257,7 +273,8 @@ impl Settings {
             self.bomb_spawn_rate_percent,
             self.debug_log_enabled,
             self.chain_vanish_interval_ms,
-            self.last_course_depth_m
+            self.last_course_depth_m,
+            self.rewind_stock_max
         );
         // 一時ファイルへ書いてからrenameすることで保存をアトミックにする(TERM独自
         // 拡張。#158)。File::create+write_allをpathへ直接行うと、書き込み途中で
@@ -359,6 +376,7 @@ mod tests {
             CHAIN_VANISH_INTERVAL_MS_DEFAULT
         );
         assert_eq!(settings.last_course_depth_m, COURSE_NORMAL_DEPTH_M);
+        assert_eq!(settings.rewind_stock_max, REWIND_STOCK_MAX_DEFAULT);
     }
 
     #[test]
@@ -437,6 +455,7 @@ mod tests {
             debug_log_enabled: false,
             chain_vanish_interval_ms: 150,
             last_course_depth_m: 500,
+            rewind_stock_max: REWIND_STOCK_MAX_SETTING_MIN,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -465,6 +484,7 @@ mod tests {
             debug_log_enabled: true,
             chain_vanish_interval_ms: 1000,
             last_course_depth_m: 1000,
+            rewind_stock_max: REWIND_STOCK_MAX_SETTING_MAX,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);
@@ -598,6 +618,61 @@ mod tests {
 
         assert_eq!(loaded.music_volume_percent, SOUND_VOLUME_PERCENT_MAX);
         assert_eq!(loaded.se_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_out_of_range_rewind_stock_max_falls_back_to_default() {
+        // #233: 設定画面で取り得ない値(範囲外)がファイルに入っていた場合、そのまま
+        // 受け入れると設定画面の増減操作だけでは正常な範囲へ戻せなくなるため既定値にする。
+        let path = temp_settings_path("rewind-out-of-range");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"rewind_stock_max\": 99}").unwrap();
+
+        assert_eq!(
+            Settings::load_from(&path).rewind_stock_max,
+            REWIND_STOCK_MAX_DEFAULT
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_missing_rewind_stock_max_key_falls_back_to_default() {
+        // #233を追加する前に保存されたsettings.jsonにはキー自体が無い。
+        let path = temp_settings_path("rewind-missing-key");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"music_enabled\": true}").unwrap();
+
+        assert_eq!(
+            Settings::load_from(&path).rewind_stock_max,
+            REWIND_STOCK_MAX_DEFAULT
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_in_range_rewind_stock_max_is_kept_including_the_off_value() {
+        // 範囲内(0=OFFを含む)の値は既定値へ丸めず、そのまま読み取る。
+        let path = temp_settings_path("rewind-in-range");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        std::fs::write(&path, "{\"rewind_stock_max\": 0}").unwrap();
+        assert_eq!(
+            Settings::load_from(&path).rewind_stock_max,
+            REWIND_STOCK_MAX_SETTING_MIN
+        );
+
+        std::fs::write(&path, "{\"rewind_stock_max\": 5}").unwrap();
+        assert_eq!(
+            Settings::load_from(&path).rewind_stock_max,
+            REWIND_STOCK_MAX_SETTING_MAX
+        );
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

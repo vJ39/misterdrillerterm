@@ -7,6 +7,7 @@ mod constants;
 mod debug_log;
 mod game;
 mod input;
+mod rewind;
 mod settings;
 mod ui;
 
@@ -30,10 +31,11 @@ use constants::{
     DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
     DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
     FIELD_WIDTH_STEP, FRAME_INTERVAL_MS, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
-    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, SOUND_VOLUME_PERCENT_MAX,
-    SOUND_VOLUME_PERCENT_MIN, SOUND_VOLUME_PERCENT_STEP, SPAWN_RATE_PERCENT_MAX,
-    SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
-    STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
+    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, REWIND_STOCK_MAX_SETTING_MAX,
+    REWIND_STOCK_MAX_SETTING_MIN, SOUND_VOLUME_PERCENT_MAX, SOUND_VOLUME_PERCENT_MIN,
+    SOUND_VOLUME_PERCENT_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX,
+    STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -148,19 +150,78 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 超えるとアトラクトモードを自動開始する。
     let mut title_idle = Duration::ZERO;
 
+    // フレーム巻き戻し(TERM独自拡張。#233)。`autopilot`と同じくGameの外に置く寿命の
+    // 状態で、Gameを作り直す場面(タイトルへ戻る・新規ゲーム開始)では必ず捨てる。
+    // `rewind_session`が`Some`の間はゲーム本体を凍結し、逆再生の操作だけを受け付ける。
+    let mut rewind_history = rewind::RewindHistory::new();
+    let mut rewind_session: Option<rewind::RewindSession> = None;
+
     loop {
         // Playing→Titleへの遷移フラグ。`screen`自体への再代入は、`game`(screenを
         // 借用したバインディング)の生存期間が終わった後、if/else全体を抜けてから
         // 行う(借用中のscreenへ同時に代入できないため)。
         let mut back_to_title = false;
 
-        if let Screen::Playing(game) = &mut screen {
+        if rewind_session.is_some()
+            && let Screen::Playing(game) = &mut screen
+        {
+            // フレーム巻き戻し中(TERM独自拡張。#233)。`game.update`を呼ばずゲームを
+            // 凍結し、逆再生セッションの操作(←→での調整・確定・キャンセル)だけを扱う。
+            let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
+            let now = Instant::now();
+            let delta = now
+                .duration_since(last_tick)
+                .min(Duration::from_millis(250));
+            last_tick = now;
+
+            let viewing_cursor = advance_rewind_session(
+                game,
+                &mut rewind_session,
+                &mut rewind_history,
+                &mut autopilot,
+                &actions,
+                delta,
+                mixer.as_ref(),
+                &se_enabled,
+                settings.se_volume_percent,
+            );
+
+            let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
+            let se_on = se_enabled.load(Ordering::Relaxed);
+            let autoplay_on = autopilot.is_some();
+            let field_width = game.board.width();
+            match viewing_cursor {
+                // まだ巻き戻し中。今見ている時点のスナップショットを描画し、案内を重ねる。
+                Some(cursor) => {
+                    let snapshot = rewind_history.snapshot_at(cursor);
+                    // ゲームは凍結中でフレーム番号が進まないため、現在との差がそのまま
+                    // 「どれだけ過去を見ているか」になる。
+                    let frames_back = game.debug_frame().saturating_sub(snapshot.frame_at_capture);
+                    let snapshot_game = &snapshot.game;
+                    terminal.draw(|frame| {
+                        ui::render::draw(frame, snapshot_game, music_on, se_on, autoplay_on);
+                        ui::render::draw_rewind_overlay(frame, field_width, cursor, frames_back);
+                    })?;
+                }
+                // このフレームで確定/キャンセルした。通常どおり現在の状態を描画する。
+                None => {
+                    terminal.draw(|frame| {
+                        ui::render::draw(frame, game, music_on, se_on, autoplay_on)
+                    })?;
+                }
+            }
+        } else if let Screen::Playing(game) = &mut screen {
             // poll_input_batch: 1フレーム内にキューされた全キーイベントを処理する。
             // 移動・向き変更と掘削をほぼ同時に押しても、同一フレームに届いた
             // 両方のイベントを取りこぼさず反映するため。
             for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
                 if back_to_title {
                     break; // Quit済みなら以降のキューされたアクションは処理しない
+                }
+                // 巻き戻しを開始したら、同じフレームに溜まっていた残りの入力は捨てる
+                // (次フレームから巻き戻し中の操作として解釈する)。
+                if rewind_session.is_some() {
+                    break;
                 }
                 // アトラクトモード(タイトル放置から始まった自動デモ)中に人が何か
                 // 操作したら、そこから引き継ぐのではなくタイトルへ戻す(TERM独自拡張。
@@ -184,6 +245,25 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::TogglePause => {
                         game.toggle_pause();
                         pause_overlay = PauseOverlay::None;
+                    }
+                    // Backspace/U: フレーム巻き戻しの開始(TERM独自拡張。#233)。
+                    // 設定/ヘルプのオーバーレイ表示中は無効。ストックが残っていて
+                    // (`can_start_rewind`)、戻れる履歴が1つでもあるときだけ起動する。
+                    // 一時停止中・クリア後は`can_start_rewind`がfalseなので何も起きない。
+                    InputAction::Rewind => {
+                        if pause_overlay == PauseOverlay::None
+                            && game.can_start_rewind()
+                            && !rewind_history.is_empty()
+                        {
+                            rewind_session =
+                                Some(rewind::RewindSession::start(&mut rewind_history, game));
+                            play_se(
+                                mixer.as_ref(),
+                                &se_enabled,
+                                settings.se_volume_percent,
+                                audio::sfx::play_rewind_start,
+                            );
+                        }
                     }
                     // ポーズ解除はPだけでなく、ショートカット未割り当ての任意キーでも行える。
                     // オーバーレイ(設定/ヘルプ)表示中は対象外(そちらはQ/S/Hで明示的に閉じる)。
@@ -223,6 +303,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             pause_overlay = if pause_overlay == PauseOverlay::Settings {
                                 PauseOverlay::None
                             } else {
+                                // 設定画面では盤面の前提(配分率・速度・列数)を変えられる
+                                // ため、開いた時点で巻き戻し履歴は捨てる(#233)。
+                                rewind_history.clear();
                                 PauseOverlay::Settings
                             };
                         }
@@ -265,6 +348,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             // (無効化時は記録を止め、有効化時は新規にログを開き直す)。
                             ui::render::SettingsChoice::DebugLogEnabled => {
                                 settings.debug_log_enabled = !settings.debug_log_enabled;
+                                // ログを開き直す前に履歴を捨てる(#233)。古いスナップ
+                                // ショットは差し替え前のログ接続を掴んだままのため。
+                                rewind_history.clear();
                                 game.refresh_debug_log(settings.debug_log_enabled);
                                 settings.save();
                             }
@@ -287,7 +373,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::MoveSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs
                             | ui::render::SettingsChoice::BombRate
-                            | ui::render::SettingsChoice::ChainVanishInterval => {}
+                            | ui::render::SettingsChoice::ChainVanishInterval
+                            | ui::render::SettingsChoice::RewindStockMax => {}
                         }
                     }
                     // MUSIC/SEのトグルは←→キーでも行える。トグルなので方向は問わず、
@@ -313,6 +400,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             }
                             ui::render::SettingsChoice::DebugLogEnabled => {
                                 settings.debug_log_enabled = !settings.debug_log_enabled;
+                                // 上と同じ理由で、ログを開き直す前に履歴を捨てる(#233)。
+                                rewind_history.clear();
                                 game.refresh_debug_log(settings.debug_log_enabled);
                             }
                             _ => {}
@@ -370,6 +459,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
                                     | ui::render::SettingsChoice::BombRate
                                     | ui::render::SettingsChoice::ChainVanishInterval
+                                    | ui::render::SettingsChoice::RewindStockMax
                             ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -409,6 +499,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 game.set_chain_vanish_interval_ms(
                                     settings.chain_vanish_interval_ms,
                                 );
+                            }
+                            ui::render::SettingsChoice::RewindStockMax => {
+                                settings.rewind_stock_max =
+                                    adjust_rewind_stock_max(settings.rewind_stock_max, increase);
+                                game.set_rewind_stock_max(settings.rewind_stock_max);
                             }
                             _ => {}
                         }
@@ -468,7 +563,12 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::Confirm if game.status == GameStatus::GameOver => {
                         match game.game_over_selection() {
                             GameOverChoice::BackToTitle => back_to_title = true,
-                            GameOverChoice::Revive => game.revive(),
+                            GameOverChoice::Revive => {
+                                // 復活は「ここから仕切り直す」選択なので、死ぬ前へ
+                                // 巻き戻せる履歴は残さない(#233)。
+                                rewind_history.clear();
+                                game.revive();
+                            }
                         }
                     }
                     InputAction::Confirm => {}
@@ -519,32 +619,42 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
                     InputAction::DebugStarifyVisibleScreen => game.debug_starify_visible_screen(),
                     InputAction::DebugPlaceBomb => game.debug_place_bomb(),
+                    // 速度系デバッグショートカット([ ] - = , .)。落下・揺れの速度は
+                    // スナップショット(Game丸ごと)にも含まれるため、変更前の履歴へ
+                    // 戻ると変更を取り消したのと同じことになる。混乱を避けるため、
+                    // 速度を変えた時点で履歴を捨てる(#233)。
                     InputAction::DebugBlockFallSlower => {
+                        rewind_history.clear();
                         game.debug_adjust_block_fall_speed(false);
                         settings.block_fall_tick_ms = game.block_fall_tick_ms();
                         settings.save();
                     }
                     InputAction::DebugBlockFallFaster => {
+                        rewind_history.clear();
                         game.debug_adjust_block_fall_speed(true);
                         settings.block_fall_tick_ms = game.block_fall_tick_ms();
                         settings.save();
                     }
                     InputAction::DebugPlayerFallSlower => {
+                        rewind_history.clear();
                         game.debug_adjust_player_fall_speed(false);
                         settings.player_fall_tick_ms = game.player_fall_tick_ms();
                         settings.save();
                     }
                     InputAction::DebugPlayerFallFaster => {
+                        rewind_history.clear();
                         game.debug_adjust_player_fall_speed(true);
                         settings.player_fall_tick_ms = game.player_fall_tick_ms();
                         settings.save();
                     }
                     InputAction::DebugShakeDurationLonger => {
+                        rewind_history.clear();
                         game.debug_adjust_shake_duration(true);
                         settings.shake_duration_ms = game.shake_duration_ms();
                         settings.save();
                     }
                     InputAction::DebugShakeDurationShorter => {
+                        rewind_history.clear();
                         game.debug_adjust_shake_duration(false);
                         settings.shake_duration_ms = game.shake_duration_ms();
                         settings.save();
@@ -552,7 +662,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 }
             }
 
-            if !back_to_title {
+            // 巻き戻しを開始したフレームはゲームを進めず描画もしない(次フレームから
+            // 巻き戻し専用の処理へ入る)。
+            if !back_to_title && rewind_session.is_none() {
                 // オートプレイ(TERM独自拡張。#218)。盤面から決めた仮想入力を、人の
                 // 操作と同じ経路へ流し込む。GameOver中は何も返さないため、ダイアログは
                 // 人間がプレイしたときと同じように表示されたまま操作を待つ(#225)。
@@ -579,6 +691,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     &se_enabled,
                     settings.se_volume_percent,
                 );
+
+                // 巻き戻し用スナップショットの蓄積(TERM独自拡張。#233)。記録の可否・
+                // 間隔の判定はRewindHistory側が持つ(ここは毎フレーム呼ぶだけ)。
+                rewind_history.maybe_capture(game);
 
                 let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
                 let se_on = se_enabled.load(Ordering::Relaxed);
@@ -613,6 +729,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.bomb_spawn_rate_percent,
                             settings.debug_log_enabled,
                             settings.chain_vanish_interval_ms,
+                            settings.rewind_stock_max,
                             false,
                         ),
                         PauseOverlay::Help => ui::render::draw_help(frame, None, false),
@@ -647,6 +764,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.bomb_spawn_rate_percent,
                     settings.debug_log_enabled,
                     settings.chain_vanish_interval_ms,
+                    settings.rewind_stock_max,
                     true,
                 )
             })?;
@@ -698,7 +816,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::MoveSpeed
                         | ui::render::SettingsChoice::DodgeRecoveryMs
                         | ui::render::SettingsChoice::BombRate
-                        | ui::render::SettingsChoice::ChainVanishInterval => {}
+                        | ui::render::SettingsChoice::ChainVanishInterval
+                        | ui::render::SettingsChoice::RewindStockMax => {}
                     },
                     // MUSIC/SEのトグルはSpace(TogglePause)・←→キーでも行える(ヘルプ表示
                     // 「Spaceか←→でトグル」と一致させるため)。一時停止中のオーバーレイの
@@ -784,6 +903,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                                 | ui::render::SettingsChoice::BombRate
                                 | ui::render::SettingsChoice::ChainVanishInterval
+                                | ui::render::SettingsChoice::RewindStockMax
                         ) =>
                     {
                         let increase = action == InputAction::MoveRight;
@@ -823,6 +943,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     settings.chain_vanish_interval_ms,
                                     increase,
                                 );
+                            }
+                            ui::render::SettingsChoice::RewindStockMax => {
+                                settings.rewind_stock_max =
+                                    adjust_rewind_stock_max(settings.rewind_stock_max, increase);
                             }
                             _ => {}
                         }
@@ -911,6 +1035,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         settings.last_course_depth_m = depth_goal_m;
                         settings.save();
                         let game = start_new_game(rng.random(), &settings, depth_goal_m);
+                        // 新しい盤面なので前のゲームの履歴は引き継がない(#233)。
+                        rewind_history.clear();
+                        rewind_session = None;
                         screen = Screen::Playing(Box::new(game));
                         last_tick = Instant::now();
                     }
@@ -958,6 +1085,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 autopilot = Some(autoplay::Autopilot::new(false));
                 autopilot_is_attract_demo = true;
                 title_idle = Duration::ZERO;
+                // 新しい盤面なので前のゲームの履歴は引き継がない(#233)。
+                rewind_history.clear();
+                rewind_session = None;
                 screen = Screen::Playing(Box::new(game));
                 last_tick = Instant::now();
             }
@@ -971,6 +1101,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             autopilot = None;
             autopilot_is_attract_demo = false;
             title_idle = Duration::ZERO;
+            // Gameを破棄するので、それを複製した巻き戻し履歴・進行中のセッションも捨てる(#233)。
+            rewind_history.clear();
+            rewind_session = None;
             // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする。次にプレイを始めた
             // とき、前回の再生位置・曲順を引きずらず必ず1曲目の先頭から鳴るようにする。
             gameplay_bgm_restart.store(true, Ordering::Relaxed);
@@ -1273,6 +1406,96 @@ fn adjust_chain_vanish_interval_ms(current: u64, increase: bool) -> u64 {
         // 不要(clippy::unnecessary_min_or_max)。
         current.saturating_sub(CHAIN_VANISH_INTERVAL_MS_STEP)
     }
+}
+
+/// 巻き戻しストック上限を1ずつ増減する(TERM独自拡張。#233)。
+/// `REWIND_STOCK_MAX_SETTING_MIN`(0=機能OFF)〜`REWIND_STOCK_MAX_SETTING_MAX`の範囲。
+#[allow(clippy::unnecessary_min_or_max)]
+fn adjust_rewind_stock_max(current: u8, increase: bool) -> u8 {
+    if increase {
+        current.saturating_add(1).min(REWIND_STOCK_MAX_SETTING_MAX)
+    } else {
+        // REWIND_STOCK_MAX_SETTING_MINは0固定のためsaturating_subの結果への.max()は
+        // 無意味と判定されるが、下限を明示する記述として意図的に残す。
+        current.saturating_sub(1).max(REWIND_STOCK_MAX_SETTING_MIN)
+    }
+}
+
+/// SE(効果音)を1つ鳴らす。SE OFF設定中・音量0%・音声デバイス無しのいずれでも
+/// 何もしない(`handle_events`と同じ条件判定を単発の再生でも使い回すための共通化)。
+fn play_se(
+    mixer: Option<&Mixer>,
+    se_enabled: &Arc<AtomicBool>,
+    se_volume_percent: u32,
+    play: fn(&Mixer, f32),
+) {
+    if !se_enabled.load(Ordering::Relaxed) || se_volume_percent == 0 {
+        return;
+    }
+    let Some(mixer) = mixer else {
+        return;
+    };
+    play(mixer, audio::sfx::se_gain(se_volume_percent));
+}
+
+/// 巻き戻し(逆再生)セッションの1フレーム分を進める(TERM独自拡張。#233)。
+///
+/// 入力の解釈はセッション側(`rewind::RewindSession::handle`)に任せ、ここはその結果に
+/// 応じた後始末だけを行う。戻り値は「このフレームで描画すべきスナップショットの位置」で、
+/// `None`ならセッションはこのフレームで終了した(確定またはキャンセル)。
+#[allow(clippy::too_many_arguments)]
+fn advance_rewind_session(
+    game: &mut Game,
+    rewind_session: &mut Option<rewind::RewindSession>,
+    rewind_history: &mut rewind::RewindHistory,
+    autopilot: &mut Option<autoplay::Autopilot>,
+    actions: &[InputAction],
+    delta: Duration,
+    mixer: Option<&Mixer>,
+    se_enabled: &Arc<AtomicBool>,
+    se_volume_percent: u32,
+) -> Option<usize> {
+    let history_len = rewind_history.len();
+    let session = rewind_session.as_mut()?;
+
+    let mut outcome = rewind::RewindOutcome::Continue;
+    for &action in actions {
+        outcome = session.handle(action, history_len);
+        if outcome != rewind::RewindOutcome::Continue {
+            break;
+        }
+    }
+    if outcome == rewind::RewindOutcome::Continue {
+        session.tick(delta, history_len);
+        return Some(session.cursor());
+    }
+
+    // 以降はセッション終了。確定位置だけ取り出してセッションを手放す。
+    let confirmed = match outcome {
+        rewind::RewindOutcome::Confirm(cursor) => Some(cursor),
+        rewind::RewindOutcome::Continue | rewind::RewindOutcome::Cancel => None,
+    };
+    *rewind_session = None;
+
+    // cursor=0は巻き戻し開始時点の「現在」そのものなので、キャンセルと同じ扱いにし
+    // 復元もストック消費も行わない。
+    if let Some(cursor) = confirmed.filter(|&cursor| cursor > 0) {
+        game.restore_for_rewind(&rewind_history.snapshot_at(cursor).game);
+        // 戻した先より新しいスナップショットは「起こらなかった未来」なので捨てる。
+        rewind_history.discard_newer_than(cursor);
+        // オートプレイ中だった場合、位置履歴・目的列といった内部状態が巻き戻し前の
+        // 盤面を前提にしたままになるため作り直す(#218のAutopilotはGameの外の状態)。
+        if autopilot.is_some() {
+            *autopilot = Some(autoplay::Autopilot::new(game.is_invincible()));
+        }
+        play_se(
+            mixer,
+            se_enabled,
+            se_volume_percent,
+            audio::sfx::play_revive,
+        );
+    }
+    None
 }
 
 /// SE/MUSIC音量(%)を`SOUND_VOLUME_PERCENT_STEP`ぶん増減する(TERM独自拡張。#224)。

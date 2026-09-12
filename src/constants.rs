@@ -517,3 +517,31 @@ pub const SOUND_VOLUME_PERCENT_DEFAULT: u32 = 100;
 pub const SOUND_VOLUME_PERCENT_MIN: u32 = 0;
 pub const SOUND_VOLUME_PERCENT_MAX: u32 = 100;
 pub const SOUND_VOLUME_PERCENT_STEP: u32 = 10;
+
+// ---------------------------------------------------------------------------
+// フレーム巻き戻し(#233、TERM独自拡張)。一定フレームごとに`Game`丸ごとのスナップ
+// ショットをリングバッファへ残し、Backspace/Uキーで過去の状態へ戻ってやり直せる
+// ようにする。
+// ---------------------------------------------------------------------------
+
+/// 巻き戻しの1スナップショットあたりの間隔(ゲームフレーム数。実時間ではない)。
+/// 実時間で測るとフレーム落ち・一時停止の影響を受けて記録間隔がぶれるため、
+/// `Game::update`が呼ばれた回数で数える。
+pub const REWIND_SNAPSHOT_INTERVAL_FRAMES: u32 = 100;
+
+/// 保存するスナップショットの最大数(≈33秒分@100フレーム間隔)。
+/// これを超えたら最古のものから捨てる。
+pub const REWIND_MAX_SNAPSHOTS: usize = 10;
+
+/// 巻き戻しストック(使用回数)の初期値。
+pub const REWIND_STOCK_INITIAL: u8 = 3;
+
+/// 巻き戻しストックの既定の上限(設定画面で変更できる)。
+pub const REWIND_STOCK_MAX_DEFAULT: u8 = 3;
+
+/// 100mチェックポイント到達ごとに補充する巻き戻しストックの量。
+pub const REWIND_STOCK_PER_CHECKPOINT: u8 = 1;
+
+/// 設定画面で調整できる巻き戻しストック上限の範囲(0=巻き戻し機能そのものをOFF)。
+pub const REWIND_STOCK_MAX_SETTING_MIN: u8 = 0;
+pub const REWIND_STOCK_MAX_SETTING_MAX: u8 = 5;

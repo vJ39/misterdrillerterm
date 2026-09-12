@@ -34,6 +34,9 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // (TERM独自拡張。ユーザー指摘: 「メニューから進むのEnter」「他のボタンで
         // 進んではいけない」)。
         KeyCode::Enter => InputAction::Confirm,
+        // フレーム巻き戻し(TERM独自拡張。#233)。押しやすい位置のBackspaceと、
+        // Undoを連想できるUキーの両方に割り当てる(どちらも他のショートカットと衝突しない)。
+        KeyCode::Backspace | KeyCode::Char('u') | KeyCode::Char('U') => InputAction::Rewind,
         // 一時停止中のみ意味を持つ、MUSIC/SE個別トグル(TERM独自拡張。ユーザー指摘:
         // 「サウンドON/OFFではなくMUSIC/SEをそれぞれトグルできるように」)。
         KeyCode::Char('m') | KeyCode::Char('M') => InputAction::ToggleMusic,
@@ -202,6 +205,67 @@ mod tests {
             action_from_key_code(KeyCode::Char('G')),
             InputAction::DebugToggleInvincible
         );
+    }
+
+    #[test]
+    fn action_from_key_code_maps_the_rewind_keys() {
+        // #233: Backspace・U(大文字小文字とも)のいずれでも巻き戻しを起動できる。
+        assert_eq!(
+            action_from_key_code(KeyCode::Backspace),
+            InputAction::Rewind
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('u')),
+            InputAction::Rewind
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('U')),
+            InputAction::Rewind
+        );
+    }
+
+    #[test]
+    fn the_rewind_keys_do_not_collide_with_any_other_shortcut() {
+        // 巻き戻しキーを追加する際、既存のショートカットを奪っていないことを確認する。
+        // 既存の全割り当てキーを列挙し、巻き戻し以外のアクションへ割り当てられたキーの中に
+        // Backspace/u/Uが含まれていないことを見る。
+        let existing_keys = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Char('z'),
+            KeyCode::Char('p'),
+            KeyCode::Char('m'),
+            KeyCode::Char('e'),
+            KeyCode::Char('s'),
+            KeyCode::Char('h'),
+            KeyCode::Char('c'),
+            KeyCode::Char('l'),
+            KeyCode::Char('a'),
+            KeyCode::Char('r'),
+            KeyCode::Char('k'),
+            KeyCode::Char('b'),
+            KeyCode::Char('t'),
+            KeyCode::Char('g'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Char('-'),
+            KeyCode::Char('='),
+            KeyCode::Char(','),
+            KeyCode::Char('.'),
+        ];
+        for key in existing_keys {
+            assert_ne!(
+                action_from_key_code(key),
+                InputAction::Rewind,
+                "{key:?}が巻き戻しに奪われている"
+            );
+        }
     }
 
     #[test]

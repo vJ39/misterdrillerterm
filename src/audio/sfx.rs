@@ -561,6 +561,20 @@ pub fn play_revive(mixer: &Mixer, gain: f32) {
     );
 }
 
+/// 巻き戻し開始音(TERM独自拡張。#233)。時間が逆行する合図として、サイン波を
+/// 2段に分けて下降させる(880Hz→440Hz→220Hz、各120ms)。復活音(play_revive、
+/// 矩形波の駆け上がり)と正反対の形にして、戻る/進むを耳でも区別できるようにする。
+pub fn play_rewind_start(mixer: &Mixer, gain: f32) {
+    play_sequence(
+        mixer,
+        vec![
+            Box::new(sine_chirp(880.0, 440.0, 120, 0.45)) as Box<dyn Source<Item = f32> + Send>,
+            Box::new(sine_chirp(440.0, 220.0, 120, 0.45)) as Box<dyn Source<Item = f32> + Send>,
+        ],
+        gain,
+    );
+}
+
 /// ボム爆発音(TERM独自拡張。#96)。低い矩形波の「ドン」に続けて下降チャープを
 /// 重ね、既存の破壊音(play_destroy/play_rock_destroy)より低く長い爆発の質感を出す。
 pub fn play_bomb_explosion(mixer: &Mixer, gain: f32) {

@@ -8,6 +8,7 @@ pub mod board;
 pub mod physics;
 pub mod player;
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use rand::{RngExt, SeedableRng};
@@ -30,7 +31,8 @@ use crate::constants::{
     INPUT_COOLDOWN_ACCUM_CAP_MS, INPUT_COOLDOWN_MS, INVULNERABILITY_TICKS, LIVES_DEFAULT,
     LIVES_MAX, MOVE_ANIM_DURATION_MS, MOVE_COOLDOWN_MS_DEFAULT, MOVE_COOLDOWN_MS_MAX,
     MOVE_COOLDOWN_MS_MIN, OXYGEN_DECAY_DEPTH_MAX_MULTIPLIER, OXYGEN_WARNING_THRESHOLD,
-    PLAYER_SCREEN_ROWS_ABOVE, SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS, depth_fraction,
+    PLAYER_SCREEN_ROWS_ABOVE, REWIND_STOCK_INITIAL, REWIND_STOCK_MAX_DEFAULT,
+    REWIND_STOCK_PER_CHECKPOINT, SHAKE_DURATION_MS, STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
 use board::{
     BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
@@ -183,6 +185,11 @@ pub enum InputAction {
     /// 再開のトリガーとして扱う。Gameの内部状態には影響しないため、この解釈も
     /// Gameの外側=main.rsが担う
     UnboundKey,
+    /// Backspace/Uキー: フレーム巻き戻しの開始(TERM独自拡張。#233)。過去の
+    /// スナップショットを保持しているのは`Game`ではなく`rewind::RewindHistory`
+    /// (Gameの外)なので、このアクションの解釈もmain.rsが担う。`Game`自身は
+    /// 起動可否(`can_start_rewind`)と復元(`restore_for_rewind`)だけを提供する
+    Rewind,
 }
 
 /// ゲーム全体の進行状態。
@@ -314,6 +321,12 @@ impl MissCause {
 }
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
+///
+/// フレーム巻き戻し(TERM独自拡張。#233)がこの構造体を丸ごと複製してリングバッファへ
+/// 積むため`Clone`を実装する。唯一クローンできないSQLite接続(`debug_log`)だけは
+/// `Rc`で共有し、複製されたスナップショット同士が同じログを指すようにしている
+/// (ログは巻き戻しの対象外＝現在の記録先をそのまま使い続ける)。
+#[derive(Clone)]
 pub struct Game {
     pub board: Board,
     pub player: Player,
@@ -447,7 +460,10 @@ pub struct Game {
     /// #85調査用のブロック状態遷移ログ(TERM独自拡張)。`refresh_debug_log`で明示的に
     /// 有効化するまでは`None`(no-op)のままなので、通常のテスト等では disk I/O が
     /// 発生しない。
-    debug_log: Option<DebugLog>,
+    ///
+    /// SQLite接続はクローンできないため`Rc`で包む(#233)。巻き戻しのスナップショットは
+    /// `Game`丸ごとの複製なので、複製元・複製先・復元後の全てが同じ1つのログを指す。
+    debug_log: Option<Rc<DebugLog>>,
     /// 現在盤面上にあるボム(TERM独自拡張。#96)。
     bombs: Vec<Bomb>,
     /// ボム出現判定の経過時間蓄積(TERM独自拡張。#96)。`BOMB_SPAWN_CHECK_INTERVAL_MS`
@@ -486,6 +502,15 @@ pub struct Game {
     /// 無敵によって回避されたミスの累計回数(TERM独自拡張。#218)。ソークテストで
     /// 「長時間プレイ中に何回死ぬ場面があったか」を数えるための指標。
     misses_averted: u32,
+    /// 残っているフレーム巻き戻しの使用回数(TERM独自拡張。#233)。開始時は
+    /// `REWIND_STOCK_INITIAL`で、100mチェックポイント到達ごとに
+    /// `REWIND_STOCK_PER_CHECKPOINT`ずつ`rewind_stock_max`まで補充される。
+    /// 1回巻き戻すごとに1減る。
+    rewind_stock: u8,
+    /// 巻き戻しストックの上限(TERM独自拡張。#233)。設定画面から
+    /// `REWIND_STOCK_MAX_SETTING_MIN`〜`REWIND_STOCK_MAX_SETTING_MAX`で調整でき、
+    /// `0`なら巻き戻し機能そのものが無効になる(ストックも常に0にクランプされる)。
+    rewind_stock_max: u8,
 }
 
 impl Game {
@@ -597,6 +622,8 @@ impl Game {
             depth_goal_m,
             invincible: false,
             misses_averted: 0,
+            rewind_stock: REWIND_STOCK_INITIAL,
+            rewind_stock_max: REWIND_STOCK_MAX_DEFAULT,
         }
     }
 
@@ -638,6 +665,9 @@ impl Game {
         self.player.oxygen = crate::constants::OXYGEN_MAX;
         self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
         self.status = GameStatus::Playing;
+        // 巻き戻しストックもゲーム開始時と同じ値まで回復させる(TERM独自拡張。#233)。
+        // ライフ・酸素を初期値へ戻すのと同じ扱いに揃える。
+        self.rewind_stock = REWIND_STOCK_INITIAL.min(self.rewind_stock_max);
     }
 
     /// ← キー: facingをLeftにし、掘削を伴わない地形追従の移動を試みる(spec.md 1章)。
@@ -1038,6 +1068,75 @@ impl Game {
         self.misses_averted
     }
 
+    // --- フレーム巻き戻し(TERM独自拡張。#233) -------------------------------
+
+    /// 残っている巻き戻しの使用回数。HUD表示・GameOverダイアログのヒントが参照する。
+    pub fn rewind_stock(&self) -> u8 {
+        self.rewind_stock
+    }
+
+    /// 現在の巻き戻しストック上限(設定画面の`rewind_stock_max`)。`0`なら機能OFF。
+    pub fn rewind_stock_max(&self) -> u8 {
+        self.rewind_stock_max
+    }
+
+    /// 巻き戻しストックの上限を設定値から反映する。上限を下げた場合は現在のストックも
+    /// そこまで切り下げる(`0`=OFFにすれば即座に巻き戻せなくなる)。
+    pub fn set_rewind_stock_max(&mut self, max: u8) {
+        self.rewind_stock_max = max;
+        self.rewind_stock = self.rewind_stock.min(max);
+    }
+
+    /// 巻き戻しを開始できるか。ストックが残っていて、かつプレイ中(昇天演出中を含む)か
+    /// GameOver中であること。一時停止中・クリア後は開始できない。
+    ///
+    /// 履歴(スナップショット)が1つでもあるかどうかは`Game`の外(`rewind::RewindHistory`)
+    /// が別途判定する。
+    pub fn can_start_rewind(&self) -> bool {
+        self.rewind_stock > 0 && matches!(self.status, GameStatus::Playing | GameStatus::GameOver)
+    }
+
+    /// 現在の状態をスナップショットとして履歴へ残してよいか。
+    ///
+    /// 「天に召される」演出中(`is_dying`)は記録しない。これにより履歴の最新は常に
+    /// 「まだ生きていた最後の瞬間」になり、押し潰された直後に巻き戻すという主要な
+    /// 使い方で、死んだ状態そのものへ戻ってしまうことがなくなる。
+    pub fn is_rewind_capturable(&self) -> bool {
+        self.status == GameStatus::Playing && !self.is_dying()
+    }
+
+    /// スナップショットの状態へ戻す。
+    ///
+    /// 盤面・プレイヤー・ボム・各種タイマー・演出フラグ・乱数(`rng`)は`Game`を丸ごと
+    /// 差し替えることでまとめて巻き戻す。一方で以下は「現在の値」を持ち越す:
+    ///
+    /// - `frame_counter`: デバッグログのフレーム番号を単調増加に保つため
+    /// - `debug_log`: 記録先は巻き戻しの対象ではないため(同じ`Rc`を維持する)
+    /// - `invincible` / `misses_averted`: デバッグ機能の状態・累計であり巻き戻さない
+    /// - `rewind_stock`: 現在値から1消費する(スナップショット時点の値へは戻さない)
+    /// - `rewind_stock_max`: 設定値であり巻き戻しの対象ではない
+    pub fn restore_for_rewind(&mut self, snapshot: &Game) {
+        let frame_counter = self.frame_counter;
+        let debug_log = self.debug_log.clone();
+        let invincible = self.invincible;
+        let misses_averted = self.misses_averted;
+        let rewind_stock = self.rewind_stock.saturating_sub(1);
+        let rewind_stock_max = self.rewind_stock_max;
+
+        *self = snapshot.clone();
+
+        self.frame_counter = frame_counter;
+        self.debug_log = debug_log;
+        self.invincible = invincible;
+        self.misses_averted = misses_averted;
+        self.rewind_stock = rewind_stock;
+        self.rewind_stock_max = rewind_stock_max;
+
+        if let Some(log) = &self.debug_log {
+            log.log_rewind(self.frame_counter, self.rewind_stock);
+        }
+    }
+
     /// 移動・向き・掘削の5操作を1つの入口へまとめたもの(TERM独自拡張。#218)。
     /// main.rsの手入力処理と、オートプレイ(`autoplay::Autopilot`)が返す仮想入力の
     /// 両方がこれを通ることで、AIが人間と同じ経路でしかゲームを動かせないことを
@@ -1180,6 +1279,11 @@ impl Game {
                 self.apply_checkpoint_safe_zone(at_m);
                 self.checkpoint_flash_remaining = Duration::from_millis(CHECKPOINT_FLASH_MS);
                 self.checkpoint_flash_depth_m = at_m;
+                // 巻き戻しストックの補充(TERM独自拡張。#233)。上限を超えては増えない。
+                self.rewind_stock = self
+                    .rewind_stock
+                    .saturating_add(REWIND_STOCK_PER_CHECKPOINT)
+                    .min(self.rewind_stock_max);
                 events.push(GameEvent::Checkpoint100m { at_m });
             }
         }
@@ -1691,7 +1795,8 @@ impl Game {
     /// 新規にログを開き直し、無効化時は以降の記録を止める)。
     pub fn refresh_debug_log(&mut self, enabled: bool) {
         self.debug_log = if enabled {
-            DebugLog::open_fresh()
+            // 巻き戻しのスナップショットが同じログ接続を共有できるようRcで包む(#233)。
+            DebugLog::open_fresh().map(Rc::new)
         } else {
             None
         };
@@ -2039,6 +2144,7 @@ impl Game {
         self.set_move_cooldown_ms(settings.move_cooldown_ms);
         self.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
         self.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
+        self.set_rewind_stock_max(settings.rewind_stock_max);
         // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
         self.reroll_spawn_rates_from(
             2,
@@ -2755,6 +2861,323 @@ mod tests {
         let mut game = Game::new(1);
         game.refresh_debug_log(false);
         assert!(game.debug_log.is_none(), "無効化時はログを記録しないはず");
+    }
+
+    // --- フレーム巻き戻し(#233) ---------------------------------------------
+
+    /// 巻き戻しの決定性テスト用: 移動・掘削・時間経過を決まった順序で1ステップ進める。
+    /// 同じ手順を同じ状態から踏めば、必ず同じ結果にならなければならない。
+    fn advance_one_step(game: &mut Game, step: usize) {
+        match step % 3 {
+            0 => {
+                game.face_down();
+                game.try_drill();
+            }
+            1 => {
+                game.try_move_right();
+            }
+            _ => {
+                game.try_move_left();
+            }
+        }
+        game.update(Duration::from_millis(FALL_TICK_MS));
+    }
+
+    /// 盤面・プレイヤー・ボム・乱数まで含めて2つのゲームが同じ状態かを確認する。
+    /// `Game`自体は`PartialEq`を持たないため、巻き戻しの検証に必要な範囲を列挙して比べる。
+    fn assert_same_state(actual: &mut Game, expected: &mut Game, label: &str) {
+        assert_eq!(
+            actual.board.depth_rows(),
+            expected.board.depth_rows(),
+            "{label}: 盤面の行数"
+        );
+        assert_eq!(
+            actual.board.width(),
+            expected.board.width(),
+            "{label}: 盤面の列数"
+        );
+        for row in 0..expected.board.depth_rows() {
+            for col in 0..expected.board.width() {
+                assert_eq!(
+                    actual.board.cell(row, col),
+                    expected.board.cell(row, col),
+                    "{label}: セル({row},{col})"
+                );
+            }
+        }
+        assert_eq!(
+            actual.player.position(),
+            expected.player.position(),
+            "{label}: プレイヤー位置"
+        );
+        assert_eq!(
+            actual.player.facing, expected.player.facing,
+            "{label}: 向き"
+        );
+        assert_eq!(
+            actual.player.score, expected.player.score,
+            "{label}: スコア"
+        );
+        assert_eq!(
+            actual.player.lives, expected.player.lives,
+            "{label}: ライフ"
+        );
+        assert_eq!(
+            actual.player.oxygen, expected.player.oxygen,
+            "{label}: 酸素"
+        );
+        assert_eq!(
+            actual.player.oxygen_capsules_collected, expected.player.oxygen_capsules_collected,
+            "{label}: 取得カプセル数"
+        );
+        assert_eq!(
+            actual.player.elapsed_seconds, expected.player.elapsed_seconds,
+            "{label}: 経過時間"
+        );
+        assert_eq!(actual.bombs, expected.bombs, "{label}: ボム");
+        assert_eq!(actual.status, expected.status, "{label}: ステータス");
+        // 乱数は「次に出る値」が一致していれば同じ位置にあるとみなせる。
+        assert_eq!(
+            actual.rng.random::<u64>(),
+            expected.rng.random::<u64>(),
+            "{label}: 乱数の進み具合"
+        );
+    }
+
+    #[test]
+    fn restore_for_rewind_reproduces_the_exact_same_future_from_the_snapshot() {
+        // 巻き戻しの核心。スナップショット→進める→戻す→同じ操作で進める、が
+        // 「スナップショットをそのまま同じだけ進めた結果」と一致すること(決定性の往復)。
+        let mut game = Game::new(7);
+        // ボムの出現・爆発も判断に混ざるよう、出現頻度を上げておく。
+        game.set_bomb_spawn_rate_percent(2000);
+        for step in 0..30 {
+            advance_one_step(&mut game, step);
+        }
+
+        let snapshot = game.clone();
+        // スナップショットから独立に進めた「本来の未来」。
+        let mut expected = snapshot.clone();
+        for step in 0..40 {
+            advance_one_step(&mut expected, step);
+        }
+
+        // 本体は別の手順で荒らしてから巻き戻す。
+        for step in 0..25 {
+            advance_one_step(&mut game, step + 1);
+        }
+        game.restore_for_rewind(&snapshot);
+        for step in 0..40 {
+            advance_one_step(&mut game, step);
+        }
+
+        assert_same_state(&mut game, &mut expected, "巻き戻し後の再現");
+    }
+
+    #[test]
+    fn restore_for_rewind_carries_over_the_values_that_must_not_be_rewound() {
+        let mut game = Game::new(3);
+        let snapshot = game.clone();
+
+        for step in 0..10 {
+            advance_one_step(&mut game, step);
+        }
+        game.set_invincible(true);
+        game.misses_averted = 5;
+        let frame_before = game.frame_counter;
+        assert!(frame_before > 0, "前提: フレームが進んでいること");
+
+        game.restore_for_rewind(&snapshot);
+
+        assert_eq!(
+            game.frame_counter, frame_before,
+            "フレーム番号は巻き戻さない(ログの通し番号を単調増加に保つ)"
+        );
+        assert!(game.is_invincible(), "無敵は現在値のまま");
+        assert_eq!(game.misses_averted(), 5, "回避したミス数は現在値のまま");
+        assert_eq!(
+            game.rewind_stock(),
+            REWIND_STOCK_INITIAL - 1,
+            "ストックを1消費するはず"
+        );
+    }
+
+    #[test]
+    fn restore_for_rewind_keeps_pointing_at_the_same_debug_log() {
+        // debug_logはRcで共有しており、巻き戻してもログの記録先は差し替わらない。
+        let mut game = Game::new(4);
+        // 実ユーザーディレクトリを触らないよう、テスト用の一時DBを直接差す。
+        let dir = std::env::temp_dir().join(format!(
+            "misterdrillerterm-rewind-log-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let log = Rc::new(
+            DebugLog::open_fresh_at_for_test(&dir.join("debug_log.db"))
+                .expect("一時ディレクトリで開けるはず"),
+        );
+        game.debug_log = Some(Rc::clone(&log));
+        let snapshot = game.clone();
+
+        game.restore_for_rewind(&snapshot);
+
+        let restored = game.debug_log.as_ref().expect("ログが外れていないはず");
+        assert!(
+            Rc::ptr_eq(restored, &log),
+            "巻き戻し後も同じログ接続を指しているはず"
+        );
+        assert!(
+            Rc::ptr_eq(
+                snapshot.debug_log.as_ref().unwrap(),
+                game.debug_log.as_ref().unwrap()
+            ),
+            "スナップショット(Gameの複製)も同じログ接続を共有しているはず"
+        );
+
+        drop(game);
+        drop(snapshot);
+        drop(log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rewind_stock_starts_at_the_initial_value_and_never_exceeds_the_maximum() {
+        let game = Game::new(1);
+        assert_eq!(game.rewind_stock(), REWIND_STOCK_INITIAL);
+        assert_eq!(game.rewind_stock_max(), REWIND_STOCK_MAX_DEFAULT);
+    }
+
+    #[test]
+    fn set_rewind_stock_max_clamps_the_current_stock_down() {
+        let mut game = Game::new(1);
+        game.set_rewind_stock_max(1);
+        assert_eq!(game.rewind_stock(), 1, "上限を下げたら現在値も切り下げる");
+
+        game.set_rewind_stock_max(0);
+        assert_eq!(game.rewind_stock(), 0);
+        assert!(!game.can_start_rewind(), "上限0(OFF)なら巻き戻せない");
+    }
+
+    #[test]
+    fn reaching_a_100m_checkpoint_refills_one_rewind_stock_up_to_the_maximum() {
+        let mut game = Game::new(90);
+        game.set_rewind_stock_max(3);
+        game.rewind_stock = 1;
+        game.player.row =
+            crate::constants::CHECKPOINT_STEP_M + crate::constants::CHECKPOINT_SAFE_ZONE_M - 1;
+        game.player.facing = Direction::Down;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        game.try_drill();
+        let events = game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert!(
+            events.contains(&GameEvent::Checkpoint100m { at_m: 100 }),
+            "前提: チェックポイントに到達していること"
+        );
+        assert_eq!(
+            game.rewind_stock(),
+            1 + REWIND_STOCK_PER_CHECKPOINT,
+            "チェックポイントで補充されるはず"
+        );
+    }
+
+    #[test]
+    fn checkpoint_refill_does_not_exceed_the_configured_maximum() {
+        let mut game = Game::new(90);
+        game.set_rewind_stock_max(2);
+        assert_eq!(game.rewind_stock(), 2, "前提: 既に上限まで持っている");
+        game.player.row =
+            crate::constants::CHECKPOINT_STEP_M + crate::constants::CHECKPOINT_SAFE_ZONE_M - 1;
+        game.player.facing = Direction::Down;
+        game.board.rows[game.player.row + 1][game.player.col] = Cell::Empty;
+
+        game.try_drill();
+        let events = game.update(Duration::from_millis(FALL_TICK_MS));
+
+        assert!(events.contains(&GameEvent::Checkpoint100m { at_m: 100 }));
+        assert_eq!(game.rewind_stock(), 2, "上限を超えては増えないはず");
+    }
+
+    #[test]
+    fn revive_restores_the_rewind_stock_to_the_initial_value() {
+        let mut game = Game::new(1);
+        game.rewind_stock = 0;
+        game.status = GameStatus::GameOver;
+
+        game.revive();
+
+        assert_eq!(game.rewind_stock(), REWIND_STOCK_INITIAL);
+    }
+
+    #[test]
+    fn revive_does_not_restore_the_stock_beyond_the_configured_maximum() {
+        let mut game = Game::new(1);
+        game.set_rewind_stock_max(1);
+        game.rewind_stock = 0;
+        game.status = GameStatus::GameOver;
+
+        game.revive();
+
+        assert_eq!(game.rewind_stock(), 1);
+    }
+
+    #[test]
+    fn can_start_rewind_is_true_only_while_playing_or_game_over_and_with_stock_left() {
+        let mut game = Game::new(1);
+
+        game.status = GameStatus::Playing;
+        assert!(game.can_start_rewind(), "プレイ中は起動できる");
+
+        // 昇天演出中(is_dying)もプレイ中扱いなので起動できる(押し潰された直後に
+        // 押して戻る、が主要な使い方)。
+        game.ascending_remaining = Some(Duration::from_millis(100));
+        assert!(game.is_dying(), "前提: 昇天演出中");
+        assert!(game.can_start_rewind(), "昇天演出中も起動できる");
+        game.ascending_remaining = None;
+
+        game.status = GameStatus::GameOver;
+        assert!(game.can_start_rewind(), "GameOver中も起動できる");
+
+        game.status = GameStatus::Paused;
+        assert!(!game.can_start_rewind(), "一時停止中は起動できない");
+
+        game.status = GameStatus::Cleared;
+        assert!(!game.can_start_rewind(), "クリア後は起動できない");
+
+        game.status = GameStatus::Playing;
+        game.rewind_stock = 0;
+        assert!(!game.can_start_rewind(), "ストックが無ければ起動できない");
+    }
+
+    #[test]
+    fn is_rewind_capturable_excludes_dying_paused_game_over_and_cleared() {
+        let mut game = Game::new(1);
+        assert!(game.is_rewind_capturable(), "通常のプレイ中は記録してよい");
+
+        game.ascending_remaining = Some(Duration::from_millis(100));
+        assert!(
+            !game.is_rewind_capturable(),
+            "昇天演出中は記録しない(履歴の最新を「生きていた最後の瞬間」に保つ)"
+        );
+        game.ascending_remaining = None;
+
+        for status in [
+            GameStatus::Paused,
+            GameStatus::GameOver,
+            GameStatus::Cleared,
+        ] {
+            game.status = status;
+            assert!(!game.is_rewind_capturable(), "{status:?}中は記録しない");
+        }
+    }
+
+    #[test]
+    fn is_rewind_capturable_allows_recording_during_the_dodge_slider() {
+        // スライダー演出(わ〜!)はまだ生きている状態なので記録してよい。
+        let mut game = Game::new(1);
+        game.dodge_stage = DodgeStage::Sliding;
+        assert!(game.is_rewind_capturable());
     }
 
     #[test]

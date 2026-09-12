@@ -36,6 +36,13 @@ impl DebugLog {
         Self::open_fresh_at(&path)
     }
 
+    /// テスト専用: 実ユーザーデータディレクトリ(`debug_log_path()`)を介さず、
+    /// 指定パスへ使い捨てのログDBを開く。他モジュールのテストからも使う。
+    #[cfg(test)]
+    pub(crate) fn open_fresh_at_for_test(path: &Path) -> Option<Self> {
+        Self::open_fresh_at(path)
+    }
+
     fn open_fresh_at(path: &Path) -> Option<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok()?;
@@ -87,6 +94,10 @@ impl DebugLog {
                  progress REAL NOT NULL,
                  effective_tick_ms INTEGER NOT NULL,
                  flash_remaining_ms INTEGER
+             );
+             CREATE TABLE rewind_events (
+                 frame INTEGER NOT NULL,
+                 stock_left INTEGER NOT NULL
              );",
         )
         .ok()?;
@@ -214,6 +225,19 @@ impl DebugLog {
                 flash_remaining_ms.map(|ms| ms as i64),
             ])
         });
+        let _ = result;
+    }
+
+    /// フレーム巻き戻し(#233)が実際に実行されたことを記録する(TERM独自拡張)。
+    /// `frame`は巻き戻しを行った時点のフレーム番号(巻き戻し後も単調増加を保つため
+    /// 現在値のまま)、`stock_left`は消費後に残っているストック数。
+    /// 巻き戻しの前後で盤面・プレイヤー状態が不連続に飛ぶため、後からログを読むときに
+    /// その断絶がバグではなく巻き戻しによるものだと判別できるようにする。
+    pub fn log_rewind(&self, frame: u64, stock_left: u8) {
+        let result = self
+            .conn
+            .prepare_cached("INSERT INTO rewind_events (frame, stock_left) VALUES (?1, ?2)")
+            .and_then(|mut stmt| stmt.execute(rusqlite::params![frame as i64, stock_left as i64]));
         let _ = result;
     }
 
@@ -416,6 +440,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(averted_count, 1, "回避しなかったミスも1行残るはず");
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn log_rewind_records_the_frame_and_remaining_stock() {
+        // #233: 巻き戻しの前後で盤面・プレイヤー状態が不連続に飛ぶため、その断絶が
+        // 巻き戻しによるものだと後から判別できるよう1行残す。
+        let path = temp_log_path("rewind-events");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let log = DebugLog::open_fresh_at(&path).unwrap();
+        log.log_rewind(1234, 2);
+
+        let (frame, stock_left): (i64, i64) = log
+            .conn
+            .query_row("SELECT frame, stock_left FROM rewind_events", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((frame, stock_left), (1234, 2));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

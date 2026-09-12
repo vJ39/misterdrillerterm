@@ -44,6 +44,17 @@ const MIN_TERMINAL_H: u16 = 16;
 /// 可視論理行数の基本値(9.2)。
 const FIELD_VISIBLE_ROWS: usize = 14;
 
+/// 設定画面・ヘルプ画面のオーバーレイ枠の高さ(`centered_rect`のパーセント指定)。
+/// 内容行数が増えて枠に収まらなくなったら上げる(収まっているかは
+/// `settings_screen_box_is_tall_enough_...` / `help_screen_box_is_tall_enough_...`で確認する)。
+const SETTINGS_OVERLAY_PERCENT_Y: u16 = 95;
+const HELP_OVERLAY_PERCENT_Y: u16 = 95;
+
+/// 巻き戻し中オーバーレイ(#233)の枠の高さ(行数)。内容2行+上下ボーダー2行。
+/// 中央ではなく画面下端に寄せるため、割合ではなく固定行数で指定する(GameOver
+/// ダイアログ等、中央に出る他のオーバーレイと重ならないようにするため)。
+const REWIND_OVERLAY_H: u16 = 4;
+
 /// 1論理セルの文字グリッドサイズ(9.2)。
 const CELL_W: u16 = 4;
 const CELL_H: u16 = 2;
@@ -155,6 +166,20 @@ fn centered_fixed_rect(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
+/// `area`の下端に寄せた、幅`percent_x`%・高さ`height`行の矩形(TERM独自拡張。#233)。
+/// 中央に出る他のオーバーレイ(ポーズ・ゲームオーバー等)と重ならない位置へ案内を
+/// 出したいときに使う。`area`より高い指定は`area`いっぱいにクランプする。
+fn bottom_anchored_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let width = (area.width as u32 * percent_x as u32 / 100) as u16;
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + area.height - height,
+        width,
+        height,
+    }
+}
+
 /// ポーズ/ゲームオーバー等のオーバーレイ専用の中央配置(9.10、パーセント指定)。
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
@@ -233,9 +258,13 @@ pub fn draw(
         ),
         // 押し潰されてのミスは、GameOverオーバーレイを出す前に一呼吸「潰れた」演出
         // (draw_field内のdraw_player)を見せる(spec.md 5章・9章)。
-        GameStatus::GameOver if !game.crush_flash_active() => {
-            draw_game_over_overlay(frame, plan.game_frame, game.game_over_selection())
-        }
+        GameStatus::GameOver if !game.crush_flash_active() => draw_game_over_overlay(
+            frame,
+            plan.game_frame,
+            game.game_over_selection(),
+            // 巻き戻せる状態なら、ダイアログにもその選択肢があることを示す(#233)。
+            game.can_start_rewind().then(|| game.rewind_stock()),
+        ),
         GameStatus::GameOver => {}
         GameStatus::Cleared => {
             draw_overlay(frame, plan.game_frame, "CLEAR !", &["Escキーでタイトルへ"])
@@ -395,7 +424,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
     );
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-    let help_area = centered_rect(90, 90, frame_rect);
+    let help_area = centered_rect(90, HELP_OVERLAY_PERCENT_Y, frame_rect);
     frame.render_widget(Clear, help_area);
 
     let text_style = Style::default()
@@ -423,6 +452,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         heading("== 操作 =="),
         line("←/→: 移動(掘削なし)        ↑/↓: 向きを変える(移動なし)"),
         line("X/Z: 掘削(向いている方向)   Space/P: 一時停止"),
+        line("Backspace/U: 巻き戻し(過去の状態へ戻ってやり直す)"),
         line("Esc: タイトルへ戻る/終了"),
         line("S: 設定画面   H: このヘルプ (プレイ中に押すと自動で一時停止する)"),
         line(""),
@@ -624,6 +654,8 @@ pub enum SettingsChoice {
     DebugLogEnabled,
     /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=即座に連鎖)。
     ChainVanishInterval,
+    /// フレーム巻き戻し(#233)で持てるストック(使用回数)の上限。0=巻き戻し機能OFF。
+    RewindStockMax,
 }
 
 impl SettingsChoice {
@@ -650,14 +682,16 @@ impl SettingsChoice {
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::ChainVanishInterval,
-            SettingsChoice::ChainVanishInterval => SettingsChoice::Music,
+            SettingsChoice::ChainVanishInterval => SettingsChoice::RewindStockMax,
+            SettingsChoice::RewindStockMax => SettingsChoice::Music,
         }
     }
 
     /// ↑キーでの選択項目の巡回(`cycle`の厳密な逆方向)。
     pub fn cycle_back(self) -> Self {
         match self {
-            SettingsChoice::Music => SettingsChoice::ChainVanishInterval,
+            SettingsChoice::Music => SettingsChoice::RewindStockMax,
+            SettingsChoice::RewindStockMax => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
@@ -710,6 +744,7 @@ pub fn draw_settings(
     bomb_spawn_rate_percent: u32,
     debug_log_enabled: bool,
     chain_vanish_interval_ms: u64,
+    rewind_stock_max: u8,
     standalone: bool,
 ) {
     let area = frame.area();
@@ -724,7 +759,8 @@ pub fn draw_settings(
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
     // 高さが足りないと下部の行が枠からクリップして見えなくなるため、項目追加を見越して
     // 縦に余裕を持たせる(必要行数はテスト`settings_screen_box_is_tall_enough_...`で確認)。
-    let settings_area = centered_rect(60, 90, frame_rect);
+    // #233で項目が22個になり90%(28行)では1行あふれるため95%(30行)へ広げた。
+    let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
     frame.render_widget(Clear, settings_area);
 
     let text_style = Style::default()
@@ -886,6 +922,11 @@ pub fn draw_settings(
             "連鎖消滅インターバル",
             chain_vanish_interval_ms,
             selection == SettingsChoice::ChainVanishInterval,
+        ),
+        count_line(
+            "巻き戻しストック上限",
+            rewind_stock_max,
+            selection == SettingsChoice::RewindStockMax,
         ),
         Line::from(""),
         Line::from(Span::styled(
@@ -1896,6 +1937,20 @@ fn draw_status(frame: &mut Frame, area: Rect, game: &Game, autoplay_enabled: boo
     );
     write_line(buf, inner, &mut row, "", label_style);
 
+    // フレーム巻き戻し(#233)の残り回数。上限0(=設定で機能OFF)なら行ごと省略し、
+    // 使わない人のHUDの見た目は変えない。
+    if game.rewind_stock_max() > 0 {
+        write_line(buf, inner, &mut row, "REWIND", label_style);
+        write_line(
+            buf,
+            inner,
+            &mut row,
+            &format!("  \u{21ba} \u{d7}{}", game.rewind_stock()),
+            label_style,
+        );
+        write_line(buf, inner, &mut row, "", label_style);
+    }
+
     // ブロック状態遷移ログ(debug_log)の記録と突き合わせるためのフレーム番号を表示する。
     write_line(buf, inner, &mut row, "FRAME", label_style);
     write_line(
@@ -2036,8 +2091,17 @@ fn draw_checkpoint_banner(frame: &mut Frame, area: Rect, depth_m: usize) {
 
 /// GameOverダイアログ。「タイトルへ戻る」「その場から復活」の2択を表示し、
 /// 現在選択中の項目を反転表示(カーソル代わり)する。
-fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoice) {
-    let overlay_area = centered_rect(40, 25, area);
+///
+/// `rewind_hint`が`Some(残りストック数)`なら、巻き戻しでやり直せることを案内する行を
+/// 1行足す(TERM独自拡張。#233)。その1行ぶん枠も縦に広げるが、ヒントが無い場合の
+/// 見た目は従来通りに保つ。
+fn draw_game_over_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    selection: GameOverChoice,
+    rewind_hint: Option<u8>,
+) {
+    let overlay_area = centered_rect(40, game_over_overlay_percent_y(rewind_hint.is_some()), area);
     frame.render_widget(Clear, overlay_area);
 
     let text_style = Style::default()
@@ -2065,13 +2129,85 @@ fn draw_game_over_overlay(frame: &mut Frame, area: Rect, selection: GameOverChoi
         Line::from(Span::styled(format!("{prefix}{label}"), style))
     };
 
-    let paragraph = Paragraph::new(vec![
+    let mut lines = vec![
         Line::from(Span::styled("GAME OVER", text_style)),
         Line::from(""),
         choice_line("タイトルへ戻る", selection == GameOverChoice::BackToTitle),
         choice_line("その場から復活", selection == GameOverChoice::Revive),
         Line::from(""),
         Line::from(Span::styled("↑↓で選択 / Enterで決定", text_style)),
+    ];
+    if let Some(stock) = rewind_hint {
+        lines.push(Line::from(Span::styled(
+            format!("Backspace/U: 巻き戻す(残り{stock})"),
+            text_style,
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, overlay_area);
+}
+
+/// GameOverダイアログの縦幅(`centered_rect`のパーセント指定)。巻き戻しヒントの
+/// 1行が増えると既定の25%(=8行、枠2行+内容6行)では下端がクリップするため広げる。
+fn game_over_overlay_percent_y(with_rewind_hint: bool) -> u16 {
+    if with_rewind_hint { 30 } else { 25 }
+}
+
+/// 巻き戻したフレーム数を、おおよその秒数へ換算する(TERM独自拡張。#233)。
+/// 1フレームを`FRAME_INTERVAL_MS`とみなした目安で、実際のフレーム間隔は負荷によって
+/// 前後するため厳密な経過時間ではない(表示も「約N秒前」とする)。
+fn rewind_seconds_back(frames_back: u64) -> u64 {
+    frames_back * crate::constants::FRAME_INTERVAL_MS / 1000
+}
+
+/// 巻き戻し(逆再生)中に重ねるオーバーレイ(TERM独自拡張。#233)。
+/// `steps_back`は巻き戻し開始時点から何スナップショットぶん過去を見ているか、
+/// `frames_back`は同じく何ゲームフレームぶん過去か(体感時間の目安表示に使う)。
+pub fn draw_rewind_overlay(
+    frame: &mut Frame,
+    field_width: usize,
+    steps_back: usize,
+    frames_back: u64,
+) {
+    let area = frame.area();
+    if area.width < MIN_TERMINAL_W || area.height < MIN_TERMINAL_H {
+        return;
+    }
+    let plan = compute_layout(area, field_width);
+    let overlay_area = bottom_anchored_rect(90, REWIND_OVERLAY_H, plan.game_frame);
+    frame.render_widget(Clear, overlay_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default()
+        .fg(colors::STAR_FG)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let paragraph = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!(
+                "<< 巻き戻し中  -{steps_back}ステップ (約{}秒前)",
+                rewind_seconds_back(frames_back)
+            ),
+            heading_style,
+        )),
+        Line::from(Span::styled(
+            "Enter/X/Z: ここから再開   ←→: 調整   Esc: やめる",
+            text_style,
+        )),
     ])
     .block(block)
     .style(Style::default().bg(colors::LETTERBOX_BG))
@@ -2596,11 +2732,122 @@ mod tests {
             SettingsChoice::BombRate,
             SettingsChoice::DebugLogEnabled,
             SettingsChoice::ChainVanishInterval,
+            SettingsChoice::RewindStockMax,
         ];
         for choice in all {
             assert_eq!(choice.cycle().cycle_back(), choice);
             assert_eq!(choice.cycle_back().cycle(), choice);
         }
+    }
+
+    #[test]
+    fn settings_choice_cycle_visits_every_item_exactly_once_before_wrapping() {
+        // 項目を追加したときにcycleの鎖から漏れる(到達できない項目が生まれる)のを防ぐ。
+        // #233で巻き戻しストック上限を追加した際の回帰確認。
+        let mut seen = vec![SettingsChoice::Music];
+        let mut choice = SettingsChoice::Music;
+        loop {
+            choice = choice.cycle();
+            if choice == SettingsChoice::Music {
+                break;
+            }
+            assert!(
+                !seen.contains(&choice),
+                "{choice:?}を2回通っている(cycleの鎖が閉じていない)"
+            );
+            seen.push(choice);
+            assert!(seen.len() < 100, "cycleがMusicへ戻ってこない");
+        }
+        assert!(
+            seen.contains(&SettingsChoice::RewindStockMax),
+            "#233で追加した巻き戻しストック上限へカーソルが到達できない"
+        );
+    }
+
+    #[test]
+    fn rewind_overlay_box_is_tall_enough_for_its_two_content_lines() {
+        // #233: 巻き戻し中の案内は「-Nステップ(約N秒前)」と操作説明の2行。
+        // 行を増やしたらREWIND_OVERLAY_Hも増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 2;
+        let area = Rect::new(0, 0, 200, 60);
+        let plan = compute_layout(area, crate::constants::FIELD_WIDTH_DEFAULT);
+        let overlay_area = bottom_anchored_rect(90, REWIND_OVERLAY_H, plan.game_frame);
+        assert!(
+            overlay_area.height >= REQUIRED_CONTENT_LINES + 2,
+            "巻き戻しオーバーレイの枠が狭すぎる(高さ={})",
+            overlay_area.height
+        );
+    }
+
+    #[test]
+    fn rewind_overlay_sits_below_the_game_over_dialog_instead_of_overlapping_it() {
+        // #233: GameOver中にも巻き戻せるため、両方のオーバーレイが同時に出る場面がある。
+        // 巻き戻しの案内は下端に寄せ、中央のダイアログと重ならないようにする。
+        let area = Rect::new(0, 0, 200, 60);
+        let plan = compute_layout(area, crate::constants::FIELD_WIDTH_DEFAULT);
+
+        let dialog = centered_rect(40, game_over_overlay_percent_y(true), plan.game_frame);
+        let rewind = bottom_anchored_rect(90, REWIND_OVERLAY_H, plan.game_frame);
+
+        assert!(
+            rewind.y >= dialog.y + dialog.height,
+            "巻き戻し案内(y={}..{})がGameOverダイアログ(y={}..{})と重なっている",
+            rewind.y,
+            rewind.y + rewind.height,
+            dialog.y,
+            dialog.y + dialog.height
+        );
+        assert_eq!(
+            rewind.y + rewind.height,
+            plan.game_frame.y + plan.game_frame.height,
+            "ゲーム画面の下端に接しているはず"
+        );
+    }
+
+    #[test]
+    fn bottom_anchored_rect_clamps_a_height_taller_than_the_area() {
+        let area = Rect::new(0, 0, 40, 3);
+        let rect = bottom_anchored_rect(90, 10, area);
+        assert_eq!(rect.height, 3, "areaより高くはならないはず");
+        assert_eq!(rect.y, 0);
+    }
+
+    #[test]
+    fn rewind_seconds_back_converts_frames_with_the_frame_interval() {
+        // 1フレーム=FRAME_INTERVAL_MS(33ms)換算の目安。スナップショット間隔
+        // (100フレーム)ぶん戻れば約3秒前になる。
+        assert_eq!(rewind_seconds_back(0), 0);
+        assert_eq!(
+            rewind_seconds_back(crate::constants::REWIND_SNAPSHOT_INTERVAL_FRAMES as u64),
+            3
+        );
+        assert_eq!(
+            rewind_seconds_back(crate::constants::REWIND_SNAPSHOT_INTERVAL_FRAMES as u64 * 10),
+            33,
+            "履歴が満杯(10個)なら約33秒前まで戻れる"
+        );
+    }
+
+    #[test]
+    fn game_over_overlay_is_tall_enough_for_the_rewind_hint_line() {
+        // #233: 巻き戻しヒントの1行が増えると、従来の25%(8行=枠2+内容6)では
+        // 下端がクリップする。ヒント有りの時だけ枠を広げていることを確認する。
+        let area = Rect::new(0, 0, 200, 60);
+        let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+
+        let without_hint = centered_rect(40, game_over_overlay_percent_y(false), frame_rect);
+        assert!(
+            without_hint.height >= 6 + 2,
+            "ヒント無し(内容6行)が収まらない(高さ={})",
+            without_hint.height
+        );
+
+        let with_hint = centered_rect(40, game_over_overlay_percent_y(true), frame_rect);
+        assert!(
+            with_hint.height >= 7 + 2,
+            "ヒント有り(内容7行)が収まらない(高さ={})",
+            with_hint.height
+        );
     }
 
     // --- モードセレクト画面 ---
@@ -2672,10 +2919,13 @@ mod tests {
     fn help_screen_box_is_tall_enough_for_the_jukebox_section() {
         // 枠の高さが実際の内容行数(操作欄+ジュークボックス欄+空行+末尾行)を収められているか
         // 回帰確認する。内容行数が増えたらこの定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 26;
+        // 内訳: 操作見出し1+操作5(#233で巻き戻し1行を追加)+空行1+一時停止見出し1+
+        // 一時停止2+空行1+デバッグ見出し1+デバッグ7+空行1+ジュークボックス見出し1+
+        // 曲4+空行1+末尾1=27行。
+        const REQUIRED_CONTENT_LINES: u16 = 27;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-        let help_area = centered_rect(90, 90, frame_rect);
+        let help_area = centered_rect(90, HELP_OVERLAY_PERCENT_Y, frame_rect);
         assert!(
             help_area.height >= REQUIRED_CONTENT_LINES + 2,
             "ヘルプ画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
@@ -2687,13 +2937,13 @@ mod tests {
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
-        // クリップして見えなくなる)。見出し1+空行1+設定項目21(#224でMUSIC音量・SE音量の
-        // 2項目を追加)+空行1+案内2行=26行、枠(上下)2行込みで28行必要。設定を追加したら
-        // この定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 26;
+        // クリップして見えなくなる)。見出し1+空行1+設定項目22(#224でMUSIC音量・SE音量の
+        // 2項目、#233で巻き戻しストック上限を追加)+空行1+案内2行=27行、枠(上下)2行込みで
+        // 29行必要。設定を追加したらこの定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 27;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-        let settings_area = centered_rect(60, 90, frame_rect);
+        let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
         assert!(
             settings_area.height >= REQUIRED_CONTENT_LINES + 2,
             "設定画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
