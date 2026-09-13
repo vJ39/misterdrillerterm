@@ -1737,8 +1737,15 @@ impl Game {
                 self.player_fall_tick_accum -= player_tick;
 
                 let before_fall = self.player.position();
-                let fall_outcome =
-                    physics::apply_player_free_fall(&mut self.board, &mut self.player);
+                // 直下に設置済み(Settling/Ticking)のボムがあれば、自由落下はそこを
+                // 通過させない。ボムはCellグリッド外のオーバーレイなので、盤面上は
+                // Emptyのまま見えてしまい、チェックしないとボムのマスへ落ちて
+                // プレイヤーとボムが同じマスに重なって見えるバグになる。
+                let fall_outcome = if self.settled_bomb_at(self.player.row + 1, self.player.col) {
+                    FreeFallOutcome::DidNotFall
+                } else {
+                    physics::apply_player_free_fall(&mut self.board, &mut self.player)
+                };
                 self.note_possible_move_with_duration(
                     before_fall,
                     self.player_fall_tick_ms as f32 / 1000.0,
@@ -1772,6 +1779,11 @@ impl Game {
     pub fn player_is_grounded(&self) -> bool {
         let below = self.player.row + 1;
         if below >= self.board.depth_rows() {
+            return true;
+        }
+        // 設置済みのボムはCellグリッド外だが、自由落下を止める支えとして扱う
+        // (直下のセル自体はEmptyのまま残っているため、盤面だけ見ると支持なしに見える)。
+        if self.settled_bomb_at(below, self.player.col) {
             return true;
         }
         !matches!(
@@ -6295,6 +6307,95 @@ mod tests {
         assert_eq!(
             game.bombs[0].settle_bounce_dir, 1,
             "押した方向(右)へバウンドする向きになっているはず"
+        );
+    }
+
+    #[test]
+    fn player_is_grounded_returns_true_when_a_settled_bomb_rests_below() {
+        // ボムはCellグリッド外のオーバーレイなので、盤面だけ見るとEmptyのまま=
+        // 支持なしに見えてしまう。設置済み(Settling/Ticking)のボムは支えとして
+        // 扱うべき(#238。ユーザー報告: 「ボムと重なり合ってしまう」)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.bombs.push(Bomb {
+            pos: (501, 5),
+            origin: (501, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        assert!(
+            game.player_is_grounded(),
+            "直下に設置済みのボムがあれば支持されているとみなすはず"
+        );
+    }
+
+    #[test]
+    fn free_fall_does_not_drop_the_player_onto_a_settled_bomb() {
+        // #238の回帰テスト: 自由落下がボムの存在を無視して直下のEmptyマスへ落ち、
+        // プレイヤーとボムが同じマスに重なって見えるバグを再現・修正確認する。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let bottom = game.board.depth_rows() - 1;
+        game.player.row = bottom - 2;
+        game.player.col = 5;
+        // ボム自身の足場は盤面最深行に置く(それ以外の行に浮かせたRockは支えが
+        // 無く自重力で落下してしまい、テストの前提が崩れるため)。
+        game.board.rows[bottom][5] = Cell::Rock { hits: 0 };
+        game.bombs.push(Bomb {
+            pos: (bottom - 1, 5),
+            origin: (bottom - 1, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        for _ in 0..20 {
+            game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+        }
+
+        assert_eq!(
+            game.player.row,
+            bottom - 2,
+            "設置済みのボムがあるマスへ自由落下してはいけない(重なって見えるバグ)"
+        );
+    }
+
+    #[test]
+    fn free_fall_still_falls_through_a_bomb_that_has_not_settled_yet() {
+        // Entering/Rolling段階のボムはまだ登場・投擲演出中で実体を持たないため、
+        // 支えにはならず通過できるはず(#238の修正がSettling/Ticking以外まで
+        // 誤って対象にしていないことの確認)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let bottom = game.board.depth_rows() - 1;
+        game.player.row = bottom - 2;
+        game.player.col = 5;
+        // ボム自身の足場は盤面最深行に置く(それ以外の行に浮かせたRockは支えが
+        // 無く自重力で落下してしまい、テストの前提が崩れるため)。
+        game.board.rows[bottom][5] = Cell::Rock { hits: 0 };
+        game.bombs.push(Bomb {
+            pos: (bottom - 1, 5),
+            origin: (bottom - 1, 0),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        for _ in 0..20 {
+            game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+        }
+
+        assert_eq!(
+            game.player.row,
+            bottom - 1,
+            "登場演出中のボムは支えにならず、プレイヤーはそのマスへ落下できるはず"
         );
     }
 
