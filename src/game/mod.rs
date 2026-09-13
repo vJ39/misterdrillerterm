@@ -1,8 +1,7 @@
 //! ゲーム全体のオーケストレーション(盤面+プレイヤー+タイマー類)。
 //!
-//! board/player/physics は副作用のない純粋なロジックだが、この`Game`はそれらを
-//! 「1フレーム進める」「1回入力を処理する」という時間軸に沿ってまとめ、UI/audio層が
-//! 反応すべき`GameEvent`列を返す薄いオーケストレーション層。
+//! board/player/physicsの副作用のない純粋なロジックを、「1フレーム進める」「1回入力を
+//! 処理する」という時間軸に沿ってまとめ、UI/audio層が反応すべき`GameEvent`列を返す。
 
 pub mod board;
 pub mod physics;
@@ -49,54 +48,41 @@ use crate::debug_log::DebugLog;
 #[cfg(test)]
 use crate::constants::{FIELD_DEPTH_M, FIELD_WIDTH_DEFAULT};
 
-/// 深度(m)から、直近で到達済みのチェックポイント区切り番号を計算する(TERM独自
-/// 拡張。#178/#190)。地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点
-/// (depth_m = checkpoint*CHECKPOINT_STEP_M + CHECKPOINT_SAFE_ZONE_M + 1)を
-/// もって「そのチェックポイントに到達した」とみなす(ユーザー指摘: 「100mごとの
-/// 地面そのものを掘ったら次の100mにすすむことにする。地面についたら次、
-/// じゃなくて」)。以前は地面の手前の境界(depth_m = checkpoint*CHECKPOINT_STEP_M)
-/// に触れた瞬間に到達扱いにしていたが、地面区間そのものは実際にドリルで掘り
-/// 抜く対象になったため、掘り抜き終えた地点まで判定を後ろにずらした。
+/// 深度(m)から、直近で到達済みのチェックポイント区切り番号を計算する。地面
+/// (`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点(checkpoint*CHECKPOINT_STEP_M +
+/// CHECKPOINT_SAFE_ZONE_M + 1)をもって到達とみなす(地面の手前に触れた時点ではない)。
 fn checkpoint_index_for_depth(depth_m: usize) -> usize {
     depth_m.saturating_sub(CHECKPOINT_SAFE_ZONE_M + 1) / CHECKPOINT_STEP_M
 }
 
-/// ボムの演出段階(TERM独自拡張。#123。ユーザー指摘: 「白ボンが画面の外から
-/// とことこやってきて、日のついた爆弾をぼーんとなげてこんこんころころ...ってなって、
-/// 爆発する」)。
+/// ボムの演出段階。白ボンが画面外から登場し、ボムを投げ、転がって静止し、爆発する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BombPhase {
     /// 白ボンが画面端(`Bomb::origin`)に登場し、ボムを投げる直前までの間。
     Entering,
     /// 投げられたボムが`origin`から`pos`(最終設置マス)まで転がっている間。
     Rolling,
-    /// 転がり終えた直後、支えを失っていれば落下しつつ、左右に跳ねながら
-    /// 落ち着き先を探している間(TERM独自拡張。#140。ユーザー指摘: 「落ちたら、
-    /// またはねまくること左右に壁をぶつかり行き来しながらいいところで泊まる」)。
+    /// 転がり終えた直後、支えを失っていれば落下しつつ、左右に跳ねながら落ち着き先を
+    /// 探している間。
     Settling,
-    /// 静止し、点滅しながら起爆までカウントダウンしている間
-    /// (`remaining_ms`はこの段階でのみ減る。支えを失った場合はここでも落下を
-    /// 続け、落下中は`remaining_ms`の減少を止める。#140)。
+    /// 静止し、点滅しながら起爆までカウントダウンしている間。`remaining_ms`はこの段階で
+    /// のみ減り、支えを失って落下している間は減少を止める(空中で起爆させないため)。
     Ticking,
 }
 
-/// `push_bomb_in_the_way`の結果(TERM独自拡張。#161)。
+/// `push_bomb_in_the_way`の結果。
 enum BombInTheWay {
-    /// ボムが無い、または押し出しに成功した。通常の物理判定(physics::move_lateral)
-    /// に進んでよい。
+    /// ボムが無い、または押し出しに成功した。通常の物理判定(physics::move_lateral)へ進む。
     ClearToMove,
-    /// 押し出せず、段差登り判定を自分で行った(呼び出し側は通常の物理判定を
-    /// 呼ばない)。
+    /// 押し出せず、段差登り判定を自分で行った(呼び出し側は通常の物理判定を呼ばない)。
     HandledAsClimb,
 }
 
-/// 白ボンがランダムに投げ込むボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、
-/// 爆弾をランダムに投げてくるイメージで、敵は出現しないものとする」)。移動する
-/// 敵キャラは持たず、盤面上に設置されたこのボム自体だけを管理する。ブロックとは
-/// 別レイヤーのオブジェクトなので`Cell`列挙体には追加しない。
+/// 白ボンがランダムに投げ込むボム。移動する敵キャラは持たず、盤面上に設置された
+/// ボム自体だけを管理する。ブロックとは別レイヤーなので`Cell`列挙体には追加しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bomb {
-    /// 現在位置(落下・跳ねで`origin`/初期の`pos`から動くことがある。#140)。
+    /// 現在位置(落下・跳ねで初期位置から動くことがある)。
     pub pos: board::Pos,
     /// 白ボンが登場する画面端の位置(同じ行、列0か列`width-1`)。
     pub origin: board::Pos,
@@ -105,7 +91,7 @@ pub struct Bomb {
     pub phase_elapsed_ms: u32,
     /// 起爆までの残り時間(ms)。`BombPhase::Ticking`に入って初めて減り始める。
     pub remaining_ms: u32,
-    /// `BombPhase::Settling`中に左右へ跳ねる方向(+1=右、-1=左。TERM独自拡張。#140)。
+    /// `BombPhase::Settling`中に左右へ跳ねる方向(+1=右、-1=左)。
     pub settle_bounce_dir: i8,
 }
 
@@ -128,68 +114,56 @@ pub enum InputAction {
     /// タイトル画面へ戻る(タイトル画面自体で押された場合のみアプリを終了する。
     /// この解釈はGameの外側=main.rsの画面遷移が担う)
     Quit,
-    /// MUSIC(BGM)のON/OFF切り替え(TERM独自拡張)。一時停止画面でのみ意味を持つ。
-    /// Gameの内部状態には影響しないため、この解釈もGameの外側=main.rsが担う
+    /// MUSIC(BGM)のON/OFF切り替え。一時停止画面でのみ意味を持ち、Gameの内部状態には
+    /// 影響しないため、この解釈もGameの外側=main.rsが担う
     ToggleMusic,
-    /// SE(効果音)のON/OFF切り替え(TERM独自拡張)。一時停止画面でのみ意味を持つ。
+    /// SE(効果音)のON/OFF切り替え。一時停止画面でのみ意味を持つ
     ToggleSe,
-    /// デバッグ: プレイヤー付近のブロックを2色に統一する(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: プレイヤー付近のブロックを2色に統一する
     DebugUnifyNearbyColors,
-    /// デバッグ: ライフを1増やす(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: ライフを1増やす
     DebugAddLife,
-    /// デバッグ: 酸素(AIR)を100%まで回復する(TERM独自拡張、動作確認用ショートカット。
-    /// ユーザー指摘: 「AIRを100%にするショートカット追加」)
+    /// デバッグ: 酸素(AIR)を100%まで回復する
     DebugFillAir,
     /// デバッグ: プレイヤーより浅い(画面上で上にある)ブロックを全削除する
-    /// (TERM独自拡張、動作確認用ショートカット)
     DebugClearAbovePlayer,
     /// デバッグ: 画面内のXブロック・ダイヤブロックを全てスターブロックに変える
-    /// (TERM独自拡張、動作確認用ショートカット。ユーザー指摘: 「画面内をスター化
-    /// する(Xブロック,ダイヤブロック100%)」)
     DebugStarifyVisibleScreen,
-    /// デバッグ: ボムを1個、画面内のランダムなEmptyマスへ即座に設置する(TERM独自拡張、
-    /// 動作確認用ショートカット。#96。ユーザー指摘: 「ショートカットキーもくれ」)
+    /// デバッグ: ボムを1個、画面内のランダムなEmptyマスへ即座に設置する
     DebugPlaceBomb,
-    /// デバッグ: ブロックの落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: ブロックの落下速度を遅くする
     DebugBlockFallSlower,
-    /// デバッグ: ブロックの落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: ブロックの落下速度を速くする
     DebugBlockFallFaster,
-    /// デバッグ: プレイヤー自身の自由落下速度を遅くする(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: プレイヤー自身の自由落下速度を遅くする
     DebugPlayerFallSlower,
-    /// デバッグ: プレイヤー自身の自由落下速度を速くする(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: プレイヤー自身の自由落下速度を速くする
     DebugPlayerFallFaster,
-    /// デバッグ: 揺れ時間(落下開始までの時間)を長くする(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: 揺れ時間(落下開始までの時間)を長くする
     DebugShakeDurationLonger,
-    /// デバッグ: 揺れ時間(落下開始までの時間)を短くする(TERM独自拡張、動作確認用ショートカット)
+    /// デバッグ: 揺れ時間(落下開始までの時間)を短くする
     DebugShakeDurationShorter,
-    /// デバッグ: オートプレイ(自動操作)のON/OFFを切り替える(TERM独自拡張。#218)。
-    /// ONにすると無敵も同時にONになる。`Game`自身は自動操作を持たず、AIの実体は
-    /// `autoplay::Autopilot`(Gameの外の仮想キーボード)なので、この解釈もGameの
-    /// 外側=main.rsが担う
-    DebugToggleAutopilot,
-    /// デバッグ: 無敵(ミス無効)のON/OFFを切り替える(TERM独自拡張。#218)。
-    /// オートプレイとは独立したトグルで、手動プレイのまま無敵にもできる
-    DebugToggleInvincible,
-    /// 設定画面(MUSIC/SE)をオーバーレイ表示する(TERM独自拡張)。一時停止画面でのみ
-    /// 意味を持つ。Gameの内部状態には影響しないため、この解釈もGameの外側=main.rsが担う
-    OpenSettings,
-    /// ヘルプ画面をオーバーレイ表示する(TERM独自拡張)。一時停止画面でのみ意味を持つ。
-    /// ユーザー指摘: 「一時停止中にもヘルプページを開けるようにする」
-    OpenHelp,
-    /// Enterキー(TERM独自拡張)。タイトル画面からの開始・GameOverダイアログでの選択
-    /// 確定は、このキーでのみ行う(ユーザー指摘: 「メニューから進むのEnter」「ゲーム
-    /// オーバーなってメニュー設計するのEnter」「他のボタンで進んではいけない」)。
-    Confirm,
-    /// どのショートカットにも割り当てられていないキー(TERM独自拡張)。ユーザー指摘:
-    /// 「ポーズ解除は、Pだけじゃなく、ショートカット設定されていない任意のキー入力でも
-    /// 解除されるように」。一時停止中(オーバーレイ非表示時)に限り、Pキーと同様に
-    /// 再開のトリガーとして扱う。Gameの内部状態には影響しないため、この解釈も
+    /// デバッグ: オートプレイ(自動操作)のON/OFFを切り替える。ONにすると無敵も同時にON。
+    /// AIの実体は`autoplay::Autopilot`(Gameの外の仮想キーボード)なので、この解釈も
     /// Gameの外側=main.rsが担う
+    DebugToggleAutopilot,
+    /// デバッグ: 無敵(ミス無効)のON/OFFを切り替える。オートプレイとは独立したトグルで、
+    /// 手動プレイのまま無敵にもできる
+    DebugToggleInvincible,
+    /// 設定画面(MUSIC/SE)をオーバーレイ表示する。一時停止画面でのみ意味を持ち、
+    /// この解釈もGameの外側=main.rsが担う
+    OpenSettings,
+    /// ヘルプ画面をオーバーレイ表示する。一時停止画面でのみ意味を持つ
+    OpenHelp,
+    /// Enterキー。タイトル画面からの開始・GameOverダイアログでの選択確定は、このキーで
+    /// のみ行う(他のキーでは進まない)
+    Confirm,
+    /// どのショートカットにも割り当てられていないキー。一時停止中(オーバーレイ非表示時)
+    /// に限り、Pキーと同様に再開のトリガーとして扱う。この解釈もmain.rsが担う
     UnboundKey,
-    /// Backspace/Uキー: フレーム巻き戻しの開始(TERM独自拡張。#233)。過去の
-    /// スナップショットを保持しているのは`Game`ではなく`rewind::RewindHistory`
-    /// (Gameの外)なので、このアクションの解釈もmain.rsが担う。`Game`自身は
-    /// 起動可否(`can_start_rewind`)と復元(`restore_for_rewind`)だけを提供する
+    /// Backspace/Uキー: フレーム巻き戻しの開始。過去のスナップショットを保持しているのは
+    /// `Game`ではなく`rewind::RewindHistory`(Gameの外)なので、この解釈もmain.rsが担う。
+    /// `Game`自身は起動可否(`can_start_rewind`)と復元(`restore_for_rewind`)だけを提供する
     Rewind,
 }
 
@@ -202,9 +176,8 @@ pub enum GameStatus {
     Cleared,
 }
 
-/// 「わ〜!」スライダー演出(TERM独自拡張)の段階。ブロックが落ち始める直前に
-/// 移動して間一髪回避した際、まずスライダー(横滑り)で見せてから、短い硬直
-/// (`dodge_recovery_ms`)を挟んで通常操作へ戻る。
+/// 「わ〜!」スライダー演出の段階。ブロックが落ち始める直前に移動して間一髪回避した際、
+/// まずスライダー(横滑り)で見せ、短い硬直(`dodge_recovery_ms`)を挟んで通常操作へ戻る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DodgeStage {
     /// 演出無し(通常プレイ中)。
@@ -215,8 +188,7 @@ enum DodgeStage {
     Recovering,
 }
 
-/// GameOverダイアログの選択肢(TERM独自拡張。ユーザー指摘: 「全部死んだら、タイトルに
-/// 戻るか、その場から復活して再開するか、ダイアログ表示してカーソルで選べるように」)。
+/// GameOverダイアログの選択肢(タイトルへ戻る/その場から復活する)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GameOverChoice {
     BackToTitle,
@@ -232,15 +204,13 @@ pub enum GameEvent {
     /// 岩ブロックへヒットしたが、まだ破壊に至らない(spec.md 10章「岩ブロックヒット音」)
     RockHitIntact,
     /// ブロックが消滅した(色ブロックの直接掘削消滅・自動消滅・スター消滅のいずれも。
-    /// spec.md 10章「破壊音」)。消滅したブロック数を伴う。岩ブロックの消滅は専用の
-    /// `RockDestroyed`を使う(TERM独自拡張。ユーザー指摘: 「Xブロックを壊したときに
-    /// 専用SEを鳴らす」)
+    /// spec.md 10章「破壊音」)。消滅したブロック数を伴う。岩ブロックの消滅だけは専用SEの
+    /// ため`RockDestroyed`を使う
     BlockDestroyed { blocks: usize },
-    /// 岩ブロック(Xブロック)が消滅した(直接掘削の5回目破壊・自動消滅のいずれも。
-    /// TERM独自拡張)。消滅したブロック数を伴う
+    /// 岩ブロック(Xブロック)が消滅した(直接掘削の5回目破壊・自動消滅のいずれも)。
+    /// 消滅したブロック数を伴う
     RockDestroyed { blocks: usize },
-    /// ヒヤリ回避スライダー演出が発動した瞬間(TERM独自拡張。ユーザー指摘:
-    /// 「キャラがスライディングした瞬間...専用SEを鳴らす」)
+    /// ヒヤリ回避スライダー演出が発動した瞬間
     DodgeTriggered,
     /// 酸素カプセルを取得した
     OxygenCollected,
@@ -250,53 +220,41 @@ pub enum GameEvent {
     OxygenWarningTick,
     /// レベル(30mごと)が上がった
     LevelUp { level: usize },
-    /// Lv.10ごとに到達し、ライフを1つ獲得した(TERM独自拡張。#169。ユーザー指摘:
-    /// 「Lv.10ごとにLive+1」)。既にライフが上限(`LIVES_MAX`)の場合もイベント自体は
-    /// 発生する(実際に加算されたかは呼び出し側では区別しない、既存の`LifeLost`等と
-    /// 同じ考え方)。
+    /// Lv.10ごとに到達し、ライフを1つ獲得した。既にライフが上限(`LIVES_MAX`)でも
+    /// イベント自体は発生する(実際に加算されたかは呼び出し側では区別しない)。
     ExtraLifeAtLevel { level: usize },
     /// ライフを1つ失ったが、まだライフが残っている(その場で酸素全回復して再開)。
-    /// `cause`はソークテストが死因の内訳を数えるための記録用(TERM独自拡張。#221)で、
-    /// SE再生など通常の処理では参照しない。
+    /// `cause`はソークテストが死因の内訳を数えるための記録用で、SE再生等では参照しない。
     LifeLost { cause: MissCause },
-    /// 「天に召される」演出が終わり、その場に復活した瞬間(TERM独自拡張。ユーザー指摘:
-    /// 「死んで、復活したときのSEほしい」)
+    /// 「天に召される」演出が終わり、その場に復活した瞬間
     Revived,
     /// 最後のライフを失い、ゲームオーバーになった。`cause`は`LifeLost`と同じ記録用。
     GameOverMiss { cause: MissCause },
     /// 深度1000m到達でゲームクリアした
     Cleared,
-    /// アイテムブロックを取得し、対応する効果が発動した(TERM独自拡張。ユーザー指摘:
-    /// 「ショートカットRと同じ効果のあるアイテムつくろ」「ショートカットC効果の
-    /// アイテムも作って」)
+    /// アイテムブロックを取得し、対応する効果が発動した
     ItemCollected(ItemEffect),
-    /// ボムが爆発した(TERM独自拡張。#96)。プレイヤーが爆風に巻き込まれたかどうかは
-    /// 別途`LifeLost`/`GameOverMiss`が続けて発生するかで判断できる。
+    /// ボムが爆発した。プレイヤーが爆風に巻き込まれたかどうかは、別途`LifeLost`/
+    /// `GameOverMiss`が続けて発生するかで判断できる。
     BombExploded,
-    /// ボムの残り時間が`BOMB_DANGER_MS`を切り、本体が激しく赤く点滅し始めた瞬間
-    /// (TERM独自拡張。#168。ユーザー指摘: 「爆弾が爆発しそうな赤くチカチカする
-    /// とき爆弾の爆発しそうな導火線の音させろ」)。1個のボムにつき1回だけ発生する。
+    /// ボムの残り時間が`BOMB_DANGER_MS`を切り、本体が激しく赤く点滅し始めた瞬間。
+    /// 1個のボムにつき1回だけ発生する。
     BombFuseWarning,
     /// 危険域(残り`BOMB_DANGER_MS`以下)に入っている間、`BOMB_FUSE_TICK_INTERVAL_MS`
-    /// おきに繰り返し発生する導火線の「チッ」(TERM独自拡張。#183。ユーザー指摘:
-    /// 「爆弾爆発するまえに「ちちちちち」って乾いた音鳴らしてくれよ」)。
-    /// `BombFuseWarning`(危険域に入った瞬間の1回だけの駆け上がり4音)とは別に、
-    /// 爆発が近いことを連続音で煽る。
+    /// おきに繰り返し発生する導火線の「チッ」。危険域に入った瞬間1回だけの
+    /// `BombFuseWarning`とは別に、爆発が近いことを連続音で示す。
     BombFuseTick,
-    /// チェックポイント(100mごと)に到達した瞬間(TERM独自拡張。#178。ユーザー指摘:
-    /// 「100mすすむごとにそれより上部のオブジェクトを全クリア、100mごとのゴールSEと
-    /// 演出、アニメーションする」)。到達した深度(m、100の倍数)を伴う。
+    /// チェックポイント(100mごと)に到達した瞬間。到達した深度(m、100の倍数)を伴う。
     Checkpoint100m { at_m: usize },
-    /// 無敵(`Game::set_invincible`)が有効なため、本来のミスが回避された(TERM独自
-    /// 拡張。#218)。ライフ減少・「天に召される」演出・GameOver判定のいずれも
-    /// 発生していない。ソークテストでどの死因が何回起きたかを数えるための記録用で、
-    /// 演出・SEは伴わない。
+    /// 無敵(`Game::set_invincible`)が有効なため、本来のミスが回避された。ライフ減少・
+    /// 「天に召される」演出・GameOver判定のいずれも発生していない。ソークテストで死因を
+    /// 数えるための記録用で、演出・SEは伴わない。
     MissAverted { cause: MissCause },
 }
 
-/// ミスの原因(TERM独自拡張。#218)。`Game::apply_miss`の各呼び出し元がそれぞれ渡す。
-/// 無敵中はこの原因ごとに異なる後始末(酸素の回復・押し潰したブロックの除去)が要る
-/// ため、単なる記録用の区分ではなく処理の分岐にも使う。
+/// ミスの原因。`Game::apply_miss`の各呼び出し元がそれぞれ渡す。無敵中はこの原因ごとに
+/// 異なる後始末(酸素の回復・押し潰したブロックの除去)が要るため、単なる記録用の区分
+/// ではなく処理の分岐にも使う。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissCause {
     /// 酸素切れ(`update`の自然減少、または岩掘削の消費による`check_oxygen_zero`)
@@ -309,11 +267,10 @@ pub enum MissCause {
     BombBlast,
 }
 
-/// 消滅フラッシュ演出1セルぶんの進行状態(TERM独自拡張。#234)。
+/// 消滅フラッシュ演出1セルぶんの進行状態。
 ///
-/// 重力tickで消えたセルは、その瞬間にはまだ落下ブロックが空中にいる(落下補間の途中)。
-/// 着地tickの瞬間から光り始めると「まだ到着していないブロックの着地先が先に光る」ため、
-/// 補間が終わるまでの待ち時間(`delay`)を持たせ、到着してからフラッシュを始める。
+/// 重力tickで消えたセルは、その瞬間まだ落下ブロックが空中にいる(落下補間の途中)。すぐ
+/// 光らせると着地前のブロックの着地先が先に光るため、`delay`だけ待ってから開始する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VanishedCell {
     pos: board::Pos,
@@ -329,7 +286,7 @@ struct VanishedCell {
 }
 
 impl MissCause {
-    /// デバッグログ(`miss_events`テーブル)へ記録する際の原因名(TERM独自拡張。#218)。
+    /// デバッグログ(`miss_events`テーブル)へ記録する際の原因名。
     fn as_str(self) -> &'static str {
         match self {
             MissCause::OxygenOut => "OxygenOut",
@@ -342,10 +299,9 @@ impl MissCause {
 
 /// ノーマルコース シングルプレイのゲーム状態一式。
 ///
-/// フレーム巻き戻し(TERM独自拡張。#233)がこの構造体を丸ごと複製してリングバッファへ
-/// 積むため`Clone`を実装する。唯一クローンできないSQLite接続(`debug_log`)だけは
-/// `Rc`で共有し、複製されたスナップショット同士が同じログを指すようにしている
-/// (ログは巻き戻しの対象外＝現在の記録先をそのまま使い続ける)。
+/// フレーム巻き戻しがこの構造体を丸ごと複製してリングバッファへ積むため`Clone`を
+/// 実装する。唯一クローンできないSQLite接続(`debug_log`)だけは`Rc`で共有し、複製された
+/// スナップショット同士が同じログを指すようにする(ログは巻き戻しの対象外)。
 #[derive(Clone)]
 pub struct Game {
     pub board: Board,
@@ -353,183 +309,150 @@ pub struct Game {
     pub status: GameStatus,
     gravity_state: GravityState,
     fall_tick_accum: Duration,
-    /// プレイヤー自身の自由落下用のtick蓄積(TERM独自拡張)。ブロックの重力(`fall_tick_accum`)
-    /// とは独立した速度で判定できるよう、デバッグショートカットで別々に調整可能にするため分離した。
+    /// プレイヤー自身の自由落下用のtick蓄積。ブロックの重力(`fall_tick_accum`)とは
+    /// 別々に速度調整できるよう分離している。
     player_fall_tick_accum: Duration,
-    /// ブロックの重力落下tick間隔(ms)。既定は`FALL_TICK_MS`だが、デバッグショートカット
-    /// (`debug_adjust_block_fall_speed`)で動作確認用に実行時調整できる(TERM独自拡張)。
+    /// ブロックの重力落下tick間隔(ms)。既定は`FALL_TICK_MS`で、デバッグショートカット
+    /// (`debug_adjust_block_fall_speed`)から実行時調整できる。
     block_fall_tick_ms: u64,
-    /// 支えを失ってから実際に落下し始めるまでの揺れ時間(ms)。既定は`SHAKE_DURATION_MS`
-    /// だが、デバッグショートカット(`debug_adjust_shake_duration`)で実行時調整できる
-    /// (TERM独自拡張)。揺れティック数への変換は`block_fall_tick_ms`を使い都度計算する。
+    /// 支えを失ってから実際に落下し始めるまでの揺れ時間(ms)。既定は`SHAKE_DURATION_MS`で、
+    /// `debug_adjust_shake_duration`から実行時調整できる。揺れティック数への変換は
+    /// `block_fall_tick_ms`を使い都度計算する。
     shake_duration_ms: u64,
-    /// プレイヤー自身の自由落下tick間隔(ms)。既定は`FALL_TICK_MS`だが、デバッグショートカット
-    /// (`debug_adjust_player_fall_speed`)で動作確認用に実行時調整できる(TERM独自拡張)。
+    /// プレイヤー自身の自由落下tick間隔(ms)。既定は`FALL_TICK_MS`で、デバッグショート
+    /// カット(`debug_adjust_player_fall_speed`)から実行時調整できる。
     player_fall_tick_ms: u64,
     /// 横移動(MoveLeft/MoveRight)のクールダウン間隔(ms、小さいほど速い)。既定は
-    /// `MOVE_COOLDOWN_MS_DEFAULT`(`INPUT_COOLDOWN_MS`相当)だが、設定画面から調整
-    /// できる(TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
-    /// 掘削(Drill)のクールダウンは対象外で、引き続き`INPUT_COOLDOWN_MS`固定のまま。
+    /// `MOVE_COOLDOWN_MS_DEFAULT`で設定画面から調整できる。掘削(Drill)のクールダウンは
+    /// 対象外で、引き続き`INPUT_COOLDOWN_MS`固定のまま。
     move_cooldown_ms: u64,
-    /// 4連結以上の自動消滅が連鎖するとき、1回消滅するごとに次の重力解決までの
-    /// 最小インターバル(ms)。既定は`CHAIN_VANISH_INTERVAL_MS_DEFAULT`(0、従来通り)
-    /// だが、設定画面から調整できる(TERM独自拡張。#187。ユーザー指摘: 「ブロックが
-    /// 消えて、連鎖的に次ブロックが消えるとき、0msで連続するのではなく一定の
-    /// インターバルで連鎖するように」)。
+    /// 4連結以上の自動消滅が連鎖するとき、1回消滅するごとに次の重力解決までの最小
+    /// インターバル(ms)。既定の`CHAIN_VANISH_INTERVAL_MS_DEFAULT`(0)なら即座に連鎖する。
     chain_vanish_interval_ms: u64,
-    /// `chain_vanish_interval_ms`による足止めの残り時間(TERM独自拡張。#187)。
-    /// 自動消滅が発生した直後にこの値へセットされ、0になるまで次の重力tickの
-    /// 解決(`physics::process_gravity_tick`の呼び出し)を1tickぶんずつ足止めする。
+    /// `chain_vanish_interval_ms`による足止めの残り時間。自動消滅の直後にこの値へセット
+    /// され、0になるまで次の重力tickの解決を1tickぶんずつ足止めする。
     chain_pause_remaining: Duration,
-    /// 移動系入力(MoveLeft/MoveRight)専用のクールダウン。掘削(Drill)とは別に管理する
-    /// (TERM独自拡張。ユーザー指摘: 「カーソルとスペース、両方押してるときにどちらかが
-    /// 効かない」。1つの共有クールダウンだと、同一フレームで移動キーと掘削キーが両方
-    /// 来た場合に片方がブロックされてしまうため分離した)。
+    /// 移動系入力(MoveLeft/MoveRight)専用のクールダウン。掘削(Drill)と共有すると、
+    /// 同一フレームで移動キーと掘削キーが両方来た場合に片方がブロックされるため分離した。
     ///
-    /// 「前回の入力受理からの経過時間」を毎フレーム蓄積するアキュムレータとして持つ
-    /// (`fall_tick_accum`等と同じ考え方)。`INPUT_COOLDOWN_MS`ぶん貯まったら入力を
-    /// 受理し、そのぶんだけ差し引く(0へリセットしない)。これにより、ターミナルの
-    /// キーリピート間隔とクールダウン周期が一致しない場合に生じる「一定間隔で移動が
-    /// 遅くなって見える」ビート(うなり)を軽減する(TERM独自拡張。ユーザー指摘:
-    /// 「左右にキャラ走るとき、速くなったり遅くなったりしてる。一定のインターバルで
-    /// 速度が落ちたりする」)。ただし長時間入力が無い間に際限なく貯め込んで後から
-    /// 連続入力がまとめて即座に通ってしまわないよう、`INPUT_COOLDOWN_ACCUM_CAP_MS`
-    /// (クールダウン自体の1.5倍)で上限を設ける。
+    /// 経過時間を毎フレーム蓄積し、1スロットぶん貯まったら受理してそのぶんだけ差し引く
+    /// (0へリセットしない)ことで、キーリピート間隔とクールダウン周期が一致しない場合の
+    /// 「一定間隔で移動が遅くなって見える」うなりを軽減する。貯め込んだぶんが後からまとめて
+    /// 通らないよう、`INPUT_COOLDOWN_ACCUM_CAP_MS`(クールダウンの1.5倍)で上限を設ける。
     move_cooldown_accum: Duration,
     /// 掘削系入力(Drill)専用のクールダウンアキュムレータ。移動(MoveLeft/MoveRight)
     /// とは別に管理する。`move_cooldown_accum`と同じ考え方。
     drill_cooldown_accum: Duration,
     oxygen_warning_accum: Duration,
     /// ライフ消費で再開した直後、残り何ティックの間 押し潰し判定を無効化するか
-    /// (spec.md 5章末尾、TERM独自拡張)。
+    /// (spec.md 5章末尾)。
     invulnerability_ticks_remaining: u32,
     /// 直近でGameEvent::LevelUpを通知した時点のレベル番号(重複通知防止)。
     last_level_reported: usize,
-    /// 直近でGameEvent::Checkpoint100mを通知した時点の区切り番号(重複通知防止・
-    /// スキマのくり抜き済み判定の両方を兼ねる。TERM独自拡張。#178/#190)。地面
-    /// (`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点で1増える(ユーザー指摘:
-    /// 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。地面に
-    /// ついたら次、じゃなくて」)。
+    /// 直近でGameEvent::Checkpoint100mを通知した時点の区切り番号。重複通知防止と、
+    /// スキマのくり抜き済み判定を兼ねる。地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に
+    /// 掘り抜いた地点で1増える。
     last_checkpoint_reported: usize,
     /// 押し潰しミス発生時、残りこれだけの間「潰れた」見た目を表示し続ける
-    /// (0になったらGameOverオーバーレイの表示を許す。TERM独自拡張、9章)。
+    /// (0になったらGameOverオーバーレイの表示を許す。9章)。
     crush_flash_remaining: Duration,
-    /// チェックポイント(100mごと)到達演出の残り時間(TERM独自拡張。#178)。
-    /// `0`より大きい間、描画側が到達演出(バナー等)を表示する。
+    /// チェックポイント(100mごと)到達演出の残り時間。`0`より大きい間、描画側が
+    /// 到達演出(バナー等)を表示する。
     checkpoint_flash_remaining: Duration,
-    /// 直近のチェックポイント到達演出が表示している到達深度(m、TERM独自拡張。#178)。
+    /// 直近のチェックポイント到達演出が表示している到達深度(m)。
     checkpoint_flash_depth_m: usize,
-    /// 押し潰されてもライフが残っている場合、「天に召される」演出の残り時間
-    /// (TERM独自拡張)。`Some`の間はゲームプレイ全体(重力・自由落下・酸素減少・入力)
-    /// を凍結し、0になった時点で死亡地点の3列クリア・ライフ減算・酸素回復をまとめて
-    /// 行いその場に復活する(ユーザー指摘: 「潰れたとき、もっとわかりやすいように
-    /// 死んで、一度天に召される演出をして、ブロックが消える処理されてから、元の位置に
-    /// 復活」)。ライフが0になる場合はこの演出を行わず、即座にGameOverへ進む。
+    /// 押し潰されてもライフが残っている場合の「天に召される」演出の残り時間。`Some`の間は
+    /// プレイヤー自身の処理を凍結し、0になった時点で死亡地点の3列クリア・ライフ減算・
+    /// 酸素回復をまとめて行いその場に復活する。ライフが0になる場合はこの演出を行わず、
+    /// 即座にGameOverへ進む。
     ascending_remaining: Option<Duration>,
     /// 掘削入力(Space)を押した直後、方向別の掘削アニメーションを表示し続ける残り時間
-    /// (TERM独自拡張、9章。ユーザー指摘: 「上に掘る時、上向きながらピヨンピヨン跳ねる」
-    /// 「左右に掘る時、横にドリルをぐいぐい」「下に掘る時、下向きながらドリルを
-    /// ぐいぐい」)。描画専用で、ロジックには一切影響しない。
+    /// (9章)。描画専用で、ロジックには一切影響しない。
     drill_flash_remaining: Duration,
-    /// 「わ〜!」スライダー演出(ブロックが落ち始める直前に移動して間一髪回避した際、
-    /// TERM独自拡張)の現在の段階。`None`なら演出無し。
+    /// 「わ〜!」スライダー演出の現在の段階。`None`なら演出無し。
     dodge_stage: DodgeStage,
     /// 現在の段階(スライダー/硬直)の残り時間。
     dodge_stage_remaining: Duration,
-    /// 「わ〜!」スライダー直後の硬直インターバル(ms、TERM独自拡張)。設定画面/
-    /// デバッグショートカットで調整できる(ユーザー指摘: 「この設定値も作る」)。
+    /// 「わ〜!」スライダー直後の硬直インターバル(ms)。設定画面/デバッグショートカット
+    /// で調整できる。
     dodge_recovery_ms: u64,
-    /// ヒヤリ回避スライダーの監視対象セル(TERM独自拡張)。直前の移動で、移動前の
-    /// 頭上(row-1)が実際に「揺れていた」場合のみ、その移動前の座標を監視対象として
-    /// 設定する(ユーザー指摘: 「そもそも避けてないのに発動してるように見える」を
-    /// 受け、単に「最近動いた」だけでなく実際に頭上の脅威から逃げたことを条件にする)。
-    /// この座標へブロックが着地した瞬間にスライダー演出を発火し、監視は解除される。
+    /// ヒヤリ回避スライダーの監視対象セル。直前の移動で、移動前の頭上(row-1)が実際に
+    /// 「揺れていた」場合のみ、その移動前の座標を監視対象に設定する(単に「最近動いた」
+    /// だけでは誤発火するため、実際に頭上の脅威から逃げたことを条件にする)。この座標へ
+    /// ブロックが着地した瞬間にスライダー演出を発火し、監視は解除される。
     dodge_watch_cell: Option<(usize, usize)>,
-    /// 監視対象セルの有効期限(TERM独自拡張)。揺れていたブロックが実際に落下して
-    /// 監視対象セルへ到達するまでの猶予。この時間が経過すると監視は自動的に解除される。
+    /// 監視対象セルの有効期限。揺れていたブロックが実際に落下して監視対象セルへ到達する
+    /// までの猶予で、経過すると監視は自動的に解除される。
     dodge_watch_remaining: Duration,
-    /// 描画専用: プレイヤーの直前の論理位置(移動の見た目補間アニメーション用、
-    /// TERM独自拡張、9章)。ロジック上の当たり判定・掘削・落下判定には一切使わない。
+    /// 描画専用: プレイヤーの直前の論理位置(移動の見た目補間アニメーション用、9章)。
+    /// ロジック上の当たり判定・掘削・落下判定には一切使わない。
     render_prev_position: (usize, usize),
     /// 直前の論理位置変化からの経過時間(秒)。`MOVE_ANIM_DURATION_MS`に達すると
     /// 補間が完了したものとして扱う。
     render_anim_elapsed: f32,
-    /// 現在進行中の移動補間アニメーションの長さ(秒、TERM独自拡張)。横移動は
-    /// `move_anim_duration_secs()`(固定の短い時間)、自由落下は`player_fall_tick_ms`
-    /// (実際の落下速度)を使う。移動の種類によって`note_possible_move_with_duration`が設定する。
+    /// 現在進行中の移動補間アニメーションの長さ(秒)。横移動は`move_anim_duration_secs()`
+    /// (固定の短い時間)、自由落下は`player_fall_tick_ms`(実際の落下速度)を使い、移動の
+    /// 種類に応じて`note_possible_move_with_duration`が設定する。
     render_anim_duration_secs: f32,
-    /// 直近の重力ティックで実際に1マス落下した各セルの(移動後の位置, 移動前の位置)
-    /// (TERM独自拡張。ブロック落下のピクセル単位補間描画に使う)。次のティックが
-    /// 来るまでの間、描画側がこれと`block_fall_progress()`を使って補間する。
+    /// 直近の重力ティックで実際に1マス落下した各セルの(移動後の位置, 移動前の位置)。
+    /// 次のティックが来るまでの間、描画側がこれと`block_fall_progress()`を使って
+    /// ブロック落下をピクセル単位で補間する。
     last_block_moves: Vec<BlockMove>,
-    /// 直近に消滅した(自動消滅・スター溶解)セルと、消滅フラッシュ演出の進行状態
-    /// (TERM独自拡張。ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
+    /// 直近に消滅した(自動消滅・スター溶解)セルと、消滅フラッシュ演出の進行状態。
     /// 描画側(render.rs)がこの座標に一瞬フラッシュ演出を出す。
     recently_vanished: Vec<VanishedCell>,
-    /// ボム爆発の爆風が届いた直後のセルと、炎の演出の残り時間・爆心地からの距離
-    /// (TERM独自拡張。#126。ユーザー指摘: 「爆弾が爆発するときは、ボンバーマンTERMの
-    /// ように炎アニメーションほしい」)。距離(0=爆心地、遠いほど大きい)で炎の色調を
-    /// 変え、`recently_vanished`と同じ考え方で描画側(render.rs)がフラッシュ演出に使う。
+    /// ボム爆発の爆風が届いた直後のセルと、炎の演出の残り時間・爆心地からの距離。距離
+    /// (0=爆心地、遠いほど大きい)で炎の色調を変え、`recently_vanished`と同じ考え方で
+    /// 描画側(render.rs)がフラッシュ演出に使う。
     recently_exploded: Vec<(board::Pos, Duration, u8)>,
-    /// GameOverダイアログでの現在の選択項目(TERM独自拡張)。GameOver状態でのみ意味を持つ。
+    /// GameOverダイアログでの現在の選択項目。GameOver状態でのみ意味を持つ。
     game_over_selection: GameOverChoice,
-    /// `update()`が呼ばれるたびに1増えるフレーム通し番号(TERM独自拡張。#85調査用。
-    /// ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
-    /// ブロック状態遷移ログ(`debug_log`)の各行と突き合わせるための識別子。
+    /// `update()`が呼ばれるたびに1増えるフレーム通し番号。ブロック状態遷移ログ
+    /// (`debug_log`)の各行と突き合わせるための識別子。
     frame_counter: u64,
-    /// #85調査用のブロック状態遷移ログ(TERM独自拡張)。`refresh_debug_log`で明示的に
-    /// 有効化するまでは`None`(no-op)のままなので、通常のテスト等では disk I/O が
-    /// 発生しない。
+    /// ブロック状態遷移ログ。`refresh_debug_log`で明示的に有効化するまでは`None`(no-op)
+    /// のままなので、通常のテスト等では disk I/O が発生しない。
     ///
-    /// SQLite接続はクローンできないため`Rc`で包む(#233)。巻き戻しのスナップショットは
-    /// `Game`丸ごとの複製なので、複製元・複製先・復元後の全てが同じ1つのログを指す。
+    /// SQLite接続はクローンできないため`Rc`で包む。巻き戻しのスナップショットは`Game`
+    /// 丸ごとの複製なので、複製元・複製先・復元後の全てが同じ1つのログを指す。
     debug_log: Option<Rc<DebugLog>>,
-    /// 現在盤面上にあるボム(TERM独自拡張。#96)。
+    /// 現在盤面上にあるボム。
     bombs: Vec<Bomb>,
-    /// ボム出現判定の経過時間蓄積(TERM独自拡張。#96)。`BOMB_SPAWN_CHECK_INTERVAL_MS`
-    /// ぶん貯まるたびに1回、出現確率を判定する。
+    /// ボム出現判定の経過時間蓄積。`BOMB_SPAWN_CHECK_INTERVAL_MS`ぶん貯まるたびに1回、
+    /// 出現確率を判定する。
     bomb_spawn_check_accum_ms: u64,
-    /// ボム出現頻度設定(%、100=既定、TERM独自拡張。#96)。設定画面から調整できる。
+    /// ボム出現頻度設定(%、100=既定)。設定画面から調整できる。
     bomb_spawn_rate_percent: u32,
-    /// アイテムブロック3種の出現率設定(%、100=既定、TERM独自拡張。#210/#211)。
-    /// `reroll_spawn_rates_from`で最新の設定値に更新され、`top_up_items_ahead`が
-    /// tickごとの窓補充で参照する。
+    /// アイテムブロック3種の出現率設定(%、100=既定)。`reroll_spawn_rates_from`で最新の
+    /// 設定値に更新され、`top_up_items_ahead`がtickごとの窓補充で参照する。
     item_clear_above_rate_percent: u32,
     item_unify_colors_rate_percent: u32,
     item_starify_screen_rate_percent: u32,
-    /// アイテムブロック3種について、この行より前は既に抽選済み(補充対象外)
-    /// (TERM独自拡張。#210/#211)。プレイヤーが進むたびに`target_row`
-    /// (`player.row + ITEM_WINDOW_AHEAD_ROWS`)まで前進させ、新たに範囲に入った
-    /// 行だけを抽選する。一度抽選した行の内容は(アイテムになった/ならなかったに
-    /// 関わらず)二度と変えない。
+    /// アイテムブロック3種について、この行より前は既に抽選済み(補充対象外)。プレイヤーが
+    /// 進むたびに`target_row`(`player.row + ITEM_WINDOW_AHEAD_ROWS`)まで前進させ、新たに
+    /// 範囲へ入った行だけを抽選する。一度抽選した行の内容は二度と変えない。
     item_top_up_frontier_row: usize,
-    /// ボム出現位置・確率判定専用の乱数生成器(TERM独自拡張。#96)。ゲームのシードから
-    /// 派生させるため、同じシードなら同じ出現パターンが再現できる(既存の盤面生成と
-    /// 同じ決定性の考え方)。
+    /// ボム出現位置・確率判定専用の乱数生成器。ゲームのシードから派生させるため、同じ
+    /// シードなら同じ出現パターンが再現される(盤面生成と同じ決定性の考え方)。
     rng: ChaCha8Rng,
-    /// 選択したコースのゴール深度(m、TERM独自拡張。#112。ユーザー指摘: 「起動
-    /// フローにモードセレクト画面を追加」)。`Board::generate`の深さそのもの
-    /// (=盤面の行数)でもある。難易度カーブ(`depth_fraction`)は選択したコースに
-    /// 関わらず`FIELD_DEPTH_M`(ノーマルコース基準)で正規化するため、イージー
-    /// コースはカーブの前半しか体験しない。
+    /// 選択したコースのゴール深度(m)。`Board::generate`の深さ(=盤面の行数)でもある。
+    /// 難易度カーブ(`depth_fraction`)はコースに関わらず`FIELD_DEPTH_M`(ノーマルコース
+    /// 基準)で正規化するため、イージーコースはカーブの前半しか体験しない。
     depth_goal_m: usize,
-    /// 無敵(ミス無効)かどうか(TERM独自拡張。#218)。`true`の間、`apply_miss`は
-    /// ライフを減らさず`avert_miss`(回避イベントの記録と最小限の後始末)へ振り替える。
-    /// ライフ喪失直後の一時的な無敵時間(`invulnerability_ticks_remaining`)とは
-    /// 別物で、そちらは押し潰し判定自体を抑止するためミスの発生件数を数えられなく
-    /// なる。両者は混ぜずに独立して扱う。
+    /// 無敵(ミス無効)かどうか。`true`の間、`apply_miss`はライフを減らさず`avert_miss`
+    /// (回避イベントの記録と最小限の後始末)へ振り替える。ライフ喪失直後の一時的な無敵
+    /// 時間(`invulnerability_ticks_remaining`)は押し潰し判定自体を抑止してミスの件数を
+    /// 数えられなくする別物なので、両者は混ぜずに独立して扱う。
     invincible: bool,
-    /// 無敵によって回避されたミスの累計回数(TERM独自拡張。#218)。ソークテストで
-    /// 「長時間プレイ中に何回死ぬ場面があったか」を数えるための指標。
+    /// 無敵によって回避されたミスの累計回数。ソークテストで「長時間プレイ中に何回死ぬ
+    /// 場面があったか」を数えるための指標。
     misses_averted: u32,
-    /// 残っているフレーム巻き戻しの使用回数(TERM独自拡張。#233)。開始時は
-    /// `REWIND_STOCK_INITIAL`で、100mチェックポイント到達ごとに
-    /// `REWIND_STOCK_PER_CHECKPOINT`ずつ`rewind_stock_max`まで補充される。
-    /// 1回巻き戻すごとに1減る。
+    /// 残っているフレーム巻き戻しの使用回数。開始時は`REWIND_STOCK_INITIAL`で、100m
+    /// チェックポイント到達ごとに`REWIND_STOCK_PER_CHECKPOINT`ずつ`rewind_stock_max`まで
+    /// 補充され、1回巻き戻すごとに1減る。
     rewind_stock: u8,
-    /// 巻き戻しストックの上限(TERM独自拡張。#233)。設定画面から
-    /// `REWIND_STOCK_MAX_SETTING_MIN`〜`REWIND_STOCK_MAX_SETTING_MAX`で調整でき、
-    /// `0`なら巻き戻し機能そのものが無効になる(ストックも常に0にクランプされる)。
+    /// 巻き戻しストックの上限。設定画面から`REWIND_STOCK_MAX_SETTING_MIN`〜`MAX`で調整
+    /// でき、`0`なら巻き戻し機能そのものが無効になる(ストックも常に0にクランプされる)。
     rewind_stock_max: u8,
 }
 
@@ -543,33 +466,28 @@ impl Game {
     }
 
     /// 指定シード・ライフ数で、既定フィールド幅・ノーマルコースの新しいゲームを
-    /// 開始する(spec.md 8章「1〜5機から選べる」)。テスト専用ヘルパー(上記`new`と
-    /// 同じ理由)。
+    /// 開始する(spec.md 8章「1〜5機から選べる」)。テスト専用ヘルパー。
     #[cfg(test)]
     pub fn new_with_lives(seed: u64, lives: u8) -> Self {
         Self::new_with_lives_and_width(seed, lives, FIELD_WIDTH_DEFAULT)
     }
 
     /// 指定シード・フィールド幅・コースのゴール深度で、既定ライフ数の新しいゲームを
-    /// 開始する(TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」
-    /// 「起動フローにモードセレクト画面を追加」)。
+    /// 開始する。
     pub fn new_with_width(seed: u64, width: usize, depth_goal_m: usize) -> Self {
         Self::new_with_lives_and_width_and_depth_goal(seed, LIVES_DEFAULT, width, depth_goal_m)
     }
 
     /// 指定シード・ライフ数・フィールド幅で、ノーマルコースの新しいゲームを開始する
-    /// (TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」)。
-    /// テスト専用ヘルパー(上記`new`と同じ理由。プレイ中に実際に使うコース選択は
-    /// `new_with_width`が担う)。範囲外の幅は`FIELD_WIDTH_MIN`〜`MAX`にクランプする。
+    /// テスト専用ヘルパー(実際に使うコース選択は`new_with_width`が担う)。範囲外の幅は
+    /// `FIELD_WIDTH_MIN`〜`MAX`にクランプする。
     #[cfg(test)]
     pub fn new_with_lives_and_width(seed: u64, lives: u8, width: usize) -> Self {
         Self::new_with_lives_and_width_and_depth_goal(seed, lives, width, FIELD_DEPTH_M)
     }
 
-    /// 指定シード・ライフ数・フィールド幅・コースのゴール深度で新しいゲームを開始する
-    /// (TERM独自拡張。ユーザー指摘: 「設定値に列の数を変更できるようにして」「起動
-    /// フローにモードセレクト画面を追加」)。範囲外の幅は`FIELD_WIDTH_MIN`〜`MAX`に
-    /// クランプする。
+    /// 指定シード・ライフ数・フィールド幅・コースのゴール深度で新しいゲームを開始する。
+    /// 範囲外の幅は`FIELD_WIDTH_MIN`〜`MAX`にクランプする。
     fn new_with_lives_and_width_and_depth_goal(
         seed: u64,
         lives: u8,
@@ -633,11 +551,10 @@ impl Game {
             item_unify_colors_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
             item_starify_screen_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
             // 実際の設定値は直後に必ず呼ばれるreroll_spawn_rates_fromが反映するため、
-            // ここでは未抽選(0)のまま初期化する(TERM独自拡張。#210/#211)。
+            // ここでは未抽選(0)のまま初期化する。
             item_top_up_frontier_row: 0,
             // ボード生成(`Board::generate`)とは別系統の乱数列にするため、シードを
-            // ビット反転して使う(TERM独自拡張。#96)。同じゲームシードなら同じボム
-            // 出現パターンが再現される。
+            // ビット反転して使う。同じゲームシードなら同じボム出現パターンが再現される。
             rng: ChaCha8Rng::seed_from_u64(!seed),
             depth_goal_m,
             invincible: false,
@@ -656,13 +573,13 @@ impl Game {
         };
     }
 
-    /// GameOverダイアログの現在の選択項目(TERM独自拡張)。
+    /// GameOverダイアログの現在の選択項目。
     pub fn game_over_selection(&self) -> GameOverChoice {
         self.game_over_selection
     }
 
-    /// GameOverダイアログの選択をトグルする(2択なので↑↓どちらでも反転させる。
-    /// TERM独自拡張)。GameOver状態でのみ意味を持つ。
+    /// GameOverダイアログの選択をトグルする(2択なので↑↓どちらでも反転させる)。
+    /// GameOver状態でのみ意味を持つ。
     pub fn toggle_game_over_selection(&mut self) {
         if self.status != GameStatus::GameOver {
             return;
@@ -673,10 +590,9 @@ impl Game {
         };
     }
 
-    /// GameOverダイアログで「その場から復活」を選んだ場合の処理(TERM独自拡張。ユーザー
-    /// 指摘: 「全部死んだら、タイトルに戻るか、その場から復活して再開するか」)。
-    /// ライフを既定値に戻し酸素を全回復してPlayingへ戻す。深度・スコア・盤面は
-    /// そのまま維持する。復活直後は既存のライフ喪失時と同様に無敵時間を与える。
+    /// GameOverダイアログで「その場から復活」を選んだ場合の処理。ライフを既定値に戻し
+    /// 酸素を全回復してPlayingへ戻す。深度・スコア・盤面はそのまま維持し、復活直後は
+    /// 既存のライフ喪失時と同様に無敵時間を与える。
     pub fn revive(&mut self) {
         if self.status != GameStatus::GameOver {
             return;
@@ -685,8 +601,7 @@ impl Game {
         self.player.oxygen = crate::constants::OXYGEN_MAX;
         self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
         self.status = GameStatus::Playing;
-        // 巻き戻しストックもゲーム開始時と同じ値まで回復させる(TERM独自拡張。#233)。
-        // ライフ・酸素を初期値へ戻すのと同じ扱いに揃える。
+        // 巻き戻しストックも、ライフ・酸素と同じくゲーム開始時の値まで回復させる。
         self.rewind_stock = REWIND_STOCK_INITIAL.min(self.rewind_stock_max);
     }
 
@@ -700,23 +615,20 @@ impl Game {
         self.try_lateral_move(Direction::Right)
     }
 
-    /// ←/→ 共通の処理本体。掘削は一切発生しないため、原則としてSE再生等の`GameEvent`は
-    /// 生じないが、移動先が酸素カプセルだった場合のみ取得イベントを発火する
-    /// (TERM独自拡張、spec.md 1章)。
+    /// ←/→ 共通の処理本体(spec.md 1章)。掘削は一切発生しないため原則として`GameEvent`は
+    /// 生じないが、移動先が酸素カプセル・アイテムだった場合のみ取得イベントを発火する。
     fn try_lateral_move(&mut self, dir: Direction) -> Vec<GameEvent> {
         if !self.consume_move_cooldown() {
             return Vec::new();
         }
         if !self.player_is_grounded() {
-            // ユーザー指摘: 「キャラは落ちる速度おそくなっても、落ちずに横移動する
-            // ことはできないものとする」「必ず落ちてから横移動が前提」。デバッグ
-            // ショートカットでプレイヤーの自由落下tickを遅くしていても、直下が
-            // 空いている(=次の自由落下tickで必ず1マス落ちる)間は横移動を受け付けない。
+            // 直下が空いている(=次の自由落下tickで必ず1マス落ちる)間は横移動を
+            // 受け付けない。デバッグで自由落下tickを遅くしていても同じ。
             return Vec::new();
         }
         if matches!(self.push_bomb_in_the_way(dir), BombInTheWay::HandledAsClimb) {
-            // 押し出せなかった場合は段差登り判定を自分で処理済み(TERM独自拡張。
-            // #161)なので、通常の物理判定(physics::move_lateral)は呼ばない。
+            // 押し出せなかった場合は段差登り判定を自分で処理済みなので、
+            // 通常の物理判定(physics::move_lateral)は呼ばない。
             return Vec::new();
         }
 
@@ -739,15 +651,11 @@ impl Game {
         }
     }
 
-    /// 移動先セルに静止中(Settling/Ticking、まだ登場・投擲演出中のEntering/Rolling
-    /// は対象外)のボムがあれば、進行方向へさらに1マス押し出す(TERM独自拡張。#149。
-    /// ユーザー指摘: 「爆弾はキャラが押したらそっちに転がる」)。押し出したボムは
-    /// Settling(左右バウンド中)へ遷移させ、以後は既存の重力・バウンド判定
-    /// (#140/#143/#144)にそのまま委ねる。押し出し先が盤面外・ブロック・他の
-    /// ボムで塞がっていて動かせない場合は、岩ブロックと同じ段差登り判定を自分で
-    /// 行う(TERM独自拡張。#161。ユーザー指摘: 「爆弾をブロック扱いして、登れる
-    /// ...ようにして」)。ボムが無い、またはまだ登場・投擲演出中であれば何もせず
-    /// `ClearToMove`を返す(通常の物理判定に委ねる)。
+    /// 移動先セルに静止中(Settling/Ticking)のボムがあれば、進行方向へさらに1マス押し
+    /// 出し、Settling(左右バウンド中)へ遷移させて以後の重力・バウンド判定に委ねる。
+    /// 押し出し先が盤面外・ブロック・他のボムで塞がっていれば、岩ブロックと同じ段差登り
+    /// 判定を自分で行う。ボムが無い、または登場・投擲演出中(Entering/Rolling)であれば
+    /// 何もせず`ClearToMove`を返す(通常の物理判定に委ねる)。
     fn push_bomb_in_the_way(&mut self, dir: Direction) -> BombInTheWay {
         let (_, dc) = dir.delta();
         let nc = self.player.col as isize + dc;
@@ -790,10 +698,9 @@ impl Game {
         BombInTheWay::ClearToMove
     }
 
-    /// 押し出せない静止中のボムに対し、岩ブロックと同じ「ぶつかって停止→同方向
-    /// 2回目で1段登る」段差登り判定を行う(TERM独自拡張。#161)。
-    /// `physics::move_lateral`の段差登りロジックと同じ判定式を踏襲しつつ、ボムは
-    /// Cellグリッド外のオーバーレイのため、対象をボムの有無に置き換える。
+    /// 押し出せない静止中のボムに対し、岩ブロックと同じ「ぶつかって停止→同方向2回目で
+    /// 1段登る」段差登り判定を行う。`physics::move_lateral`と同じ判定式を踏襲しつつ、ボムは
+    /// Cellグリッド外のオーバーレイのため、判定対象をボムの有無に置き換える。
     fn climb_over_unpushable_bomb(&mut self, dir: Direction, nc: usize) {
         let was_bumped_same_dir = self.player.bumped_direction == Some(dir);
         self.player.facing = dir;
@@ -817,7 +724,7 @@ impl Game {
         self.player.bumped_direction = Some(dir);
     }
 
-    /// 指定セルに静止中(Settling/Ticking)のボムがあるかどうか(TERM独自拡張。#161)。
+    /// 指定セルに静止中(Settling/Ticking)のボムがあるかどうか。
     fn settled_bomb_at(&self, row: usize, col: usize) -> bool {
         self.bombs.iter().any(|b| {
             b.pos == (row, col) && matches!(b.phase, BombPhase::Settling | BombPhase::Ticking)
@@ -825,9 +732,7 @@ impl Game {
     }
 
     /// ↑ キー: facingをUpに変更するのみ(移動・掘削は発生しない。spec.md 1章)。
-    ///
-    /// Left/Rightの2ステップ段差登り(TERM独自拡張)における「ぶつかって停止中」の
-    /// 状態もリセットする(方向キーを挟んだ場合の扱い)。
+    /// Left/Rightの2ステップ段差登りにおける「ぶつかって停止中」の状態もリセットする。
     pub fn face_up(&mut self) {
         if self.status == GameStatus::Playing && !self.is_input_frozen() {
             self.player.facing = Direction::Up;
@@ -836,9 +741,7 @@ impl Game {
     }
 
     /// ↓ キー: facingをDownに変更するのみ(移動・掘削は発生しない。spec.md 1章)。
-    ///
-    /// Left/Rightの2ステップ段差登り(TERM独自拡張)における「ぶつかって停止中」の
-    /// 状態もリセットする(方向キーを挟んだ場合の扱い)。
+    /// Left/Rightの2ステップ段差登りにおける「ぶつかって停止中」の状態もリセットする。
     pub fn face_down(&mut self) {
         if self.status == GameStatus::Playing && !self.is_input_frozen() {
             self.player.facing = Direction::Down;
@@ -853,14 +756,13 @@ impl Game {
             return events;
         }
 
-        // 掘削入力そのものに反応して、方向別のアニメーション(TERM独自拡張、9章)を
-        // 開始する。命中/空振りを問わず、入力があった事実に対して反応する。
+        // 方向別の掘削アニメーション(9章)を開始する。命中/空振りを問わず、入力が
+        // あった事実に対して反応する。
         self.drill_flash_remaining = Duration::from_millis(DRILL_ANIM_MS);
 
         if self.destroy_bomb_facing() {
-            // ボムを掘削で除去した(TERM独自拡張。#161。ユーザー指摘: 「爆弾を
-            // ブロック扱いして...掘れるようにして」)。岩ブロック等の通常の
-            // 掘削処理は行わない(プレイヤーの位置も変わらない)。
+            // ボムを掘削で除去した。岩ブロック等の通常の掘削処理は行わない
+            // (プレイヤーの位置も変わらない)。
             events.push(GameEvent::BlockDestroyed { blocks: 1 });
             return events;
         }
@@ -876,10 +778,9 @@ impl Game {
         events
     }
 
-    /// facing方向に静止中(Settling/Ticking)のボムがあれば掘削で除去する(TERM独自
-    /// 拡張。#161)。岩ブロックの破壊と違い爆発は誘発しない(単純に取り除くだけ)。
-    /// 除去した場合は`true`を返し、呼び出し側は通常の掘削処理をスキップする。
-    /// まだ登場・投擲演出中(Entering/Rolling)のボムは対象外。
+    /// facing方向に静止中(Settling/Ticking)のボムがあれば掘削で除去する。爆発は誘発
+    /// しない(単純に取り除くだけ)。除去した場合は`true`を返し、呼び出し側は通常の掘削
+    /// 処理をスキップする。まだ登場・投擲演出中(Entering/Rolling)のボムは対象外。
     fn destroy_bomb_facing(&mut self) -> bool {
         let (dr, dc) = self.player.facing.delta();
         let nr = self.player.row as isize + dr;
@@ -902,9 +803,8 @@ impl Game {
     }
 
     /// 移動系入力(MoveLeft/MoveRight)のクールダウン(spec.md 9.9)が明けているかを確認し、
-    /// 明けていればリセットする。Playing状態でない場合、またはクールダウン中は`false`を返す。
-    /// 掘削(Drill)とは独立したクールダウンなので、同一フレームで両方の入力が来ても
-    /// 互いをブロックしない(TERM独自拡張。ユーザー指摘対応)。
+    /// 明けていれば1スロット消費する。Playing状態でない、またはクールダウン中は`false`。
+    /// 掘削(Drill)とは独立しているので、同一フレームで両方の入力が来ても互いを妨げない。
     fn consume_move_cooldown(&mut self) -> bool {
         if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
@@ -913,15 +813,14 @@ impl Game {
         if self.move_cooldown_accum < slot {
             return false;
         }
-        // 0へリセットせず、消費した1スロットぶんだけ差し引く。ターミナルのキー
-        // リピートがちょうどクールダウン周期をわずかに過ぎたタイミングで届いた
-        // 場合、その超過ぶんは次のスロットへ繰り越される(TERM独自拡張)。
+        // 0へリセットせず、消費した1スロットぶんだけ差し引く。キーリピートがクール
+        // ダウン周期をわずかに過ぎて届いた場合、その超過ぶんは次のスロットへ繰り越す。
         self.move_cooldown_accum -= slot;
         true
     }
 
-    /// 掘削系入力(Drill)のクールダウンが明けているかを確認し、明けていればリセットする。
-    /// 移動(MoveLeft/MoveRight)とは独立したクールダウン(TERM独自拡張)。
+    /// 掘削系入力(Drill)のクールダウンが明けているかを確認し、明けていれば1スロット
+    /// 消費する。移動(MoveLeft/MoveRight)とは独立したクールダウン。
     fn consume_drill_cooldown(&mut self) -> bool {
         if self.status != GameStatus::Playing || self.is_input_frozen() {
             return false;
@@ -965,10 +864,9 @@ impl Game {
         }
     }
 
-    /// アイテムブロックの効果を実際に発動し、対応するイベントを追加する(TERM独自拡張。
-    /// AIRと同様「触れるだけで取得」のため、横移動・自由落下・重力ティックでの落下
-    /// 着地、いずれの取得経路からも共通で呼ばれる。ユーザー指摘: 「アイテムはAIRと
-    /// 同じ用に掘らなくても取得でき、上から振ってきても死なないように」)。
+    /// アイテムブロックの効果を実際に発動し、対応するイベントを追加する。AIRと同様
+    /// 「触れるだけで取得」のため、横移動・自由落下・重力ティックでの落下着地、いずれの
+    /// 取得経路からも共通で呼ばれる。
     fn apply_item_effect(&mut self, effect: ItemEffect, events: &mut Vec<GameEvent>) {
         match effect {
             ItemEffect::ClearAbove => self.debug_clear_above_player(),
@@ -990,20 +888,14 @@ impl Game {
         }
     }
 
-    /// ミス(酸素切れ/押し潰し)を処理する(spec.md 8章)。原因を問わず全く同じ処理を行う
-    /// (TERM独自拡張。ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと
-    /// 同じ処理」。以前は押し潰しのみ「潰れた」フラッシュ・「天に召される」演出付きで、
-    /// 酸素切れは即座に処理する別扱いだったが、統一した)。
+    /// ミス(酸素切れ/押し潰し/爆風)を処理する(spec.md 8章)。原因を問わず同じ処理を行う。
     ///
-    /// ライフが残っていれば「天に召される」演出(`ascending_remaining`、TERM独自拡張)から
-    /// 開始し、死亡地点の3列クリア・ライフ減算・酸素回復は演出が終わるまで`update()`側で
-    /// 遅延させる(ユーザー指摘: 「潰れたとき、もっとわかりやすいように死んで、一度天に
-    /// 召される演出をして、ブロックが消える処理されてから、元の位置に復活」)。ライフが
-    /// 0になる場合はこの演出を行わず、従来通り即座にGameOverダイアログへ進む
-    /// (ユーザー指摘: 「livesが0になったときはただちにゲームオーバーのダイアログ出てOK」)。
+    /// ライフが残っていれば「天に召される」演出(`ascending_remaining`)から開始し、死亡
+    /// 地点の3列クリア・ライフ減算・酸素回復は演出が終わるまで`update()`側で遅延させる。
+    /// ライフが0になる場合はこの演出を行わず、即座にGameOverダイアログへ進む。
     ///
-    /// 無敵(`set_invincible`)が有効な場合は、ライフ処理・演出を一切行わず
-    /// `avert_miss`(回避として記録するだけ)へ振り替える(TERM独自拡張。#218)。
+    /// 無敵(`set_invincible`)が有効な場合は、ライフ処理・演出を一切行わず`avert_miss`
+    /// (回避として記録するだけ)へ振り替える。
     fn apply_miss(&mut self, cause: MissCause, events: &mut Vec<GameEvent>) {
         self.log_miss(cause, self.invincible);
 
@@ -1023,17 +915,14 @@ impl Game {
             return;
         }
 
-        // ライフ減算・酸素回復自体は演出完了まで遅延する(tick_ascending)が、
-        // 死亡SEはミスが発生した瞬間に即座に鳴らす(TERM独自拡張。ユーザー指摘:
-        // 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSE鳴らして
-        // ほしい」。演出完了まで3秒近く無音だったバグの修正)。
+        // ライフ減算・酸素回復自体は演出完了まで遅延する(tick_ascending)が、死亡SEは
+        // ミスが発生した瞬間に即座に鳴らす(遅らせると演出完了まで3秒近く無音になる)。
         events.push(GameEvent::LifeLost { cause });
         self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
     }
 
-    /// 無敵中にミスが起きた場合の処理(TERM独自拡張。#218)。ライフ・ステータス・
-    /// 演出には一切触れず、回避したことを記録した上で、そのまま放置すると同じミスが
-    /// 毎フレーム再発してしまう原因についてだけ最小限の後始末を行う。
+    /// 無敵中にミスが起きた場合の処理。ライフ・ステータス・演出には一切触れず、回避した
+    /// ことを記録した上で、放置すると同じミスが毎フレーム再発する原因だけを後始末する。
     fn avert_miss(&mut self, cause: MissCause, events: &mut Vec<GameEvent>) {
         self.misses_averted = self.misses_averted.saturating_add(1);
 
@@ -1052,7 +941,7 @@ impl Game {
                 if cell != Cell::Empty {
                     self.board.set(pos.0, pos.1, Cell::Empty);
                     // 押し潰しは重力tick内で起きるため、押し潰したブロック自身も
-                    // まだ落下補間の途中にいる。到着を待ってからフラッシュする(#234)。
+                    // まだ落下補間の途中にいる。到着を待ってからフラッシュする。
                     let delay = self.gravity_vanish_delay();
                     self.note_vanished_cells([(pos, cell)], delay);
                 }
@@ -1066,8 +955,8 @@ impl Game {
         events.push(GameEvent::MissAverted { cause });
     }
 
-    /// ミスの発生(および無敵による回避)をデバッグログへ1行記録する(TERM独自拡張。
-    /// #218)。ログが無効(`debug_log`が`None`)なら何もしない。
+    /// ミスの発生(および無敵による回避)をデバッグログへ1行記録する。ログが無効
+    /// (`debug_log`が`None`)なら何もしない。
     fn log_miss(&self, cause: MissCause, averted: bool) {
         if let Some(log) = &self.debug_log {
             let (row, col) = self.player.position();
@@ -1075,23 +964,23 @@ impl Game {
         }
     }
 
-    /// 無敵(ミス無効)を切り替える(TERM独自拡張。#218)。ソークテストや動作確認で、
-    /// 死なずに長時間プレイし続けるためのデバッグ機能。
+    /// 無敵(ミス無効)を切り替える。ソークテストや動作確認で、死なずに長時間プレイし
+    /// 続けるためのデバッグ機能。
     pub fn set_invincible(&mut self, on: bool) {
         self.invincible = on;
     }
 
-    /// 現在、無敵(ミス無効)かどうか(TERM独自拡張。#218)。
+    /// 現在、無敵(ミス無効)かどうか。
     pub fn is_invincible(&self) -> bool {
         self.invincible
     }
 
-    /// 無敵によって回避されたミスの累計回数(TERM独自拡張。#218)。
+    /// 無敵によって回避されたミスの累計回数。
     pub fn misses_averted(&self) -> u32 {
         self.misses_averted
     }
 
-    // --- フレーム巻き戻し(TERM独自拡張。#233) -------------------------------
+    // --- フレーム巻き戻し ---------------------------------------------------
 
     /// 残っている巻き戻しの使用回数。HUD表示・GameOverダイアログのヒントが参照する。
     pub fn rewind_stock(&self) -> u8 {
@@ -1111,27 +1000,21 @@ impl Game {
     }
 
     /// 巻き戻しを開始できるか。ストックが残っていて、かつプレイ中(昇天演出中を含む)か
-    /// GameOver中であること。一時停止中・クリア後は開始できない。
-    ///
-    /// 履歴(スナップショット)が1つでもあるかどうかは`Game`の外(`rewind::RewindHistory`)
-    /// が別途判定する。
+    /// GameOver中であること(一時停止中・クリア後は開始できない)。履歴が1つでもあるか
+    /// どうかは`Game`の外(`rewind::RewindHistory`)が別途判定する。
     pub fn can_start_rewind(&self) -> bool {
         self.rewind_stock > 0 && matches!(self.status, GameStatus::Playing | GameStatus::GameOver)
     }
 
-    /// 現在の状態をスナップショットとして履歴へ残してよいか。
-    ///
-    /// 「天に召される」演出中(`is_dying`)は記録しない。これにより履歴の最新は常に
-    /// 「まだ生きていた最後の瞬間」になり、押し潰された直後に巻き戻すという主要な
-    /// 使い方で、死んだ状態そのものへ戻ってしまうことがなくなる。
+    /// 現在の状態をスナップショットとして履歴へ残してよいか。「天に召される」演出中
+    /// (`is_dying`)は記録しない。これにより履歴の最新は常に「まだ生きていた最後の瞬間」
+    /// になり、押し潰された直後に巻き戻しても死んだ状態そのものへは戻らない。
     pub fn is_rewind_capturable(&self) -> bool {
         self.status == GameStatus::Playing && !self.is_dying()
     }
 
-    /// スナップショットの状態へ戻す。
-    ///
-    /// 盤面・プレイヤー・ボム・各種タイマー・演出フラグ・乱数(`rng`)は`Game`を丸ごと
-    /// 差し替えることでまとめて巻き戻す。一方で以下は「現在の値」を持ち越す:
+    /// スナップショットの状態へ戻す。盤面・プレイヤー・ボム・各種タイマー・演出フラグ・
+    /// 乱数(`rng`)は`Game`を丸ごと差し替えてまとめて巻き戻すが、以下は現在の値を持ち越す:
     ///
     /// - `frame_counter`: デバッグログのフレーム番号を単調増加に保つため
     /// - `debug_log`: 記録先は巻き戻しの対象ではないため(同じ`Rc`を維持する)
@@ -1160,11 +1043,10 @@ impl Game {
         }
     }
 
-    /// 移動・向き・掘削の5操作を1つの入口へまとめたもの(TERM独自拡張。#218)。
-    /// main.rsの手入力処理と、オートプレイ(`autoplay::Autopilot`)が返す仮想入力の
-    /// 両方がこれを通ることで、AIが人間と同じ経路でしかゲームを動かせないことを
-    /// 保証する。上記5つ以外の`InputAction`は`Game`の内部状態を変えない(一時停止・
-    /// 画面遷移・設定変更等はmain.rsが解釈する)ため、ここでは何もしない。
+    /// 移動・向き・掘削の5操作を1つの入口へまとめたもの。main.rsの手入力処理と、オート
+    /// プレイ(`autoplay::Autopilot`)が返す仮想入力の両方がこれを通ることで、AIが人間と
+    /// 同じ経路でしかゲームを動かせないことを保証する。それ以外の`InputAction`は`Game`の
+    /// 内部状態を変えない(main.rsが解釈する)ため、ここでは何もしない。
     pub fn apply_input(&mut self, action: InputAction) -> Vec<GameEvent> {
         match action {
             InputAction::MoveLeft => self.try_move_left(),
@@ -1182,10 +1064,9 @@ impl Game {
         }
     }
 
-    /// セル`(row, col)`が「落ちてくる可能性がある」かどうか(TERM独自拡張。#218)。
-    /// 支えを失っている塊、または揺れの猶予期間中(これから落ちる予告状態)の塊に
-    /// 属していれば`true`。Empty/AIR/アイテムは落下の脅威にならないため常に`false`。
-    /// オートプレイが頭上・移動先の安全確認に使う。
+    /// セル`(row, col)`が「落ちてくる可能性がある」かどうか。支えを失っている塊、または
+    /// 揺れの猶予期間中(これから落ちる予告状態)の塊に属していれば`true`。Empty/AIR/
+    /// アイテムは脅威にならないため常に`false`。オートプレイが安全確認に使う。
     pub fn is_cell_unstable(&self, row: usize, col: usize) -> bool {
         if row >= self.board.depth_rows() || col >= self.board.width() {
             return false;
@@ -1198,12 +1079,10 @@ impl Game {
         )
     }
 
-    /// 「天に召される」演出(TERM独自拡張)の進行を1フレームぶん進める。演出中は
-    /// `is_input_frozen`経由でプレイヤー自身の入力・自由落下・酸素減少だけが凍結され、
-    /// 周囲の他の落下ブロックの重力処理は止めない(ユーザー指摘: 「潰れた瞬間も
-    /// まわりの落下アニメーションを止めない」)。演出が終わった瞬間、死亡地点の3列
-    /// クリア・押し潰したブロック自体のクリア・ライフ減算・酸素回復をまとめて行い、
-    /// その場に復活する。
+    /// 「天に召される」演出の進行を1フレームぶん進める。演出中は`is_input_frozen`経由で
+    /// プレイヤー自身の入力・自由落下・酸素減少だけが凍結され、周囲の落下ブロックの重力
+    /// 処理は止めない。演出が終わった瞬間、死亡地点の3列クリア・押し潰したブロック自体の
+    /// クリア・ライフ減算・酸素回復をまとめて行い、その場に復活する。
     fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) {
         let Some(remaining) = self.ascending_remaining else {
             return;
@@ -1211,10 +1090,9 @@ impl Game {
         let remaining = remaining.saturating_sub(delta);
         if remaining == Duration::ZERO {
             self.ascending_remaining = None;
-            // 押し潰したブロック自体は演出中ずっと見えるようにその場に残していた
-            // (ユーザー指摘: 「潰れる直前で消えてしまう」「潰した様子が認識できる
-            // ように」)。復活するのでここで消す(死亡時の盤面処理より先に行い、
-            // この演出用の残骸をブロック/キャラ重なり解消(#176)の対象にしない)。
+            // 押し潰したブロック自体は、潰された様子が見えるよう演出中その場に残して
+            // いた。復活するのでここで消す(死亡時の盤面処理より先に行い、この演出用の
+            // 残骸をブロック/キャラ重なり解消の対象にしない)。
             self.board
                 .set(self.player.row, self.player.col, Cell::Empty);
             self.resolve_death_board_effects(events);
@@ -1224,20 +1102,17 @@ impl Game {
                 "ライフ0のケースはapply_missで即座に処理済みのはず"
             );
             self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
-            // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に
-            // 発火済みのため、ここでは重複して発火しない。復活した瞬間のSEは
-            // ここで発火する(TERM独自拡張。ユーザー指摘: 「死んで、復活したときの
-            // SEほしい」)。
+            // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に発火済み
+            // のため重複させない。復活した瞬間のSEだけをここで発火する。
             events.push(GameEvent::Revived);
         } else {
             self.ascending_remaining = Some(remaining);
         }
     }
 
-    /// 「わ〜!」スライダー演出(TERM独自拡張)の進行を1フレームぶん進める。演出中
-    /// (スライダー/硬直のいずれか)は`is_input_frozen`経由で入力のみが凍結され、
-    /// 重力・自由落下・酸素減少は通常通り進み続ける(ユーザー指摘: 「ゲーム全体が
-    /// 止まってるように見える」)。
+    /// 「わ〜!」スライダー演出の進行を1フレームぶん進める。演出中(スライダー/硬直の
+    /// いずれか)は`is_input_frozen`経由で入力のみが凍結され、重力・自由落下・酸素減少は
+    /// 通常通り進み続ける(全体が止まって見えないようにするため)。
     fn tick_dodge(&mut self, delta: Duration) {
         match self.dodge_stage {
             DodgeStage::None => {}
@@ -1268,30 +1143,23 @@ impl Game {
         if level > self.last_level_reported {
             self.last_level_reported = level;
             events.push(GameEvent::LevelUp { level });
-            // Lv.10ごとにライフ+1(TERM独自拡張。#169。ユーザー指摘:
-            // 「Lv.10ごとにLive+1」)。LIVES_MAXでクランプする。
+            // Lv.10ごとにライフ+1(LIVES_MAXでクランプする)。
             if level.is_multiple_of(10) {
                 self.player.lives = (self.player.lives + 1).min(LIVES_MAX);
                 events.push(GameEvent::ExtraLifeAtLevel { level });
             }
         }
 
-        // チェックポイント(100mごと、TERM独自拡張。#178/#190)。7章のレベル進行
-        // (30m刻み、表示のみ)とは別に、地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に
-        // 掘り抜いた地点で頭上を全クリアしゴールSE・演出を出す(ユーザー指摘:
-        // 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。地面に
-        // ついたら次、じゃなくて」)。地面部分はもう強制的にくり抜かない(#189までは
-        // 先行くり抜きしていたが、通常のドリル移動でプレイヤー自身が掘り進む対象に
-        // した)ため、ここでのくり抜きはスキマ(`CHECKPOINT_ZONE_GAP_M`)のみが対象。
-        // 最終ゴール(depth_goal_m)ちょうどは、Clearedイベント自体が同じ役割の演出を
-        // 持つため、ここでは二重に発火させない(イージーコースでは500mがゴールに
-        // なるため、500mのボーナスフロア処理も自動的にここでスキップされる)。
+        // チェックポイント(100mごと)。7章のレベル進行(30m刻み、表示のみ)とは別に、
+        // 地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた地点で頭上を全クリアし、
+        // ゴールSE・演出を出す。地面部分はプレイヤー自身がドリルで掘り進む対象なので、
+        // ここでのくり抜きはスキマ(`CHECKPOINT_ZONE_GAP_M`)のみが対象。最終ゴール
+        // (depth_goal_m)ちょうどはClearedイベントが同じ役割の演出を持つため二重に発火
+        // させない(イージーコースの500mボーナスフロアも自動的にここでスキップされる)。
         //
-        // 通常のプレイでは`check_level_and_clear`は行が1つ変化するたびに呼ばれるため、
-        // ここでのチェックポイント区切りの増分は常に高々1のはず。2つ以上一気に
-        // 進む場合があるとすれば、それはテスト等が`player.row`を直接遠くへ書き換えた
-        // ような非正規経路であり、そのタイミングで頭上を破壊的に全クリアするのは
-        // 意図と異なる。そうしたジャンプは区切り番号の追従だけ行い、演出は出さない。
+        // 通常のプレイでは行が1つ変化するたびに呼ばれるため区切りの増分は常に高々1。
+        // 2つ以上一気に進むのはテスト等が`player.row`を直接書き換えた非正規経路であり、
+        // そこで頭上を破壊的に全クリアするのは意図と異なるので、番号の追従だけ行う。
         let checkpoint = checkpoint_index_for_depth(self.player.depth_m());
         if checkpoint > self.last_checkpoint_reported {
             let skipped_ahead = checkpoint > self.last_checkpoint_reported + 1;
@@ -1302,7 +1170,7 @@ impl Game {
                 self.apply_checkpoint_safe_zone(at_m);
                 self.checkpoint_flash_remaining = Duration::from_millis(CHECKPOINT_FLASH_MS);
                 self.checkpoint_flash_depth_m = at_m;
-                // 巻き戻しストックの補充(TERM独自拡張。#233)。上限を超えては増えない。
+                // 巻き戻しストックの補充(上限を超えては増えない)。
                 self.rewind_stock = self
                     .rewind_stock
                     .saturating_add(REWIND_STOCK_PER_CHECKPOINT)
@@ -1316,8 +1184,8 @@ impl Game {
             events.push(GameEvent::Cleared);
         }
 
-        // アイテムブロック3種の窓補充(TERM独自拡張。#210/#211)。行が進むたびに
-        // 窓(プレイヤーの現在行+ITEM_WINDOW_AHEAD_ROWS)を前進させる。
+        // アイテムブロック3種の窓補充。行が進むたびに窓(プレイヤーの現在行
+        // +ITEM_WINDOW_AHEAD_ROWS)を前進させる。
         self.top_up_items_ahead();
     }
 
@@ -1326,11 +1194,8 @@ impl Game {
         let mut events = Vec::new();
         self.frame_counter += 1;
 
-        // このフレームのブロック変化ログをまとめて1トランザクションにし(TERM独自拡張。
-        // ユーザー指摘: 「あとちょっともっさりしてるからinsert高速化したい」)、
-        // キャラの位置・向き・ステータスもフレームに1回だけ記録する(TERM独自拡張。
-        // ユーザー指摘: 「どういう種類のブロックがっていう情報とキャラの向きや位置、
-        // ステータスって残ってないと思うけど大丈夫？」)。
+        // このフレームのブロック変化ログをまとめて1トランザクションにし(insertの
+        // 高速化)、キャラの位置・向き・ステータスもフレームに1回だけ記録する。
         if let Some(log) = &self.debug_log {
             log.begin_frame();
             log.log_player_state(
@@ -1348,8 +1213,8 @@ impl Game {
         self.checkpoint_flash_remaining = self.checkpoint_flash_remaining.saturating_sub(delta);
         self.render_anim_elapsed += delta.as_secs_f32();
         // 消滅フラッシュは、まず開始待ち(`delay`)を消化し、余った時間だけフラッシュ本体
-        // (`remaining`)を進める(TERM独自拡張。#234)。待機中はまだ落下ブロックが空中に
-        // いるため、光り始めずに消滅直前の見た目を保持する。
+        // (`remaining`)を進める。待機中はまだ落下ブロックが空中にいるため、光り始めずに
+        // 消滅直前の見た目を保持する。
         for entry in self.recently_vanished.iter_mut() {
             let mut rest = delta;
             if entry.delay > Duration::ZERO {
@@ -1369,10 +1234,10 @@ impl Game {
 
         if self.status != GameStatus::Playing {
             // GameOverになった瞬間に落下中だったブロック(押し潰したブロック自身を含む)の
-            // 補間を、着地位置まで進め切ってから止める(TERM独自拡張。#234)。ここで
-            // 早期returnすると`fall_tick_accum`が進まず、空中の中途半端な位置で凍り付いた
-            // ままフラッシュ→GameOverオーバーレイへ移ってしまう。一時停止(Paused)は
-            // 対象外(再開時に大きなdeltaがまとめて来てtickが飛ぶのを避けるため)。
+            // 補間を、着地位置まで進め切ってから止める。ここで早期returnすると
+            // `fall_tick_accum`が進まず、空中の中途半端な位置で凍り付いたままフラッシュ→
+            // GameOverオーバーレイへ移ってしまう。一時停止(Paused)は対象外(再開時に
+            // 大きなdeltaがまとめて来てtickが飛ぶのを避けるため)。
             if self.status == GameStatus::GameOver {
                 let tick = Duration::from_millis(self.effective_block_fall_tick_ms());
                 self.fall_tick_accum = (self.fall_tick_accum + delta).min(tick);
@@ -1380,26 +1245,22 @@ impl Game {
             return events;
         }
 
-        // 「天に召される」演出中(TERM独自拡張)は、プレイヤー自身の入力・自由落下・
-        // 酸素減少のみを凍結する。周囲の他の落下ブロックの重力処理は止めない
-        // (ユーザー指摘: 「潰れた瞬間もまわりの落下アニメーションを止めない」)。
-        // 演出が終わった時点でのブロッククリア・ライフ減算・酸素回復はtick_ascending内で行う。
+        // 「天に召される」演出中は、プレイヤー自身の入力・自由落下・酸素減少のみを凍結し、
+        // 周囲の落下ブロックの重力処理は止めない。演出完了時のブロッククリア・ライフ
+        // 減算・酸素回復はtick_ascending内で行う。
         //
-        // 演出が完了したかどうかは、この呼び出し**前**の状態で判定して以降の処理に使う
-        // (`was_dying`)。tick_ascending呼び出し後にis_dying()を都度見てしまうと、演出が
-        // ちょうどこのフレームで完了した場合、余った経過時間ぶんが「復活直後のプレイヤー」
-        // へその場でさらに酸素減少・クールダウン加算として二重に適用されてしまう
-        // (演出完了時に酸素を全回復させた直後、同じフレーム内で減衰させてしまうバグ)。
+        // 完了したかどうかは、この呼び出し**前**の状態(`was_dying`)で判定する。呼び出し後に
+        // is_dying()を見ると、演出がこのフレームで完了した場合に余った経過時間が「復活直後
+        // のプレイヤー」へ適用され、全回復させた酸素を同じフレーム内で減衰させてしまう。
         let was_dying = self.is_dying();
         self.tick_ascending(delta, &mut events);
 
-        // 「わ〜!」スライダー演出中(TERM独自拡張)は入力のみを凍結する(is_input_frozen
-        // が各入力ハンドラで担う)。ユーザー指摘: 「ゲーム全体が止まってるように見える」
-        // を受け、周囲の重力・自由落下・酸素減少は止めない。
+        // 「わ〜!」スライダー演出中は入力のみを凍結する(is_input_frozenが各入力ハンドラ
+        // で担う)。周囲の重力・自由落下・酸素減少は止めない。
         self.tick_dodge(delta);
 
-        // ヒヤリ回避スライダーの監視対象セル(TERM独自拡張)の有効期限を進める。
-        // 揺れていたブロックが監視対象セルへ実際に落下する前に期限が切れたら監視解除する。
+        // ヒヤリ回避スライダーの監視対象セルの有効期限を進める。揺れていたブロックが
+        // 監視対象セルへ実際に落下する前に期限が切れたら監視解除する。
         if self.dodge_watch_cell.is_some() {
             self.dodge_watch_remaining = self.dodge_watch_remaining.saturating_sub(delta);
             if self.dodge_watch_remaining == Duration::ZERO {
@@ -1407,16 +1268,14 @@ impl Game {
             }
         }
 
-        // 「天に召される」演出中は、プレイヤー自身に関する経過処理(酸素減少・
-        // クールダウン)だけを凍結する。演出がこのフレームで完了した場合も、
-        // 復活直後の二重減衰を避けるため`was_dying`(呼び出し前の状態)で判定し、
-        // このフレームでは通常処理を再開しない(次のフレームから再開する)。
+        // 「天に召される」演出中は、プレイヤー自身に関する経過処理(酸素減少・クール
+        // ダウン)だけを凍結する。復活直後の二重減衰を避けるため`was_dying`(呼び出し前の
+        // 状態)で判定し、演出がこのフレームで完了しても再開は次のフレームからにする。
         if !was_dying {
             self.player.elapsed_seconds += delta.as_secs_f32();
 
-            // 移動クールダウンは設定で変えられるため、上限も現在の値の1.5倍で都度計算する
-            // (TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
-            // 掘削クールダウンは引き続き固定値なので、既存の定数上限のままでよい。
+            // 移動クールダウンは設定で変えられるため、上限も現在の値の1.5倍で都度計算
+            // する。掘削クールダウンは固定値なので既存の定数上限のままでよい。
             let move_accum_cap =
                 Duration::from_millis(self.move_cooldown_ms + self.move_cooldown_ms / 2);
             let drill_accum_cap = Duration::from_millis(INPUT_COOLDOWN_ACCUM_CAP_MS);
@@ -1424,8 +1283,7 @@ impl Game {
             self.drill_cooldown_accum = (self.drill_cooldown_accum + delta).min(drill_accum_cap);
             self.drill_flash_remaining = self.drill_flash_remaining.saturating_sub(delta);
 
-            // 深度が進むほど酸素の自然減少が速くなる(TERM独自拡張。ユーザー指摘:
-            // 「進むにつれてAIRの減る速度が早い」)。経過時間そのものを実効倍率ぶん
+            // 深度が進むほど酸素の自然減少を速くする。経過時間そのものを実効倍率ぶん
             // 引き伸ばすことで、`OXYGEN_DECAY_PER_SEC`(秒あたりの基準減少量)は変えずに
             // 実質的な減少速度だけを深度に応じて上げる。
             let oxygen_decay_multiplier = 1.0
@@ -1453,35 +1311,30 @@ impl Game {
             }
         }
 
-        // 深度が進むほどブロック落下速度が上がる(TERM独自拡張。ユーザー指摘:
-        // 「階層が進むにつれてだんだんとブロックの落ちる速度があがり」)。設定画面/
-        // デバッグショートカットで調整した`block_fall_tick_ms`を「深度0mでの速度」
-        // として扱い、そこから深度に応じてtick間隔を短縮する。
+        // 深度が進むほどブロック落下速度を上げる。設定画面/デバッグショートカットで
+        // 調整した`block_fall_tick_ms`を「深度0mでの速度」として扱い、そこから深度に
+        // 応じてtick間隔を短縮する。
         let effective_tick_ms = self.effective_block_fall_tick_ms();
         self.fall_tick_accum += delta;
         let tick = Duration::from_millis(effective_tick_ms);
         while self.fall_tick_accum >= tick {
             self.fall_tick_accum -= tick;
 
-            // 自動消滅の連鎖インターバル(TERM独自拡張。#187。ユーザー指摘: 「ブロックが
-            // 消えて、連鎖的に次ブロックが消えるとき、0msで連続するのではなく一定の
-            // インターバルで連鎖するように」)。直前の自動消滅から`chain_vanish_interval_ms`
-            // が経過していなければ、この1tickぶんは重力解決自体を足止めする(既定の0では
-            // 何もしない=従来通り即座に解決する)。
+            // 自動消滅の連鎖インターバル。直前の自動消滅から`chain_vanish_interval_ms`が
+            // 経過していなければ、この1tickぶんは重力解決自体を足止めする(既定の0なら
+            // 何もしない=即座に解決する)。
             if self.chain_pause_remaining > Duration::ZERO {
                 self.chain_pause_remaining = self.chain_pause_remaining.saturating_sub(tick);
-                // 足止めするtickでも、前tickの落下補間はここで完了として確定させる
-                // (TERM独自拡張。#234)。`last_block_moves`を残したままにすると、
-                // 足止め中に同じ移動の補間が0から再生され、着地済みのブロックが
-                // 巻き戻って見えてしまう。
+                // 足止めするtickでも、前tickの落下補間はここで完了として確定させる。
+                // `last_block_moves`を残したままにすると、足止め中に同じ移動の補間が
+                // 0から再生され、着地済みのブロックが巻き戻って見えてしまう。
                 self.last_block_moves.clear();
                 continue;
             }
 
-            // 「天に召される」演出中(TERM独自拡張)も重力処理自体は止めないため、
-            // プレイヤーの論理位置は演出完了まで押し潰された地点に固定されたままになる。
-            // その間に別の塊が同じ地点へ落ちてきても二重にライフを失わないよう、
-            // 演出中は無敵として扱う(既存の`invulnerability_ticks_remaining`と同じ仕組み)。
+            // 「天に召される」演出中も重力処理自体は止めないため、プレイヤーの論理位置は
+            // 演出完了まで押し潰された地点に固定されたままになる。その間に別の塊が同じ
+            // 地点へ落ちてきても二重にライフを失わないよう、演出中は無敵として扱う。
             let invulnerable = self.invulnerability_ticks_remaining > 0 || self.is_dying();
             let shake_ticks = self.shake_ticks();
             let result = physics::process_gravity_tick(
@@ -1492,20 +1345,16 @@ impl Game {
                 shake_ticks,
             );
             // `invulnerable`は「天に召される」演出中(is_dying)にも真になるが、その場合
-            // `invulnerability_ticks_remaining`自体は0のままなので、実際にカウンタが
-            // 動いている場合のみ減算する(0からの減算でオーバーフローするのを防ぐ)。
+            // カウンタ自体は0のままなので、動いている場合のみ減算する(0からの減算で
+            // オーバーフローするのを防ぐ)。
             if self.invulnerability_ticks_remaining > 0 {
                 self.invulnerability_ticks_remaining -= 1;
             }
 
             // ブロックが落ち始める直前に移動して間一髪回避した場合、「わ〜!」スライダー
-            // 演出を発火する(TERM独自拡張。ユーザー指摘: 「ブロックが落ち始める直前に
-            // 移動してにげたとき、「わ〜!」ってスライダー(アニメーションしてねキャラ)
-            // して切り間に合う感じ」)。`dodge_watch_cell`は移動前の頭上が実際に揺れて
-            // いた場合のみ設定されている(単に「最近動いた」だけでは発火しない。
-            // ユーザー指摘: 「そもそも避けてないのに発動してるように見える」)ため、
-            // その監視対象セルへちょうど今ブロックが着地した場合のみ発火する
-            // (押し潰された場合や、既に演出中の場合は対象外)。
+            // 演出を発火する。`dodge_watch_cell`は移動前の頭上が実際に揺れていた場合のみ
+            // 設定されているため、その監視対象セルへちょうど今ブロックが着地した場合だけ
+            // 発火する(押し潰された場合や、既に演出中の場合は対象外)。
             if !result.life_lost_to_crush
                 && !self.is_dying()
                 && self.dodge_stage == DodgeStage::None
@@ -1542,14 +1391,13 @@ impl Game {
             }
             if result.auto_vanished_rock_blocks > 0 {
                 // 岩ブロックの自動消滅は得点対象外だが、専用の破壊音を鳴らす
-                // (spec.md 4.9・10章。TERM独自拡張。ユーザー指摘: 「Xブロックを
-                // 壊したときに専用SEを鳴らす」)。
+                // (spec.md 4.9・10章)。
                 events.push(GameEvent::RockDestroyed {
                     blocks: result.auto_vanished_rock_blocks,
                 });
             }
             // 重力tickで消えたセルは、落下補間が終わる(=次のtickが来る)まで待ってから
-            // フラッシュを始める(TERM独自拡張。#234)。
+            // フラッシュを始める。
             let vanish_delay = self.gravity_vanish_delay();
             self.note_vanished_cells(result.vanished_cells, vanish_delay);
             self.purge_checkpoint_zone_debris(vanish_delay);
@@ -1570,11 +1418,9 @@ impl Game {
             }
         }
 
-        // スターブロックの溶解は実時間(ms)で進む(TERM独自拡張。ユーザー指摘:
-        // 「スターブロックは画面内に見えてから5秒たったら消えはじめること」)。
-        // ブロック落下tick(深度に応じて間隔が変わる`effective_tick_ms`)とは切り離し、
-        // このフレームの実経過時間`delta`そのもので進行させることで、深度によらず
-        // 常に一定の猶予時間になる。
+        // スターブロックの溶解は実時間(ms)で進む。深度に応じて間隔が変わるブロック落下
+        // tick(`effective_tick_ms`)とは切り離し、このフレームの実経過時間`delta`そのもの
+        // で進行させることで、深度によらず常に一定の猶予時間になる。
         let melted = tick_star_melting(&mut self.board, self.player.row, delta.as_millis() as u32);
         if !melted.is_empty() {
             events.push(GameEvent::BlockDestroyed {
@@ -1584,19 +1430,15 @@ impl Game {
             self.note_vanished_cells(melted, Duration::ZERO);
         }
 
-        // ボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、爆弾をランダムに投げて
-        // くるイメージで、敵は出現しないものとする」)。「天に召される」演出中は
-        // 位置の食い違いを避けるため、他のプレイヤー関連処理と同様に進行を止める。
+        // ボムの進行。「天に召される」演出中は位置の食い違いを避けるため、他のプレイヤー
+        // 関連処理と同様に止める。
         if !was_dying {
             let delta_ms = delta.as_millis() as u32;
             let mut exploded = Vec::new();
-            // 他のボムの現在位置のスナップショット(TERM独自拡張。#143。ユーザー指摘:
-            // 「爆弾は爆弾に重ならないようにする」)。ボムはCellグリッドとは別の
-            // オーバーレイ(`Vec<Bomb>`)のため、盤面のセルだけを見て重力・バウンドを
-            // 判定すると他のボムへ重なって落下・移動してしまう。このフレーム開始時点の
-            // 位置で判定するため、同一フレーム内で複数のボムがほぼ同時に同じマスへ
-            // 動こうとする極めて稀なケースでは1フレームだけ一時的にずれる場合がある
-            // (次フレームで解消される)。
+            // 他のボムの現在位置のスナップショット。ボムはCellグリッドとは別のオーバー
+            // レイ(`Vec<Bomb>`)のため、盤面のセルだけを見て重力・バウンドを判定すると
+            // 他のボムへ重なってしまう。このフレーム開始時点の位置で判定するので、複数の
+            // ボムがほぼ同時に同じマスへ動く稀なケースでは1フレームだけずれる(次で解消)。
             let bomb_positions: Vec<board::Pos> = self.bombs.iter().map(|b| b.pos).collect();
             for (i, bomb) in self.bombs.iter_mut().enumerate() {
                 match bomb.phase {
@@ -1616,16 +1458,13 @@ impl Game {
                         }
                     }
                     BombPhase::Settling => {
-                        // 支えを失っていれば落下しつつ、支持されていれば左右に跳ねて
-                        // 落ち着き先を探す(TERM独自拡張。#140。ユーザー指摘: 「爆弾は
-                        // 宙に浮かないように落ちること、落ちたら、またはねまくること
-                        // 左右に壁をぶつかり行き来しながらいいところで泊まる」)。
-                        // `BOMB_SETTLE_TICK_MS`ごとに1歩ぶん進める。
+                        // 支えを失っていれば落下し、支持されていれば左右に跳ねて落ち着き
+                        // 先を探す。`BOMB_SETTLE_TICK_MS`ごとに1歩ぶん進める。
                         let prev_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
                         bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
                         let new_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
-                        // 1フレームのdeltaが大きく複数tickぶんまたぐ場合(低フレームレート等)
-                        // でも歩数が実時間ぶんきちんと進むよう、またいだ回数ぶん繰り返す。
+                        // 1フレームのdeltaが複数tickぶんまたぐ場合(低フレームレート等)でも
+                        // 歩数が実時間ぶん進むよう、またいだ回数ぶん繰り返す。
                         for _ in 0..(new_ticks - prev_ticks) {
                             bomb_settle_step(
                                 &self.board,
@@ -1643,13 +1482,9 @@ impl Game {
                     BombPhase::Ticking => {
                         let below = (bomb.pos.0 + 1, bomb.pos.1);
                         if bomb_positions.contains(&below) || below == self.player.position() {
-                            // 他のボムの真上、またはプレイヤーの頭上に来た場合は、
-                            // 地面に着地した時と違いそこで静止せず、Settling同様に
-                            // 左右へバウンドしながら転がり続ける(TERM独自拡張。
-                            // #143/#144。ユーザー指摘: 「爆弾がしたにあったら、はねな
-                            // がら転がること」「爆弾はキャラの頭にぶつかったら別の列に
-                            // ころがっていく」)。その間は起爆カウントダウンも進めない
-                            // (Settling中と同じ扱い)。
+                            // 他のボムの真上、またはプレイヤーの頭上に来た場合は、地面に
+                            // 着地した時と違いそこで静止せず、Settling同様に左右へバウンド
+                            // しながら転がり続ける。その間は起爆カウントダウンも進めない。
                             let prev_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
                             bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
                             let new_ticks = bomb.phase_elapsed_ms / BOMB_SETTLE_TICK_MS;
@@ -1665,27 +1500,24 @@ impl Game {
                         } else if below.0 < self.board.depth_rows()
                             && self.board.cell(below.0, below.1) == Cell::Empty
                         {
-                            // 起爆カウントダウン中も支えを失っていれば落下を続ける
-                            // (TERM独自拡張。#140)。落下している間は`remaining_ms`を
-                            // 減らさない(空中で起爆させないため)。
+                            // 起爆カウントダウン中も支えを失っていれば落下を続ける。
+                            // 落下中は`remaining_ms`を減らさない(空中で起爆させないため)。
                             bomb.pos = below;
                             bomb.phase_elapsed_ms = 0;
                         } else {
                             bomb.phase_elapsed_ms = 0;
                             let remaining_before = bomb.remaining_ms;
                             bomb.remaining_ms = bomb.remaining_ms.saturating_sub(delta_ms);
-                            // 残り時間が`BOMB_DANGER_MS`を初めて下回った瞬間(本体が
-                            // 赤く点滅し始めるのと同じタイミング)に1回だけ導火線
-                            // カウントダウンSEを鳴らす(TERM独自拡張。#168)。
+                            // 残り時間が`BOMB_DANGER_MS`を初めて下回った瞬間(本体が赤く
+                            // 点滅し始めるのと同じタイミング)に1回だけ導火線SEを鳴らす。
                             if remaining_before > BOMB_DANGER_MS
                                 && bomb.remaining_ms <= BOMB_DANGER_MS
                             {
                                 events.push(GameEvent::BombFuseWarning);
                             }
                             // 危険域に入っている間、`BOMB_FUSE_TICK_INTERVAL_MS`ごとの
-                            // 境界を跨いだ瞬間に繰り返し「チッ」を鳴らす(TERM独自拡張。
-                            // #183)。爆発する瞬間(remaining_ms==0)は爆発音と重ならない
-                            // よう対象外にする。
+                            // 境界を跨いだ瞬間に繰り返し「チッ」を鳴らす。爆発する瞬間
+                            // (remaining_ms==0)は爆発音と重ならないよう対象外にする。
                             if bomb.remaining_ms > 0
                                 && bomb.remaining_ms <= BOMB_DANGER_MS
                                 && remaining_before / BOMB_FUSE_TICK_INTERVAL_MS
@@ -1701,10 +1533,9 @@ impl Game {
                 }
             }
             if !exploded.is_empty() {
-                // 先に起爆確定分を全てまとめて取り出してから渡す(TERM独自拡張。#180。
-                // 同じtickでたまたま複数のボムが同時に起爆カウントダウン完了した場合、
-                // 1個ずつ`self.bombs.remove(i)`していくと、後続の誘爆(chain detonation)
-                // が既に取り出したインデックスとぶつかって壊れるため)。
+                // 先に起爆確定分を全てまとめて取り出してから渡す。同じtickで複数のボムが
+                // 同時に起爆完了した場合、1個ずつ`self.bombs.remove(i)`していくと、後続の
+                // 誘爆が既に取り出したインデックスとぶつかって壊れるため。
                 let caught: Vec<Bomb> = exploded
                     .iter()
                     .rev()
@@ -1723,13 +1554,11 @@ impl Game {
             }
         }
 
-        // プレイヤー自身の自由落下(spec.md 1章、TERM独自拡張)。ブロックの重力とは
-        // 独立したtick間隔(`player_fall_tick_ms`)で判定する(デバッグショートカットで
-        // 両者を別々に速度調整できるようにするため、あえて別ループに分離している)。
-        // 入力の有無や掘削とは無関係に、支えを失っていれば(直下がEmptyなら)落下する。
-        // 直下が酸素カプセルの場合は掘削不要で「歩くだけで取得」する(spec.md公式マニュアル)。
-        // 「天に召される」演出中はプレイヤー自身の論理位置を動かさないため、この間は
-        // 蓄積も含めて凍結する(復活直後に積み残し分がまとめて落ちてしまうのを防ぐ)。
+        // プレイヤー自身の自由落下(spec.md 1章)。ブロックの重力とは別々に速度調整できる
+        // よう、独立したtick間隔(`player_fall_tick_ms`)の別ループに分離している。入力・
+        // 掘削とは無関係に、支えを失っていれば(直下がEmptyなら)落下し、直下が酸素カプセル
+        // なら掘削不要で「歩くだけで取得」する。「天に召される」演出中は蓄積も含めて凍結
+        // する(復活直後に積み残し分がまとめて落ちてしまうのを防ぐ)。
         if !self.is_dying() {
             self.player_fall_tick_accum += delta;
             let player_tick = Duration::from_millis(self.player_fall_tick_ms);
@@ -1737,10 +1566,9 @@ impl Game {
                 self.player_fall_tick_accum -= player_tick;
 
                 let before_fall = self.player.position();
-                // 直下に設置済み(Settling/Ticking)のボムがあれば、自由落下はそこを
-                // 通過させない。ボムはCellグリッド外のオーバーレイなので、盤面上は
-                // Emptyのまま見えてしまい、チェックしないとボムのマスへ落ちて
-                // プレイヤーとボムが同じマスに重なって見えるバグになる。
+                // 直下に設置済み(Settling/Ticking)のボムがあれば自由落下はそこを通過
+                // させない。ボムはCellグリッド外のオーバーレイで盤面上はEmptyのままなので、
+                // チェックしないとプレイヤーとボムが同じマスに重なって見える。
                 let fall_outcome = if self.settled_bomb_at(self.player.row + 1, self.player.col) {
                     FreeFallOutcome::DidNotFall
                 } else {
@@ -1769,20 +1597,17 @@ impl Game {
     }
 
     /// プレイヤーが現在支持されている(直下が塞がっている、または最深行に到達している)
-    /// かどうか。支持されていなければ次の自由落下tickで必ず1マス落ちる状態であり、
-    /// その間は横移動を受け付けない(TERM独自拡張。ユーザー指摘: 「必ず落ちてから
-    /// 横移動が前提」)。直下が酸素カプセルの場合も自由落下でそのまま通過するため、
-    /// 支持されているとはみなさない。
-    ///
-    /// オートプレイ(`autoplay.rs`)も「今フレームに横移動が通るか」の判定へ使うため
-    /// 公開している(TERM独自拡張。#218)。
+    /// かどうか。支持されていなければ次の自由落下tickで必ず1マス落ちる状態で、その間は
+    /// 横移動を受け付けない。直下が酸素カプセルの場合も自由落下でそのまま通過するため、
+    /// 支持されているとはみなさない。オートプレイ(`autoplay.rs`)も「今フレームに横移動が
+    /// 通るか」の判定へ使うため公開している。
     pub fn player_is_grounded(&self) -> bool {
         let below = self.player.row + 1;
         if below >= self.board.depth_rows() {
             return true;
         }
-        // 設置済みのボムはCellグリッド外だが、自由落下を止める支えとして扱う
-        // (直下のセル自体はEmptyのまま残っているため、盤面だけ見ると支持なしに見える)。
+        // 設置済みのボムはCellグリッド外だが、自由落下を止める支えとして扱う(直下の
+        // セル自体はEmptyのまま残るため、盤面だけ見ると支持なしに見える)。
         if self.settled_bomb_at(below, self.player.col) {
             return true;
         }
@@ -1794,15 +1619,14 @@ impl Game {
 
     /// プレイヤーの位置が`before`から変化していれば、移動の見た目補間アニメーションを
     /// (描画専用の状態として)`move_anim_duration_secs()`(固定の短い時間)で開始する。
-    /// ロジック上の位置(row/col)には一切影響しない(TERM独自拡張、9章)。
+    /// ロジック上の位置(row/col)には一切影響しない(9章)。
     fn note_possible_move(&mut self, before: (usize, usize)) {
         self.note_possible_move_with_duration(before, move_anim_duration_secs());
     }
 
-    /// `note_possible_move`の、補間時間を指定できる版(TERM独自拡張)。自由落下は
-    /// 「現在の落ちるスピードにあうように滑らかに」という指摘を受け、固定の短い時間
-    /// ではなく`player_fall_tick_ms`(実際の落下tick間隔)ぶんかけて補間することで、
-    /// 次のtickが来るまでの間ずっと滑らかに動き続けるようにする。
+    /// `note_possible_move`の、補間時間を指定できる版。自由落下は固定の短い時間ではなく
+    /// `player_fall_tick_ms`(実際の落下tick間隔)ぶんかけて補間することで、次のtickが来る
+    /// までの間ずっと滑らかに動き続ける。
     fn note_possible_move_with_duration(&mut self, before: (usize, usize), duration_secs: f32) {
         let after = self.player.position();
         if after != before {
@@ -1814,10 +1638,8 @@ impl Game {
     }
 
     /// 直前の移動が「頭上で揺れているブロックからの回避」だったかを判定し、該当すれば
-    /// ヒヤリ回避スライダーの監視対象セルを設定する(TERM独自拡張。ユーザー指摘:
-    /// 「そもそも避けてないのに発動してるように見える」を受け、単に「最近動いた」
-    /// だけでなく、移動前の頭上が実際に揺れていた場合のみ監視対象にする)。該当しない
-    /// 移動なら、古い監視が誤って生き残らないよう監視を解除する。
+    /// ヒヤリ回避スライダーの監視対象セルを設定する(単に「最近動いた」だけでは誤発火する
+    /// ため)。該当しない移動なら、古い監視が誤って生き残らないよう監視を解除する。
     fn arm_dodge_watch_if_fled_a_shaking_block(&mut self, before: (usize, usize)) {
         let is_threatened = before.0 > 0 && self.gravity_state.is_shaking((before.0 - 1, before.1));
         if is_threatened {
@@ -1838,50 +1660,39 @@ impl Game {
         self.render_prev_position
     }
 
-    /// 描画側が使う、直近の重力ティックで実際に1マス落下した各セルの
-    /// (移動後の位置, 移動前の位置)一覧(TERM独自拡張)。ブロック落下のピクセル単位
-    /// 補間描画に使う。次のティックが実行されるまで、このティックの内容を保持し続ける。
+    /// 描画側が使う、直近の重力ティックで実際に1マス落下した各セルの(移動後の位置,
+    /// 移動前の位置)一覧。ブロック落下のピクセル単位補間描画に使い、次のティックが
+    /// 実行されるまでこのティックの内容を保持し続ける。
     pub fn recently_moved_blocks(&self) -> &[BlockMove] {
         &self.last_block_moves
     }
 
-    /// #85(揺れているブロックが浮いたまま落下しない)の調査用に、ブロック状態遷移
-    /// ログの記録先を新規に作り直して有効化する(TERM独自拡張。ユーザー指摘:
-    /// 「タイトルからゲームスタートした時点でログdbは毎回リフレッシュするものと
-    /// する」)。開けなかった場合は記録自体を諦め、ゲーム進行には影響させない。
-    ///
-    /// `enabled`が`false`の場合は記録自体を行わない(TERM独自拡張。#167。
-    /// ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」)。設定画面
-    /// から切り替えた場合、稼働中のgameへ即座に反映する用途にも使う(有効化時は
-    /// 新規にログを開き直し、無効化時は以降の記録を止める)。
+    /// ブロック状態遷移ログの記録先を新規に作り直して有効化する(ゲーム開始のたびに
+    /// リフレッシュする)。開けなかった場合は記録自体を諦め、ゲーム進行には影響させない。
+    /// `enabled`が`false`なら記録を行わない。設定画面から切り替えた場合に稼働中のgameへ
+    /// 即座に反映する用途にも使う。
     pub fn refresh_debug_log(&mut self, enabled: bool) {
         self.debug_log = if enabled {
-            // 巻き戻しのスナップショットが同じログ接続を共有できるようRcで包む(#233)。
+            // 巻き戻しのスナップショットが同じログ接続を共有できるようRcで包む。
             DebugLog::open_fresh().map(Rc::new)
         } else {
             None
         };
     }
 
-    /// `update()`が呼ばれるたびに1増えるフレーム通し番号(TERM独自拡張。#85調査用。
-    /// ユーザー指摘: 「フレームのユニーク番号を取得できるようにしておき」)。
-    /// ブロック状態遷移ログの各行と突き合わせるための識別子として画面に表示する。
+    /// `update()`が呼ばれるたびに1増えるフレーム通し番号。ブロック状態遷移ログの各行と
+    /// 突き合わせるための識別子として画面に表示する。
     pub fn debug_frame(&self) -> u64 {
         self.frame_counter
     }
 
-    /// 消滅したセルを消滅フラッシュ演出の対象として記録する(TERM独自拡張。
-    /// ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」)。
+    /// 消滅したセルを消滅フラッシュ演出の対象として記録する。
     ///
-    /// 新たに消滅したセルに隣接する、まだフラッシュ中(=直前の消滅演出がまだ終わって
-    /// いない)セルがあれば、その残り時間をこのフラッシュぶんへ延長する(TERM独自拡張。
-    /// ユーザー指摘: 「隣接ブロックで消える演出に入るなかで完全に消える前に別の
-    /// 隣接ブロックがあったら、消える演出を延長してそれも消す」)。これにより、重力で
-    /// 落下したブロックが着地して連鎖的に4連結消滅した場合、古い方の演出が先に
-    /// フェードアウトして途切れず、1つの連続した「連鎖」に見えるようにする。
-    /// `delay`はフラッシュを始めるまでの待ち時間(TERM独自拡張。#234)。重力tickで
-    /// 消えたセルは落下補間が終わるまで(`gravity_vanish_delay`)待ち、それ以外
-    /// (掘削・スター溶解・頭上クリア・ボム爆風)は待たずに即座に光り始める。
+    /// 新たに消滅したセルに隣接するセルがまだフラッシュ中なら、その残り時間をこの
+    /// フラッシュぶんへ延長する。これにより、落下したブロックが着地して連鎖的に4連結
+    /// 消滅した場合でも、古い方の演出が先にフェードアウトして途切れず1つの連鎖に見える。
+    /// `delay`はフラッシュを始めるまでの待ち時間。重力tickで消えたセルは落下補間が終わる
+    /// まで(`gravity_vanish_delay`)待ち、それ以外は待たずに即座に光り始める。
     fn note_vanished_cells(
         &mut self,
         cells: impl IntoIterator<Item = (board::Pos, Cell)>,
@@ -1909,10 +1720,9 @@ impl Game {
                     .iter_mut()
                     .find(|e| e.pos == neighbor && e.delay.is_zero())
                 {
-                    // 既にフラッシュ中の隣接セルは、新規分がフラッシュを終えるのと
-                    // 同じ時刻まで残り時間を伸ばし、一緒に消えるようにする。まだ待機中
-                    // (delay>0)のセルは、その待ちが終わってから自分のフラッシュを
-                    // 始めればよいので触らない。
+                    // 既にフラッシュ中の隣接セルは、新規分がフラッシュを終えるのと同じ
+                    // 時刻まで残り時間を伸ばし、一緒に消えるようにする。まだ待機中
+                    // (delay>0)のセルは、待ちが明けてから自分で始めればよいので触らない。
                     entry.remaining = delay + total;
                 }
             }
@@ -1928,26 +1738,24 @@ impl Game {
             }));
     }
 
-    /// 重力tick内で消滅したセルの、フラッシュ開始までの待ち時間(TERM独自拡張。#234)。
-    /// `fall_tick_accum`はこのtickぶんを差し引いた直後の値なので、`tick - accum`が
-    /// そのまま「落下補間が1.0に達するまでの残り実時間」になる。1フレームで複数tickを
-    /// 消化した場合(accum >= tick)は0になり、待たずに即座にフラッシュへ入る。
+    /// 重力tick内で消滅したセルの、フラッシュ開始までの待ち時間。`fall_tick_accum`は
+    /// このtickぶんを差し引いた直後の値なので、`tick - accum`がそのまま「落下補間が1.0に
+    /// 達するまでの残り実時間」になる。1フレームで複数tickを消化した場合は0になる。
     fn gravity_vanish_delay(&self) -> Duration {
         Duration::from_millis(self.effective_block_fall_tick_ms())
             .saturating_sub(self.fall_tick_accum)
     }
 
-    /// 実効tickに応じた消滅フラッシュの長さ(ms、TERM独自拡張。#234)。基準tick
-    /// (`FALL_TICK_MS`)で`BLOCK_VANISH_FLASH_MS`になる比例値で、短すぎて視認できなく
-    /// ならないよう`BLOCK_VANISH_FLASH_MIN_MS`を下限にする。
+    /// 実効tickに応じた消滅フラッシュの長さ(ms)。基準tick(`FALL_TICK_MS`)で
+    /// `BLOCK_VANISH_FLASH_MS`になる比例値で、短すぎて視認できなくならないよう
+    /// `BLOCK_VANISH_FLASH_MIN_MS`を下限にする。
     pub(crate) fn vanish_flash_duration_ms(&self) -> u64 {
         let tick = self.effective_block_fall_tick_ms();
         (BLOCK_VANISH_FLASH_MS * tick / FALL_TICK_MS).max(BLOCK_VANISH_FLASH_MIN_MS)
     }
 
-    /// 揺れ時間(`shake_duration_ms`)を実効tick単位へ換算した揺れtick数(TERM独自拡張。
-    /// #234)。揺れ時間が0なら0、0より大きければ最低1tickは揺れる(整数除算で0になると
-    /// 予兆なしにいきなり落ち始めてしまうため)。
+    /// 揺れ時間(`shake_duration_ms`)を実効tick単位へ換算した揺れtick数。揺れ時間が0なら
+    /// 0、0より大きければ最低1tickは揺れる(整数除算で0になると予兆なしに落ち始めるため)。
     pub(crate) fn shake_ticks(&self) -> u8 {
         if self.shake_duration_ms == 0 {
             return 0;
@@ -1957,8 +1765,8 @@ impl Game {
     }
 
     /// 描画側が使う、指定セルの消滅フラッシュ演出の進捗(0.0=フラッシュ開始直後、
-    /// 1.0=演出完了直前。TERM独自拡張)。フラッシュ中のセルのみ`Some`を返し、
-    /// 落下ブロックの到着待ち(`delay`>0)のセルは`None`を返す(#234)。
+    /// 1.0=演出完了直前)。フラッシュ中のセルのみ`Some`を返し、落下ブロックの到着待ち
+    /// (`delay`>0)のセルは`None`を返す。
     pub fn vanish_flash_progress(&self, pos: board::Pos) -> Option<f32> {
         self.recently_vanished
             .iter()
@@ -1970,11 +1778,9 @@ impl Game {
     }
 
     /// 描画側が使う、消滅は確定したがまだフラッシュに入っていない(落下ブロックの到着
-    /// 待ちの)セルの、消滅直前の種類(TERM独自拡張。#172/#234。ユーザー指摘: 「崩れて
-    /// きたブロックが、接地する1コマ前でスルスルと消えてしまう」)。着地と同一tickで
-    /// 4連結自動消滅した場合、盤面は既にEmptyになっているため、落下補間描画も静的な
-    /// セル描画も表示すべきグリフを盤面から読めない。待機中はここから消滅直前の種類を
-    /// 取得して、到着するまで元の見た目のまま描き続ける。
+    /// 待ちの)セルの、消滅直前の種類。着地と同一tickで4連結自動消滅した場合、盤面は既に
+    /// Emptyのため描画側は表示すべきグリフを盤面から読めない。待機中はここから消滅直前の
+    /// 種類を取得して、到着するまで元の見た目のまま描き続ける。
     pub fn pending_vanish_kind(&self, pos: board::Pos) -> Option<Cell> {
         self.recently_vanished
             .iter()
@@ -1982,8 +1788,8 @@ impl Game {
             .map(|e| e.kind)
     }
 
-    /// 指定セルの消滅演出が終わるまでの残り時間(ms、TERM独自拡張。#174調査用ログの
-    /// 補助)。フラッシュ開始待ちも含めた合計を返す。対象でなければ`None`。
+    /// 指定セルの消滅演出が終わるまでの残り時間(ms、デバッグログ用)。フラッシュ開始
+    /// 待ちも含めた合計を返す。対象でなければ`None`。
     fn recently_vanished_flash_remaining_ms(&self, pos: board::Pos) -> Option<u64> {
         self.recently_vanished
             .iter()
@@ -1991,11 +1797,10 @@ impl Game {
             .map(|e| (e.delay + e.remaining).as_millis() as u64)
     }
 
-    /// `BOARD_SNAPSHOT_TICK_INTERVAL`ティックごとに、プレイヤー周辺の非Emptyセルを
-    /// まとめてログへ記録する(TERM独自拡張。#85調査用。ユーザー指摘: 「これは#85の
-    /// 事象と同じやつだ」)。`block_events`は実際に動いた/消えたセルしか記録しない
-    /// ため、「一度も動いていないセルが本当にEmptyか、生成時からの地形か」を後から
-    /// 見分けられない。デバッグログ無効時、または記録タイミングでなければ何もしない。
+    /// `BOARD_SNAPSHOT_TICK_INTERVAL`ティックごとに、プレイヤー周辺の非Emptyセルをまとめて
+    /// ログへ記録する。`block_events`は動いた/消えたセルしか記録しないため、これが無いと
+    /// 「一度も動いていないセルが本当にEmptyか、生成時からの地形か」を後から見分けられない。
+    /// デバッグログ無効時、または記録タイミングでなければ何もしない。
     fn log_board_snapshot_if_due(&self) {
         let Some(log) = &self.debug_log else {
             return;
@@ -2024,10 +1829,8 @@ impl Game {
         log.log_board_snapshot(self.frame_counter, &cells);
     }
 
-    /// 落下ブロック補間描画(`draw_falling_blocks`)が、着地先セルが盤面上で既に
-    /// Emptyになっている場面に遭遇したことを記録する(TERM独自拡張。#174。
-    /// ユーザー指摘: 「このやり取りが何回か続いており解決できてないので...
-    /// 不足要素をロギングしよう」)。デバッグログ無効時は何もしない。
+    /// 落下ブロック補間描画(`draw_falling_blocks`)が、着地先セルが盤面上で既にEmptyに
+    /// なっている場面に遭遇したことを記録する。デバッグログ無効時は何もしない。
     pub fn log_render_fallback(&self, to: board::Pos, from: board::Pos, resolved: Option<Cell>) {
         if let Some(log) = &self.debug_log {
             let resolved_kind = resolved.map(|k| format!("{k:?}"));
@@ -2043,8 +1846,8 @@ impl Game {
         }
     }
 
-    /// 描画側が使う、指定セルのボム爆発・炎演出の進捗(0.0=爆発直後、1.0=演出完了
-    /// 直前)と爆心地からの距離(TERM独自拡張。#126)。対象でなければ`None`を返す。
+    /// 描画側が使う、指定セルのボム爆発・炎演出の進捗(0.0=爆発直後、1.0=演出完了直前)と
+    /// 爆心地からの距離。対象でなければ`None`を返す。
     pub fn explosion_flash_progress(&self, pos: board::Pos) -> Option<(f32, u8)> {
         let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS)
             .as_secs_f32()
@@ -2060,33 +1863,30 @@ impl Game {
             })
     }
 
-    /// 描画側が使う、ブロック落下ティックの進捗(0.0=直前のティック直後,
-    /// 1.0=次のティックが来る直前。TERM独自拡張)。`recently_moved_blocks`と組み合わせて、
-    /// 移動前の位置から移動後の位置へ向けて滑らかに補間する。
+    /// 描画側が使う、ブロック落下ティックの進捗(0.0=直前のティック直後, 1.0=次のティック
+    /// が来る直前)。`recently_moved_blocks`と組み合わせて移動前後を滑らかに補間する。
     pub fn block_fall_progress(&self) -> f32 {
         let tick_secs = self.effective_block_fall_tick_ms().max(1) as f32 / 1000.0;
         (self.fall_tick_accum.as_secs_f32() / tick_secs).clamp(0.0, 1.0)
     }
 
-    /// 深度に応じて実効化したブロック落下tick間隔(ms、TERM独自拡張)。設定画面/
-    /// デバッグショートカットで調整した`block_fall_tick_ms`を「深度0mでの速度」
-    /// として扱い、`FALL_SPEED_DEPTH_MAX_SPEEDUP`まで深度に応じて短縮する
-    /// (`DEBUG_FALL_TICK_MS_MIN`を下回らない)。
-    ///
-    /// オートプレイ(`autoplay.rs`)が「頭上のブロックが何ms後に落ちてくるか」を見積もる
-    /// ために参照するため、モジュール内に閉じず`pub(crate)`にしている(TERM独自拡張。#221)。
+    /// 深度に応じて実効化したブロック落下tick間隔(ms)。設定画面/デバッグショートカットで
+    /// 調整した`block_fall_tick_ms`を「深度0mでの速度」として扱い、
+    /// `FALL_SPEED_DEPTH_MAX_SPEEDUP`まで短縮する(`DEBUG_FALL_TICK_MS_MIN`を下回らない)。
+    /// オートプレイ(`autoplay.rs`)が「頭上のブロックが何ms後に落ちてくるか」の見積もりに
+    /// 参照するため`pub(crate)`にしている。
     pub(crate) fn effective_block_fall_tick_ms(&self) -> u64 {
         let fraction = depth_fraction(self.player.depth_m());
         let speedup = 1.0 - fraction * (1.0 - FALL_SPEED_DEPTH_MAX_SPEEDUP);
         ((self.block_fall_tick_ms as f32 * speedup) as u64).max(DEBUG_FALL_TICK_MS_MIN)
     }
 
-    /// 「天に召される」演出中かどうか(TERM独自拡張)。この間は移動・掘削入力を無視する。
+    /// 「天に召される」演出中かどうか。この間は移動・掘削入力を無視する。
     fn is_dying(&self) -> bool {
         self.ascending_remaining.is_some()
     }
 
-    /// 「天に召される」演出中、または「わ〜!」スライダー演出中(TERM独自拡張)かどうか。
+    /// 「天に召される」演出中、または「わ〜!」スライダー演出中かどうか。
     /// この間は移動・掘削入力を無視する。
     fn is_input_frozen(&self) -> bool {
         self.is_dying() || self.dodge_stage != DodgeStage::None
@@ -2097,8 +1897,8 @@ impl Game {
         self.crush_flash_remaining > Duration::ZERO || self.ascending_remaining.is_some()
     }
 
-    /// チェックポイント(100mごと)到達演出が表示中なら、到達した深度(m)を返す
-    /// (TERM独自拡張。#178)。描画側(render.rs)がバナー表示に使う。
+    /// チェックポイント(100mごと)到達演出が表示中なら、到達した深度(m)を返す。
+    /// 描画側(render.rs)がバナー表示に使う。
     pub fn checkpoint_flash_depth_m(&self) -> Option<usize> {
         if self.checkpoint_flash_remaining > Duration::ZERO {
             Some(self.checkpoint_flash_depth_m)
@@ -2107,9 +1907,9 @@ impl Game {
         }
     }
 
-    /// 掘削アニメーション中の描画フレーム(TERM独自拡張、9章)。掘削演出中でなければ
-    /// `None`、演出中は`DRILL_ANIM_FRAME_MS`ごとに`true`/`false`を切り替えて返す
-    /// (方向別のアニメーション用に描画側が2フレームを交互に選ぶ)。
+    /// 掘削アニメーション中の描画フレーム(9章)。掘削演出中でなければ`None`、演出中は
+    /// `DRILL_ANIM_FRAME_MS`ごとに`true`/`false`を切り替えて返す(描画側が2フレームを
+    /// 交互に選ぶ)。
     pub fn drilling_frame(&self) -> Option<bool> {
         if self.drill_flash_remaining <= Duration::ZERO {
             return None;
@@ -2119,15 +1919,15 @@ impl Game {
         Some((elapsed_ms / DRILL_ANIM_FRAME_MS.max(1)).is_multiple_of(2))
     }
 
-    /// 「わ〜!」スライダー演出中(横滑り段階のみ、TERM独自拡張)かどうか。描画側が
-    /// スプライトを横滑りさせる判断に使う。硬直(Recovering)段階では滑りは止まっている
-    /// ため`false`を返すが、`is_input_frozen`相当のフリーズ自体はそちらも継続する。
+    /// 「わ〜!」スライダー演出中(横滑り段階のみ)かどうか。描画側がスプライトを横滑り
+    /// させる判断に使う。硬直(Recovering)段階では滑りが止まっているため`false`を返すが、
+    /// `is_input_frozen`相当のフリーズ自体はそちらも継続する。
     pub fn is_dodge_sliding(&self) -> bool {
         self.dodge_stage == DodgeStage::Sliding
     }
 
-    /// 「わ〜!」スライダー演出の横滑り進捗(0.0=開始直後、1.0=スライダー完了直前。
-    /// TERM独自拡張)。スライダー中でなければ0.0を返す。
+    /// 「わ〜!」スライダー演出の横滑り進捗(0.0=開始直後、1.0=スライダー完了直前)。
+    /// スライダー中でなければ0.0を返す。
     pub fn dodge_slide_progress(&self) -> f32 {
         if self.dodge_stage != DodgeStage::Sliding {
             return 0.0;
@@ -2139,9 +1939,8 @@ impl Game {
         (1.0 - self.dodge_stage_remaining.as_secs_f32() / total).clamp(0.0, 1.0)
     }
 
-    /// 「天に召される」演出の進捗(0.0=演出開始直後、1.0=演出完了直前。TERM独自拡張)。
-    /// 演出中でなければ0.0を返す。描画側(render.rs)がこれを使って、キャラのスプライトを
-    /// 少しずつ上へドリフトさせる(「天に召される」見た目の演出)。
+    /// 「天に召される」演出の進捗(0.0=演出開始直後、1.0=演出完了直前)。演出中でなければ
+    /// 0.0を返す。描画側(render.rs)がキャラのスプライトを少しずつ上へドリフトさせる。
     pub fn ascend_progress(&self) -> f32 {
         let Some(remaining) = self.ascending_remaining else {
             return 0.0;
@@ -2154,15 +1953,13 @@ impl Game {
     }
 
     /// 指定セルが現在「震えている」(支えを失い、落下開始までの猶予期間中)かどうか
-    /// (TERM独自拡張、描画用)。ユーザー指摘: 「落下開始までのアニメーションぐらぐら
-    /// してほしい(各種ブロック)」。
+    /// (描画用)。
     pub fn is_cell_shaking(&self, row: usize, col: usize) -> bool {
         self.gravity_state.is_shaking((row, col))
     }
 
     // -----------------------------------------------------------------------
-    // デバッグショートカット(TERM独自拡張。動作確認を効率化するための機能で、
-    // 初代の仕様やスコアには一切対応しない)
+    // デバッグショートカット(動作確認用で、初代の仕様やスコアには対応しない)
     // -----------------------------------------------------------------------
 
     /// 現在のブロック落下tick間隔(ms)。設定の永続化(main.rs/Settings)用に公開する。
@@ -2186,23 +1983,20 @@ impl Game {
         self.player_fall_tick_ms = ms.clamp(DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_MS_MAX);
     }
 
-    /// 現在の横移動クールダウン間隔(ms)。オートプレイ(`autoplay.rs`)が「横へ1マス
-    /// 逃げるのに何msかかるか」を頭上の落下ブロックの到達時間と比べるために参照する
-    /// (TERM独自拡張。#221)。
+    /// 現在の横移動クールダウン間隔(ms)。オートプレイ(`autoplay.rs`)が「横へ1マス逃げる
+    /// のに何msかかるか」を頭上の落下ブロックの到達時間と比べるために参照する。
     pub fn move_cooldown_ms(&self) -> u64 {
         self.move_cooldown_ms
     }
 
     /// 横移動のクールダウン間隔を直接指定する(起動時、Settingsから読み込んだ値を適用する
-    /// 用途。TERM独自拡張。ユーザー指摘: 「横移動のスピードを設定で変えられるように」)。
-    /// 範囲外の値は`MOVE_COOLDOWN_MS_MIN`〜`MAX`にクランプする。
+    /// 用途)。範囲外の値は`MOVE_COOLDOWN_MS_MIN`〜`MAX`にクランプする。
     pub fn set_move_cooldown_ms(&mut self, ms: u64) {
         self.move_cooldown_ms = ms.clamp(MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_MAX);
     }
 
-    /// 自動消滅の連鎖インターバルを直接指定する(起動時、Settingsから読み込んだ値を
-    /// 適用する用途。TERM独自拡張。#187)。範囲外の値は`CHAIN_VANISH_INTERVAL_MS_MIN`〜
-    /// `MAX`にクランプする。
+    /// 自動消滅の連鎖インターバルを直接指定する(起動時、Settingsから読み込んだ値を適用
+    /// する用途)。範囲外の値は`CHAIN_VANISH_INTERVAL_MS_MIN`〜`MAX`にクランプする。
     pub fn set_chain_vanish_interval_ms(&mut self, ms: u64) {
         self.chain_vanish_interval_ms =
             ms.clamp(CHAIN_VANISH_INTERVAL_MS_MIN, CHAIN_VANISH_INTERVAL_MS_MAX);
@@ -2218,15 +2012,13 @@ impl Game {
         self.shake_duration_ms = ms.clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
     }
 
-    /// 硬直インターバルを直接指定する(起動時、Settingsから読み込んだ値を適用する用途。
-    /// TERM独自拡張。ユーザー指摘: 「この設定値も作る」)。
+    /// 硬直インターバルを直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。
     pub fn set_dodge_recovery_ms(&mut self, ms: u64) {
         self.dodge_recovery_ms = ms.clamp(DODGE_RECOVERY_MS_MIN, DODGE_RECOVERY_MS_MAX);
     }
 
-    /// ボム出現頻度を直接指定する(起動時、Settingsから読み込んだ値を適用する用途。
-    /// TERM独自拡張。#96)。範囲外の値は`BOMB_SPAWN_RATE_PERCENT_MIN`〜
-    /// `BOMB_SPAWN_RATE_PERCENT_MAX`にクランプする。
+    /// ボム出現頻度を直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。範囲外
+    /// の値は`BOMB_SPAWN_RATE_PERCENT_MIN`〜`MAX`にクランプする。
     pub fn set_bomb_spawn_rate_percent(&mut self, percent: u32) {
         self.bomb_spawn_rate_percent = percent.clamp(
             crate::constants::BOMB_SPAWN_RATE_PERCENT_MIN,
@@ -2234,13 +2026,9 @@ impl Game {
         );
     }
 
-    /// 永続化された設定(速度系・出現率系)を、開始したばかりのゲームへまとめて反映する
-    /// (TERM独自拡張。#225)。
-    ///
-    /// main.rsの`start_new_game`とオートプレイのソークテストの両方がここを通る。以前は
-    /// 反映処理が`start_new_game`にしか無く、ソークテストは`Game::new_with_width`直後の
-    /// 盤面(=出現率の再抽選前)で走っていたため、既定設定の計測ですら実機と違う盤面を
-    /// 測っていた。
+    /// 永続化された設定(速度系・出現率系)を、開始したばかりのゲームへまとめて反映する。
+    /// main.rsの`start_new_game`とオートプレイのソークテストの両方がここを通ることで、
+    /// ソークテストが出現率の再抽選前の盤面(=実機と違う盤面)を測ってしまうのを防ぐ。
     ///
     /// デバッグログ(SQLite)の作り直しはここには含めない。設定の反映ではなく記録先の
     /// 準備であり、テストから呼ぶとファイルを作ってしまうため`start_new_game`に残す。
@@ -2268,40 +2056,30 @@ impl Game {
         );
     }
 
-    /// 現在盤面上にあるボムの一覧(TERM独自拡張。#96)。描画側(render.rs)が参照する。
+    /// 現在盤面上にあるボムの一覧。描画側(render.rs)が参照する。
     pub fn bombs(&self) -> &[Bomb] {
         &self.bombs
     }
 
-    /// テスト専用: ボムを直接配置するための可変参照(TERM独自拡張。#218)。
-    /// `debug_place_bomb`は配置先がランダムなため、オートプレイの判断テストのように
-    /// 「この座標にボムがある盤面」を組み立てたい場合に使う。
+    /// テスト専用: ボムを直接配置するための可変参照。`debug_place_bomb`は配置先がランダム
+    /// なため、「この座標にボムがある盤面」を組み立てたい場合に使う。
     #[cfg(test)]
     pub(crate) fn bombs_mut(&mut self) -> &mut Vec<Bomb> {
         &mut self.bombs
     }
 
     /// `from_row`以降の岩(X)/AIR/スター/ダイヤブロック出現率を、指定の配分率(%、
-    /// 100=通常のまま)で再抽選する(TERM独自拡張。ユーザー指摘: 「設定でXブロックの
-    /// 配分量・AIRの配分量をいじれるようにしたい。プレイ中でもその数値をいじれるように
-    /// したい」「ダイヤブロック0%設定」)。新規ゲーム開始直後は`from_row`に安全地帯明けの
-    /// 行を渡せば盤面全体に反映され、プレイ中に呼ぶ場合は呼び出し側が
+    /// 100=通常のまま)で再抽選する。新規ゲーム開始直後は`from_row`に安全地帯明けの行を
+    /// 渡せば盤面全体に反映され、プレイ中に呼ぶ場合は呼び出し側が
     /// `player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS`のような画面外の行を渡すことで、
     /// 既に見えている地形を変えてしまわないようにする。
     ///
-    /// `color_cluster_rate_percent`(%、100=通常のまま)は色ブロックの結合しやすさを
-    /// 調整する(TERM独自拡張。ユーザー指摘: 「ブロック配置の結合関係の割合を設定
-    /// できるようにして」)。
+    /// `color_cluster_rate_percent`(%、100=通常のまま)は色ブロックの結合しやすさを調整する。
     ///
-    /// `item_*_rate_percent`(%、100=通常のまま)はアイテムブロック3種(#98/#101/#107)の
-    /// 出現率をそれぞれ個別に調整する(TERM独自拡張。ユーザー指摘: 「各種アイテムの
-    /// 出現頻度の設定項目増やして」)。アイテムは盤面全体への一括反映ではなく、
-    /// プレイヤーより少し先の窓単位で常に上限個数になるよう補充する方式
-    /// (`top_up_items_ahead`)で個別に扱う(TERM独自拡張。#210/#211。事故: 配分率を
-    /// 300%にすると深度40〜50m台で盤面全体の生涯上限を使い切り、残り900m以上
-    /// まったく出現しなくなった)。ここでは最新の設定値を保持するだけで、実際の
-    /// 抽選は`top_up_items_ahead`(この呼び出しの最後、および`check_level_and_clear`)
-    /// が行う。
+    /// `item_*_rate_percent`(%、100=通常のまま)はアイテムブロック3種の出現率を個別に調整
+    /// する。アイテムだけは一括反映せず窓単位で補充する(一括だと配分率を上げた際に浅い
+    /// 深度で生涯上限を使い切る)ため、ここでは設定値を保持するだけで抽選は
+    /// `top_up_items_ahead`が行う。
     #[allow(clippy::too_many_arguments)]
     pub fn reroll_spawn_rates_from(
         &mut self,
@@ -2336,14 +2114,11 @@ impl Game {
         self.top_up_items_ahead();
     }
 
-    /// アイテムブロック3種を、プレイヤーの現在行から`ITEM_WINDOW_AHEAD_ROWS`ぶん
-    /// 先までの窓の範囲内で常に`ITEM_MAX_COUNT_ON_BOARD`個になるよう補充する
-    /// (TERM独自拡張。#210/#211)。`item_top_up_frontier_row`(既に抽選済みの行の
-    /// 直後)より先に新しく窓へ入った行だけを対象にするため、既に抽選済みの行の
-    /// 内容は変えない。プレイヤーが進むにつれて窓の下限(プレイヤーの現在行)も
-    /// 進み、既存アイテムが窓の外(プレイヤーより後方)へ落ちたぶんだけ次回の
-    /// 呼び出しで補充余地が生まれる。`reroll_spawn_rates_from`(設定変更時)と
-    /// `check_level_and_clear`(行が進むたび)の両方から呼ぶ。
+    /// アイテムブロック3種を、プレイヤーの現在行から`ITEM_WINDOW_AHEAD_ROWS`ぶん先までの
+    /// 窓の範囲内で常に`ITEM_MAX_COUNT_ON_BOARD`個になるよう補充する。新しく窓へ入った行
+    /// (`item_top_up_frontier_row`より先)だけを対象にするため、抽選済みの行は変えない。
+    /// プレイヤーが進むと窓の下限も進み、既存アイテムが窓の外へ抜けたぶんだけ補充余地が
+    /// 生まれる。`reroll_spawn_rates_from`と`check_level_and_clear`の両方から呼ぶ。
     fn top_up_items_ahead(&mut self) {
         let target_row = (self.player.row + crate::constants::ITEM_WINDOW_AHEAD_ROWS)
             .min(self.board.depth_rows());
@@ -2392,39 +2167,27 @@ impl Game {
         }
     }
 
-    /// デバッグ: 酸素(AIR)を100%まで回復する。Playing中のみ有効(TERM独自拡張。
-    /// ユーザー指摘: 「AIRを100%にするショートカット追加」)。
+    /// デバッグ: 酸素(AIR)を100%まで回復する。Playing中のみ有効。
     pub fn debug_fill_air(&mut self) {
         if self.status == GameStatus::Playing {
             self.player.oxygen = crate::constants::OXYGEN_MAX;
         }
     }
 
-    /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中
-    /// のみ有効。AIR(酸素カプセル)は消滅させずその場に残す(ユーザー指摘: 「Xで
-    /// ブロック消したときAIRは消えずに上から落下してくるように」)。死亡時の頭上クリア
-    /// (TERM独自拡張。#176。ユーザー指摘: 「死んだときのキャラの上位の消し方はRアイテム
-    /// と同じとする」)・100mごとのチェックポイント到達時(TERM独自拡張。#178)も、
-    /// この同じ関数を呼び出して統一する。
+    /// デバッグ: プレイヤーより浅い(画面上で上にある)行を全てEmptyにする。Playing中のみ
+    /// 有効。AIR(酸素カプセル)・アイテムブロックは消滅させず残す。死亡時の頭上クリアと
+    /// 100mごとのチェックポイント到達時も、この同じ関数を呼び出して統一する。
     pub fn debug_clear_above_player(&mut self) {
         if self.status != GameStatus::Playing {
             return;
         }
-        // 4連結自動消滅と同じ消滅フラッシュ演出を出す(TERM独自拡張。ユーザー指摘:
-        // 「ショートカットRの動作だけど、消えるとき、結合して消えるときと同じ消える
-        // アニメーションして」)。AIR・アイテムブロック(C/R/Kアイテム)は消さずに残す
-        // (TERM独自拡張。ユーザー指摘: 「ショートカットRは、Cアイテム、Rアイテム、
-        // Kアイテムを削除しない(AIRと同じ扱い)」)。
+        // 4連結自動消滅と同じ消滅フラッシュ演出を出す。AIR・アイテムブロック(C/R/K)は
+        // 消さずに残す。
         //
-        // 画面外(`entry_row`より浅い)に残っていたAIR/アイテムブロックは、その場に
-        // 残すのではなく画面のすぐ外側まで移動させ、以後の重力ティックで自然に画面内へ
-        // 落ちてくるようにする(TERM独自拡張。#176/追加指摘。ユーザー指摘: 「Rアイテム
-        // の処理実行時は、上位の画面外アイテム等のオブジェクトを画面内に入る座標まで
-        // ただちに移動し落下させるものとする」→「オブジェクトがいったん一番至近の
-        // 画面外から上に配置してほしい。いきなり現れるのなし」)。画面内(entry_row)へ
-        // 直接テレポートさせると「いきなり現れる」ように見えてしまうため、画面の外
-        // (entry_rowの1つ浅い行=`just_off_screen_row`)を起点に、そこからさらに浅い側へ
-        // 積み上げる。既に画面内(entry_row以降)にあった分はそのまま動かさない。
+        // 画面外(`entry_row`より浅い)に残っていたAIR/アイテムは、画面のすぐ外側
+        // (`just_off_screen_row`)を起点にさらに浅い側へ積み上げ、以後の重力ティックで
+        // 自然に画面内へ落ちてくるようにする(画面内へ直接置くといきなり現れて見える)。
+        // 既に画面内にあった分はそのまま動かさない。
         let width = self.board.width();
         let entry_row = self.player.row.saturating_sub(PLAYER_SCREEN_ROWS_ABOVE);
         let just_off_screen_row = entry_row.saturating_sub(1);
@@ -2466,26 +2229,18 @@ impl Game {
         }
     }
 
-    /// チェックポイント(100mごと)の地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた
-    /// 時点で、その直後にスキマ(`CHECKPOINT_ZONE_GAP_M`)を空ける(TERM独自拡張。
-    /// #179/#181/#184/#189/#190)。地面部分そのものはもう強制的にくり抜かない
-    /// (ユーザー指摘: 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。
-    /// 地面についたら次、じゃなくて」)。プレイヤーが実際にドリルで掘り進む対象に
-    /// なり、掘った跡は地面ビジュアル(#186、Emptyになったマスに乗る)として見える。
-    /// `BONUS_FLOOR_DEPTH_M`(500m)だけは例外で、地面部分自体をC/K/Rアイテム・AIRが
-    /// 豊富なボーナスフロアとして生成する(#179。この生成ロジックは変更なし)。
+    /// チェックポイント(100mごと)の地面(`CHECKPOINT_SAFE_ZONE_M`)を実際に掘り抜いた時点で、
+    /// その直後にスキマ(`CHECKPOINT_ZONE_GAP_M`)を空ける。地面部分そのものは強制的に
+    /// くり抜かず、プレイヤーがドリルで掘り進む対象にする。`BONUS_FLOOR_DEPTH_M`(500m)
+    /// だけは例外で、地面部分自体をC/K/Rアイテム・AIRが豊富なボーナスフロアとして生成する。
     ///
-    /// スキマは、このチェックポイントの地面を実際に掘り抜いた瞬間(`debug_clear_
-    /// above_player`と同じタイミング)にだけくり抜く(#184の教訓通り、まだ到達して
-    /// いない深い場所を先回りしてくり抜くと広範囲崩落を招くため、常にそのチェック
-    /// ポイント1つ分だけを対象にする)。
+    /// スキマは、このチェックポイントの地面を掘り抜いた瞬間にだけくり抜く。まだ到達して
+    /// いない深い場所を先回りしてくり抜くと広範囲崩落を招くため、常に1つ分だけを対象にする。
     fn apply_checkpoint_safe_zone(&mut self, at_m: usize) {
         let depth_rows = self.board.depth_rows();
         let zone_start_row = at_m;
         let zone_end_row = (zone_start_row + CHECKPOINT_SAFE_ZONE_M).min(depth_rows);
-        // 地面(zone_start_row-zone_end_row)の直後、通常の地形が再開するまでのスキマ
-        // (TERM独自拡張。#189。ユーザー指摘: 「100mきざみの地面と次のブロックが
-        // ギチギチなので、5mスキマあけて」)。
+        // 地面(zone_start_row-zone_end_row)の直後、通常の地形が再開するまでのスキマ。
         let gap_end_row = (zone_end_row + CHECKPOINT_ZONE_GAP_M).min(depth_rows);
         if at_m == BONUS_FLOOR_DEPTH_M {
             self.board.reroll_overlays_in_row_range(
@@ -2511,14 +2266,10 @@ impl Game {
         }
     }
 
-    /// チェックポイントのスキマ区間に、上から崩れてきたブロックやアイテムが滞留
-    /// しないようにする(TERM独自拡張。#189。ユーザー指摘: 「その地面よりも下に
-    /// ブロックが落ちないように(アイテムなども)」「100mラインを超えたら滞留してる
-    /// ブロック、アイテムはすべてパージで」)。既に到達済みのチェックポイントに
-    /// ついてのみ、スキマ区間に何か入り込んでいれば消滅フラッシュ演出付きで
-    /// パージする(#190: 地面部分はもう強制的にくり抜かない=プレイヤーが実際に
-    /// 掘り進む対象なので対象外。パージ対象はスキマのみ)。500mのボーナスフロアは
-    /// アイテム/AIRを意図的に配置する区間のため対象外。
+    /// チェックポイントのスキマ区間に、上から崩れてきたブロックやアイテムが滞留しない
+    /// ようにする。既に到達済みのチェックポイントについてのみ、スキマ区間に何か入り込んで
+    /// いれば消滅フラッシュ演出付きでパージする(地面部分はプレイヤーが掘り進む対象なので
+    /// 対象外)。500mのボーナスフロアはアイテム/AIRを意図的に配置する区間のため対象外。
     fn purge_checkpoint_zone_debris(&mut self, vanish_delay: Duration) {
         let width = self.board.width();
         let depth_rows = self.board.depth_rows();
@@ -2542,7 +2293,7 @@ impl Game {
         }
         if !cleared.is_empty() {
             // 重力tickから呼ばれるため、ちょうどこのtickでスキマへ落ちてきたブロックも
-            // 対象になりうる。落下補間の到着を待ってからフラッシュする(#234)。
+            // 対象になりうる。落下補間の到着を待ってからフラッシュする。
             self.note_vanished_cells(cleared, vanish_delay);
         }
     }
@@ -2550,8 +2301,8 @@ impl Game {
     /// デバッグ: プレイヤー付近(上下`DEBUG_UNIFY_COLORS_RANGE_ROWS`行)の色ブロックを
     /// ランダムに選んだ2色だけへ揃える。Playing中のみ有効。
     ///
-    /// 抽選にはOS乱数ではなくゲーム開始時のシードから作った`self.rng`を使う(#221)。
-    /// 同じシード・同じ入力列なら盤面が完全に再現されるようにするため。
+    /// 抽選にはOS乱数ではなくゲーム開始時のシードから作った`self.rng`を使う。同じシード・
+    /// 同じ入力列なら盤面が完全に再現されるようにするため。
     pub fn debug_unify_nearby_colors(&mut self) -> Vec<GameEvent> {
         if self.status != GameStatus::Playing {
             return Vec::new();
@@ -2581,30 +2332,18 @@ impl Game {
 
         // 重力ティックの外から色配置を直接書き換えたため、塊(連結グループ)の境界が
         // 変わっている。まだ揺れ猶予中(落下し始めていない)の古い揺れ状態は引きずらず、
-        // 次の重力ティックで結合関係を一から作り直させる(ユーザー指摘: 「ちゃんと結合
-        // 関係を再計算するように」)。ただし既に揺れが明けて連続落下中の塊まで巻き込んで
-        // 揺れ直させてしまうと、Cを押した瞬間に「フリーズしたように見える」(ユーザー指摘:
-        // 「ショートカット:Cにした瞬間これで落ちずにフリーズしてるように見える」)ため、
-        // そちらは対象外にする。
+        // 次の重力ティックで結合関係を一から作り直させる。ただし既に揺れが明けて連続
+        // 落下中の塊まで揺れ直させると、押した瞬間にフリーズしたように見えるため対象外。
         //
-        // なお、塗り替えで新たに4連結以上になった箇所を即座に自動消滅させる処理は
-        // 過去に実装していたが、「単にブロックの色を2色に変換するだけでよくて、
-        // 消滅させなくていい」というユーザー指摘により廃止した。連結の再計算(揺れ状態の
-        // リセット)だけ行い、実際の消滅判定は通常の重力ティック(支えを失って落下・
-        // 着地した場合のみ)に委ねる。
+        // 塗り替えで新たに4連結以上になった箇所はここでは消さない。消滅判定は通常の
+        // 重力ティック(支えを失って落下・着地した場合のみ)に委ねる。
         self.gravity_state.reset_shake_progress(self.shake_ticks());
 
         Vec::new()
     }
 
-    /// デバッグ: プレイヤーに最も近いスターブロックを1つ、実際にドリルで取得した
-    /// (`DrillOutcome::StarDestroyed`)のと全く同じ挙動(消滅・スコア加算・同じ
-    /// イベント列)で取得する。盤面上にスターが1つも無ければ何もしない。Playing中
-    /// のみ有効(TERM独自拡張。当初「最寄りのスターを取得」として実装したが、
-    /// ユーザー指摘: 「Kは最寄りのスターを取得になってるけど、違う 画面内をスター化
-    /// する(Xブロック,ダイヤブロック100%)」を受けて仕様変更。画面内(プレイヤー位置
-    /// から上下`STAR_VISIBLE_RANGE_ROWS`行)にあるXブロック・ダイヤブロックを、
-    /// 揺れ中のセルを除き全て(100%)スターブロックへ変える)。
+    /// デバッグ: 画面内(プレイヤー位置から上下`STAR_VISIBLE_RANGE_ROWS`行)にあるXブロック・
+    /// ダイヤブロックを、揺れ中のセルを除き全てスターブロックへ変える。Playing中のみ有効。
     pub fn debug_starify_visible_screen(&mut self) {
         if self.status != GameStatus::Playing {
             return;
@@ -2626,12 +2365,10 @@ impl Game {
         }
     }
 
-    /// 1個のボムの爆風を盤面へ適用する(炎フラッシュ・岩/ダイヤのスター化・色ブロック
-    /// の一色統一・アイテムブロックの破壊・新たに4連結以上になったグループの自動消滅)。
-    /// プレイヤーが爆風に
-    /// 巻き込まれたかどうかを返すのみで、ミス処理自体は呼び出し側の責務とする
-    /// (TERM独自拡張。通常の起爆カウントダウン完了時`detonate_bomb`と、死亡時の
-    /// 即時全爆発`detonate_all_bombs_immediately`(#176)の両方から共通で使う)。
+    /// 1個のボムの爆風を盤面へ適用する(炎フラッシュ・岩/ダイヤのスター化・色ブロックの
+    /// 一色統一・アイテムブロックの破壊・新たに4連結以上になったグループの自動消滅)。
+    /// プレイヤーが爆風に巻き込まれたかどうかを返すのみで、ミス処理自体は呼び出し側の
+    /// 責務とする(通常の起爆完了時と、死亡時の即時全爆発の両方から共通で使うため)。
     fn apply_bomb_blast(&mut self, bomb: &Bomb, events: &mut Vec<GameEvent>) -> bool {
         let blast_cells = bomb_blast_cells(
             &self.board,
@@ -2641,14 +2378,10 @@ impl Game {
         );
         let mut hit_player = false;
         let flash = Duration::from_millis(BOMB_EXPLOSION_FLASH_MS);
-        // 爆風が届いた色ブロックは一色に統一する(TERM独自拡張。#137。ユーザー
-        // 指摘: 「色ブロックは爆弾の炎によって一色に統一される」)。爆発ごとに
-        // 1色をランダムに選び、その爆発の範囲内にある色ブロック全てを同じ色に
-        // 揃える。ショートカットC/UnifyColorsアイテムは「4連結以上でも即座には
-        // 自動消滅させない」方針(#49)だが、ボム爆発については「爆弾で変化した
-        // 壁は落ちたときと同じ反応を発動させる。4マス以上結合している場合は
-        // 消える」というユーザーの明示的な指摘(#140)により、着地時の自動消滅と
-        // 同じ判定をこの場で発火させる。
+        // 爆風が届いた色ブロックは一色に統一する。爆発ごとに1色をランダムに選び、その
+        // 爆発の範囲内にある色ブロック全てを同じ色に揃える。ショートカットC/UnifyColors
+        // アイテムと違い、ボム爆発では統一後に4連結以上になったグループを着地時の自動
+        // 消滅と同じ判定でこの場で消す。
         use rand::RngExt;
         let all_colors = ColorKind::ALL;
         let unify_color = all_colors[self.rng.random_range(0..all_colors.len())];
@@ -2659,18 +2392,14 @@ impl Game {
             if (row, col) == self.player.position() {
                 hit_player = true;
             }
-            // 爆心地(ボム設置マス)からの距離が遠いほど炎の色調を外側寄りに
-            // する(TERM独自拡張。#126。bombermantermの爆風スプライトが
-            // 中心ほど白熱・外側ほど赤黒くなるのに倣う)。爆風は上下左右の
-            // 直線上にしか届かないため、マンハッタン距離がそのまま
-            // 「軸方向に何マス離れているか」と一致する。
+            // 爆心地(ボム設置マス)から遠いほど炎の色調を外側寄り(中心ほど白熱、外側
+            // ほど赤黒い)にする。爆風は上下左右の直線上にしか届かないため、マンハッタン
+            // 距離がそのまま「軸方向に何マス離れているか」と一致する。
             let tier = row.abs_diff(bomb.pos.0) + col.abs_diff(bomb.pos.1);
             let tier = tier.min(u8::MAX as usize) as u8;
-            // 炎フラッシュは着弾したセルの中身を問わず、爆風が通過した
-            // 全マスに表示する(TERM独自拡張。#166)。以前はRock/Diamond/
-            // Colorを変化させた場合にのみ発火しており、#159で爆風が
-            // Empty(既に掘削済みの空間)も遠くまで貫通するようになった
-            // ことで、炎が全く見えないマスが大半を占めてしまっていた。
+            // 炎フラッシュは着弾したセルの中身を問わず、爆風が通過した全マスに表示する。
+            // Rock/Diamond/Colorを変化させた場合だけにすると、爆風がEmpty(既に掘削済み
+            // の空間)を貫通する区間で炎が全く見えなくなる。
             self.recently_exploded.push(((row, col), flash, tier));
             if matches!(self.board.cell(row, col), Cell::Rock { .. } | Cell::Diamond) {
                 self.board.set(row, col, Cell::Star { visible_ms: 0 });
@@ -2678,13 +2407,10 @@ impl Game {
                 self.board.set(row, col, Cell::Color(unify_color));
                 unified_positions.push((row, col));
             } else if matches!(self.board.cell(row, col), Cell::Item(_)) {
-                // アイテムブロック(C/R/K)は爆風で破壊する(TERM独自拡張。#213。
-                // ユーザー指摘: 「ボムはアイテムも消し飛ばす仕様に変更したい」)。
-                // #110では頭上一括クリア系の効果に対してアイテムをAIRと同じ保護
-                // 対象にしたが、その保護はボムの爆風には及ばせない(AIR自体の
-                // 扱いは従来通り無変更)。効果は発動させず、価値物(スター)も
-                // 生まずにただ消す。取得(プレイヤーが触れる)と破壊(爆風に
-                // 巻き込まれる)は別物として扱う。
+                // アイテムブロック(C/R/K)は爆風で破壊する。頭上一括クリア系の効果では
+                // アイテムをAIRと同じ保護対象にしているが、その保護はボムの爆風には
+                // 及ばせない(AIR自体は爆風でも消さない)。効果は発動させず、スターも
+                // 生まずにただ消す。取得(触れる)と破壊(爆風)は別物として扱う。
                 let old = self.board.cell(row, col);
                 self.board.set(row, col, Cell::Empty);
                 destroyed_items.push(((row, col), old));
@@ -2698,9 +2424,8 @@ impl Game {
             self.note_vanished_cells(destroyed_items, Duration::ZERO);
         }
 
-        // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅
-        // させる(TERM独自拡張。#140)。同じグループに属する複数の位置を
-        // 二重に処理しないよう、既に判定した位置は`checked`で除外する。
+        // 一色に統一した結果、新たに4連結以上になったグループはこの場で消滅させる。同じ
+        // グループに属する複数の位置を二重に処理しないよう、判定済みは`checked`で除外する。
         let mut checked: Vec<board::Pos> = Vec::new();
         for &pos in &unified_positions {
             if checked.contains(&pos) {
@@ -2727,13 +2452,10 @@ impl Game {
         hit_player
     }
 
-    /// `initial`のボムをまとめて爆発させる。爆風が他の(まだ`self.bombs`に残っている)
-    /// ボムを巻き込んだら、そのボムも連鎖してこの場で爆発させる(誘爆、TERM独自拡張。
-    /// #180。ユーザー指摘: 「爆弾は誘爆する」)。1個でも爆発が終わるまで(連鎖も含めて)
-    /// ミス処理は行わず、`trigger_miss_on_hit`がtrueの場合のみ、連鎖全体でプレイヤーが
-    /// 一度でも巻き込まれていればその場でミス処理する(死亡処理の途中
-    /// `resolve_death_board_effects`から呼ぶ場合はfalseにし、これ以上のミス処理の
-    /// 連鎖はしない。既に死亡処理の最中であるため)。
+    /// `initial`のボムをまとめて爆発させる。爆風が他の(まだ`self.bombs`に残っている)ボムを
+    /// 巻き込んだら、そのボムも連鎖してこの場で爆発させる(誘爆)。連鎖が全て終わるまで
+    /// ミス処理は行わず、`trigger_miss_on_hit`がtrueの場合のみ、連鎖全体でプレイヤーが一度
+    /// でも巻き込まれていればその場でミス処理する(死亡処理の途中から呼ぶ場合はfalse)。
     fn detonate_bombs(
         &mut self,
         initial: Vec<Bomb>,
@@ -2763,9 +2485,8 @@ impl Game {
                 queue.push(self.bombs.remove(i));
             }
         }
-        // 同一フレームで複数のボムが爆発し、どちらもプレイヤーを巻き込んだ場合に
-        // 二重でミス処理しないよう、既にミス処理済み(is_dying/GameOverへ遷移済み)
-        // でないことを確認してから適用する。
+        // 同一フレームで複数のボムが爆発し、どちらもプレイヤーを巻き込んだ場合に二重で
+        // ミス処理しないよう、既にミス処理済み(is_dying/GameOver)でないことを確認する。
         if trigger_miss_on_hit
             && any_hit_player
             && !self.is_dying()
@@ -2775,20 +2496,17 @@ impl Game {
         }
     }
 
-    /// 盤面上の全てのボムを、画面内外を問わずこの場で即座に爆発させる(誘爆の連鎖込み。
-    /// TERM独自拡張。#176。ユーザー指摘: 「死んだら...画面内外の爆弾は即時爆発」)。
+    /// 盤面上の全てのボムを、画面内外を問わずこの場で即座に爆発させる(誘爆の連鎖込み)。
     /// 死亡処理の途中(`resolve_death_board_effects`)から呼ぶため、爆風がプレイヤーを
-    /// 巻き込んでもこれ以上のミス処理の連鎖はしない(既に死亡処理の最中であるため)。
+    /// 巻き込んでもこれ以上のミス処理の連鎖はしない。
     fn detonate_all_bombs_immediately(&mut self, events: &mut Vec<GameEvent>) {
         let bombs = std::mem::take(&mut self.bombs);
         self.detonate_bombs(bombs, events, false);
     }
 
-    /// プレイヤーのマスにブロックが重なってしまっていたら、空いているマスが
-    /// 見つかるまで1マスずつ上へ押し上げる(TERM独自拡張。#176。ユーザー指摘:
-    /// 「ブロックとキャラが重ならないように重なったときは必ずその一つうえへ、
-    /// それでも重なったらさらにうえへを繰り返し演算する」)。見つからなければ
-    /// (起こりにくい極端なケース)そのブロックは諦めて消す。
+    /// プレイヤーのマスにブロックが重なってしまっていたら、空いているマスが見つかるまで
+    /// 1マスずつ上へ押し上げる。見つからなければ(起こりにくい極端なケース)そのブロックは
+    /// 諦めて消す。
     fn resolve_block_player_overlap(&mut self) {
         let (row, col) = self.player.position();
         let cell = self.board.cell(row, col);
@@ -2804,13 +2522,9 @@ impl Game {
         }
     }
 
-    /// 死亡時(押し潰し/酸素切れ)の盤面への影響をまとめて処理する(TERM独自拡張。
-    /// #176。ユーザー指摘: 「死んだらキャラより上部のアイテムはただちに画面内に
-    /// 移動させ、落下開始。画面内外の爆弾は即時爆発。ブロックとキャラが重ならない
-    /// ように...」)。
-    /// - 頭上のクリアはRアイテムと全く同じ処理(`debug_clear_above_player`)を使う
-    ///   (ユーザー指摘: 「死んだときのキャラの上位の消し方はRアイテムと同じとする」)。
-    ///   画面外に残っていたAIR/アイテムも同じ処理内で画面内へ詰め直される。
+    /// 死亡時(押し潰し/酸素切れ)の盤面への影響をまとめて処理する。
+    /// - 頭上のクリアはRアイテムと同じ処理(`debug_clear_above_player`)を使う。画面外に
+    ///   残っていたAIR/アイテムも同じ処理内で画面内へ詰め直される。
     /// - 画面内外を問わず、盤面上の全てのボムをこの場で即座に爆発させる。
     /// - 上記の結果、プレイヤーのマスにブロックが重なってしまっていたら押し上げる。
     fn resolve_death_board_effects(&mut self, events: &mut Vec<GameEvent>) {
@@ -2819,9 +2533,8 @@ impl Game {
         self.resolve_block_player_overlap();
     }
 
-    /// ボム出現を1回判定する(TERM独自拡張。#96)。盤面全体のボム数が上限未満で、
-    /// 深度・設定に応じた確率の抽選に当たれば、画面内のランダムなEmptyマスへ
-    /// ボムを1個設置する。
+    /// ボム出現を1回判定する。盤面全体のボム数が上限未満で、深度・設定に応じた確率の
+    /// 抽選に当たれば、画面内のランダムなEmptyマスへボムを1個設置する。
     fn maybe_spawn_bomb(&mut self) {
         if self.bombs.len() >= BOMB_MAX_COUNT_ON_BOARD {
             return;
@@ -2835,10 +2548,9 @@ impl Game {
         self.spawn_bomb_at_random_empty_cell();
     }
 
-    /// 画面内(プレイヤー位置から上下`STAR_VISIBLE_RANGE_ROWS`行)のEmptyマスを1つ
-    /// ランダムに選び、ボムを設置する(TERM独自拡張。#96)。候補が無ければ何もしない。
-    /// 既存の他のボムが既に占めているマスは候補から除外する(TERM独自拡張。#143。
-    /// ユーザー指摘: 「爆弾は爆弾に重ならないようにする」)。
+    /// 画面内(プレイヤー位置から上下`STAR_VISIBLE_RANGE_ROWS`行)のEmptyマスを1つランダムに
+    /// 選び、ボムを設置する。候補が無ければ何もしない。他のボムが既に占めているマスは
+    /// 候補から除外する(ボム同士を重ねないため)。
     fn spawn_bomb_at_random_empty_cell(&mut self) {
         let start_row = self.player.row.saturating_sub(STAR_VISIBLE_RANGE_ROWS);
         let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS)
@@ -2856,9 +2568,8 @@ impl Game {
         }
         let idx = self.rng.random_range(0..candidates.len());
         let pos = candidates[idx];
-        // 白ボンは画面の左端・右端のどちらかから登場する(TERM独自拡張。#123。
-        // ユーザー指摘: 「白ボンが画面の外からとことこやってきて」)。同じ行の
-        // 反対側の端から登場すれば、必ず盤面内を横切って転がってくる形になる。
+        // 白ボンは画面の左端・右端のどちらかから登場する。同じ行の端から登場させることで、
+        // 必ず盤面内を横切って転がってくる形になる。
         let edge_col = if self.rng.random_range(0..2) == 0 {
             0
         } else {
@@ -2874,9 +2585,8 @@ impl Game {
         });
     }
 
-    /// デバッグ: ボムを1個、画面内のランダムなEmptyマスへ即座に設置する(TERM独自拡張。
-    /// #96。ユーザー指摘: 「ショートカットキーもくれ」)。盤面全体のボム数が上限に
-    /// 達している、または出現先が無ければ何もしない。Playing中のみ有効。
+    /// デバッグ: ボムを1個、画面内のランダムなEmptyマスへ即座に設置する。盤面全体のボム数
+    /// が上限に達している、または出現先が無ければ何もしない。Playing中のみ有効。
     pub fn debug_place_bomb(&mut self) {
         if self.status != GameStatus::Playing || self.bombs.len() >= BOMB_MAX_COUNT_ON_BOARD {
             return;
@@ -2885,15 +2595,11 @@ impl Game {
     }
 }
 
-/// `BombPhase::Settling`中の1歩ぶんの移動(TERM独自拡張。#140)。支えを失って
-/// いれば1マス落下し、支持されていれば現在の`bounce_dir`(+1=右、-1=左)方向へ
-/// 1マス移動を試みる。移動先が壁・既存ブロック・他のボム・プレイヤーの現在地で
-/// 塞がっていれば方向を反転する(次のステップで反対方向を試す)。
-/// `other_bomb_positions`は他のボムの現在位置(TERM独自拡張。#143。ユーザー指摘:
-/// 「爆弾は爆弾に重ならないようにする」)。`player_pos`はプレイヤーの現在位置
-/// (TERM独自拡張。#144。ユーザー指摘: 「爆弾はキャラの頭にぶつかったら別の列に
-/// ころがっていく」)。いずれもCellグリッドとは別のオーバーレイ/エンティティの
-/// ため、盤面のセルだけを見ていると重なって落下・移動してしまう。
+/// `BombPhase::Settling`中の1歩ぶんの移動。支えを失っていれば1マス落下し、支持されて
+/// いれば現在の`bounce_dir`(+1=右、-1=左)方向へ1マス移動を試みる。移動先が壁・既存
+/// ブロック・他のボム・プレイヤーの現在地で塞がっていれば方向を反転する。
+/// `other_bomb_positions`と`player_pos`はいずれもCellグリッドとは別のオーバーレイ/
+/// エンティティで、盤面のセルだけを見ていると重なって落下・移動してしまうため渡す。
 fn bomb_settle_step(
     board: &Board,
     pos: &mut board::Pos,
@@ -2947,10 +2653,9 @@ mod tests {
     use crate::constants::{FRAME_INTERVAL_MS, ROCK_HITS_TO_BREAK, SHAKE_TICKS};
     use board::{Cell, ColorKind};
 
-    /// テスト用ヘルパー: 盤面全体を`Cell::Empty`にクリアする。`Game::new`はランダム
-    /// 生成された盤面を持つため、テストが制御していない場所(意図した数行の外側)にも
-    /// 未支持のグループが残っていると、支えの連鎖判定によって盤面全体で予期しない
-    /// 自動消滅・スコア加算が起きてしまう。重力・自動消滅系のテストは必ずこれで
+    /// テスト用ヘルパー: 盤面全体を`Cell::Empty`にクリアする。`Game::new`の盤面はランダム
+    /// 生成なので、テストが制御していない場所に未支持のグループが残っていると、支えの連鎖
+    /// 判定で予期しない自動消滅・スコア加算が起きる。重力・自動消滅系のテストは必ずこれで
     /// クリアしてから対象セルだけを配置すること。
     fn clear_board(game: &mut Game) {
         for row in game.board.rows.iter_mut() {
@@ -2962,17 +2667,15 @@ mod tests {
 
     #[test]
     fn refresh_debug_log_disables_recording_when_the_setting_is_off() {
-        // ユーザー指摘: 「デバッグ用のDB記録するしないトグル設定に追加」(#167)。
         // enabled=falseなら記録先を開かない(debug_logがNoneのまま)ことを確認する。
-        // enabled=true側はディスクI/O(dirsクレート経由の実パス)に依存するため
-        // 環境依存になり得るのでここでは確認しない(open_fresh自体は
-        // debug_log.rs側で別途テスト済み)。
+        // enabled=true側は実パスへのディスクI/Oに依存し環境依存になり得るため、ここでは
+        // 確認しない(open_fresh自体はdebug_log.rs側で別途テスト済み)。
         let mut game = Game::new(1);
         game.refresh_debug_log(false);
         assert!(game.debug_log.is_none(), "無効化時はログを記録しないはず");
     }
 
-    // --- フレーム巻き戻し(#233) ---------------------------------------------
+    // --- フレーム巻き戻し ---------------------------------------------------
 
     /// 巻き戻しの決定性テスト用: 移動・掘削・時間経過を決まった順序で1ステップ進める。
     /// 同じ手順を同じ状態から踏めば、必ず同じ結果にならなければならない。
@@ -3306,10 +3009,9 @@ mod tests {
 
     #[test]
     fn a_custom_depth_goal_clears_the_game_there_instead_of_at_field_depth_m() {
-        // TERM独自拡張(#112)。ユーザー指摘: 「起動フローにモードセレクト画面を
-        // 追加」。コース長は`new_with_width`の`depth_goal_m`で選べるため、ノーマル
-        // コース既定の1000mより短いゴールでもそのゴールで正しくクリアすることを
-        // 確認する(テスト時間短縮のため、実際の500mではなく20mの短いコースで検証)。
+        // コース長は`new_with_width`の`depth_goal_m`で選べるため、ノーマルコース既定の
+        // 1000mより短いゴールでもそこで正しくクリアすることを確認する(テスト時間短縮の
+        // ため、実際の500mではなく20mの短いコースで検証)。
         let depth_goal_m = 20;
         let mut game = Game::new_with_width(1, FIELD_WIDTH_DEFAULT, depth_goal_m);
         assert_eq!(
@@ -3336,8 +3038,7 @@ mod tests {
 
     #[test]
     fn drilling_an_item_does_nothing_like_air() {
-        // ユーザー指摘: 「アイテムはAIRと同じ用に掘らなくても取得でき」。AIR同様、
-        // 掘削では何も起きず、ブロックはそのまま残る。
+        // アイテムはAIR同様「触れるだけで取得」なので、掘削では何も起きずその場に残る。
         let mut game = Game::new(74);
         clear_board(&mut game);
         game.player.row = 500;
@@ -3356,8 +3057,7 @@ mod tests {
 
     #[test]
     fn touching_a_clear_above_item_clears_blocks_above_the_player_and_emits_event() {
-        // ユーザー指摘: 「ショートカットRと同じ効果のあるアイテムつくろ」「アイテムは
-        // AIRと同じ用に掘らなくても取得でき」。
+        // Rアイテム(ショートカットRと同じ効果)は、掘らずに触れるだけで取得できる。
         let mut game = Game::new(74);
         clear_board(&mut game);
         game.player.row = 500;
@@ -3386,7 +3086,7 @@ mod tests {
 
     #[test]
     fn touching_a_unify_colors_item_reduces_nearby_colors_to_two_and_emits_event() {
-        // ユーザー指摘: 「ショートカットC効果のアイテムも作って」。
+        // Cアイテム(ショートカットCと同じ効果)。
         let mut game = Game::new(74);
         clear_board(&mut game);
         game.player.row = 500;
@@ -3433,7 +3133,7 @@ mod tests {
 
     #[test]
     fn touching_a_starify_screen_item_converts_visible_rock_and_diamond_to_stars_and_emits_event() {
-        // ユーザー指摘: 「ショートカットKアイテムつくって」。
+        // Kアイテム(ショートカットKと同じ効果)。
         let mut game = Game::new(74);
         clear_board(&mut game);
         game.player.row = 500;
@@ -3456,17 +3156,15 @@ mod tests {
 
     #[test]
     fn item_survives_falling_together_with_a_diamond_above_it() {
-        // ユーザー指摘: 「RアイテムやKアイテムがその上にダイヤブロックなどがあるとき、
-        // 一緒に落下する過程で消えてしまう(必ず再現する)」。アイテムの真上にダイヤが
-        // あり両方支えを失って一緒に落下しても、アイテムが消えずに着地することを確認する。
+        // アイテムの真上にダイヤがあり両方支えを失って一緒に落下しても、アイテムが
+        // 消えずに着地することを確認する(過去に落下の過程で消えるバグがあった)。
         const FRAME_MS: u64 = 33;
         let mut game = Game::new(80);
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 11;
-        // ボムの自然発生を無効化する(TERM独自拡張。この長時間シミュレーションの
-        // 途中でたまたま自然発生したボムがプレイヤーに命中すると、その死亡処理が
-        // このテストの本題と無関係な列のダイヤまで巻き込んでしまい得るため)。
+        // ボムの自然発生を無効化する。この長時間シミュレーションの途中で自然発生した
+        // ボムがプレイヤーに命中すると、その死亡処理が無関係な列のダイヤまで巻き込む。
         game.set_bomb_spawn_rate_percent(0);
 
         game.board.rows[500][0] = Cell::Diamond;
@@ -3475,12 +3173,9 @@ mod tests {
         let total_ms_needed = (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 500 * FALL_TICK_MS;
         let mut elapsed_ms = 0u64;
         while elapsed_ms < total_ms_needed {
-            // このテストは酸素カプセルを一切置かないまま数分相当の時間を進めるため、
-            // 何もしないと道中で酸素切れ→死亡→復活のサイクルが発生し、死亡時の頭上
-            // クリア(#176、Rアイテムと同じ盤面幅全体)がこのテストの本題と無関係な
-            // 列のダイヤまで巻き込んで消してしまう。このテストの検証対象(ダイヤと
-            // アイテムが一緒に落下する際の重力エンジンの挙動)とは無関係なため、
-            // 酸素は毎フレーム全回復させて死亡サイクル自体を起こさせない。
+            // 酸素カプセルを置かないまま数分相当の時間を進めるため、何もしないと道中で
+            // 酸素切れ→死亡→復活のサイクルが起き、死亡時の頭上クリア(盤面幅全体)が
+            // 無関係な列のダイヤまで消してしまう。酸素は毎フレーム全回復させて防ぐ。
             game.player.oxygen = crate::constants::OXYGEN_MAX;
             game.update(Duration::from_millis(FRAME_MS));
             elapsed_ms += FRAME_MS;
@@ -3509,10 +3204,9 @@ mod tests {
 
     #[test]
     fn item_top_up_keeps_placing_new_items_far_ahead_as_the_player_advances() {
-        // 事故の再現・再発防止(#210/#211): 「盤面全体で生涯10個」という旧仕様
-        // (#113)だと、配分率300%では深度40〜50m台で上限を使い切り、残り900m以上
-        // まったく出現しなくなっていた。窓単位の補充に変更した後は、プレイヤーが
-        // 深く進んでも常に前方の窓にアイテムが供給され続けるはず。
+        // 「盤面全体で生涯10個」という旧仕様では、配分率300%で深度40〜50m台に上限を
+        // 使い切り、残り900m以上まったく出現しなくなっていた。窓単位の補充に変更した
+        // 後は、プレイヤーが深く進んでも常に前方の窓へアイテムが供給され続けるはず。
         let mut game = Game::new(1);
         game.reroll_spawn_rates_from(2, 100, 100, 100, 100, 300, 300, 300, 4, 100);
 
@@ -3531,8 +3225,7 @@ mod tests {
 
         // プレイヤーを深度500mまで1行ずつ進め、その都度check_level_and_clearを呼ぶ
         // (通常プレイと同じ呼び出しパターン)。窓は毎回わずかに前進するだけなので、
-        // 一度に500行ぶんをまとめて抽選する(その回だけ上限に達して終わる)のとは
-        // 違う結果になる。
+        // 500行ぶんをまとめて抽選する場合とは結果が違う。
         for row in 1..=500 {
             game.player.row = row;
             game.check_level_and_clear(&mut Vec::new());
@@ -3551,9 +3244,8 @@ mod tests {
 
     #[test]
     fn oxygen_running_out_during_update_costs_a_life_and_continues() {
-        // 酸素切れも押し潰しと同じ処理を経る(TERM独自拡張。ユーザー指摘:
-        // 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」)ため、
-        // ライフ減算・酸素回復は「天に召される」演出完了まで遅延される。
+        // 酸素切れも押し潰しと同じ処理を経るため、ライフ減算・酸素回復は
+        // 「天に召される」演出完了まで遅延される。
         let mut game = Game::new(2);
         game.player.oxygen = 1.0;
         let lives_before = game.player.lives;
@@ -3595,7 +3287,7 @@ mod tests {
         );
     }
 
-    // --- 無敵(ミス無効) / オートプレイの土台(TERM独自拡張。#218) ---
+    // --- 無敵(ミス無効) / オートプレイの土台 ---
 
     #[test]
     fn invincible_is_off_by_default_so_existing_behaviour_is_unchanged() {
@@ -3780,7 +3472,7 @@ mod tests {
         assert!(game.is_dying());
     }
 
-    // --- apply_input(手入力とオートプレイの共通入口。#218) ---
+    // --- apply_input(手入力とオートプレイの共通入口) ---
 
     #[test]
     fn apply_input_routes_the_five_gameplay_actions_to_their_handlers() {
@@ -3869,7 +3561,7 @@ mod tests {
         );
     }
 
-    // --- is_cell_unstable(オートプレイの安全判定。#218) ---
+    // --- is_cell_unstable(オートプレイの安全判定) ---
 
     #[test]
     fn is_cell_unstable_is_false_for_cells_that_can_never_fall_on_you() {
@@ -3926,7 +3618,7 @@ mod tests {
         assert!(!game.is_cell_unstable(0, game.board.width()));
     }
 
-    // --- GameOverダイアログ(TERM独自拡張) ---
+    // --- GameOverダイアログ ---
 
     #[test]
     fn game_over_selection_defaults_to_back_to_title_and_toggles() {
@@ -4015,9 +3707,8 @@ mod tests {
 
     #[test]
     fn set_move_cooldown_ms_changes_how_quickly_repeated_moves_are_accepted() {
-        // ユーザー指摘: 「横移動のスピードを設定で変えられるように」。設定値を小さく
-        // すると、既定(INPUT_COOLDOWN_MS=80ms)では通らないはずの短い間隔でも
-        // 次の移動入力が通ることを確認する。
+        // 設定値を小さくすると、既定(INPUT_COOLDOWN_MS=80ms)では通らないはずの短い
+        // 間隔でも次の移動入力が通ることを確認する。
         let mut game = Game::new(5);
         for col in 0..FIELD_WIDTH {
             game.board.rows[game.player.row + 1][col] = Cell::Rock { hits: 0 };
@@ -4039,11 +3730,9 @@ mod tests {
 
     #[test]
     fn move_cooldown_overshoot_carries_forward_to_the_next_slot() {
-        // ユーザー指摘: 「左右にキャラ走るとき、速くなったり遅くなったりしてる。
-        // 一定のインターバルで速度が落ちたりする」。クールダウンぶんを使い切った後、
-        // 少し余分に時間が経ってから次の入力が来た場合、その超過ぶんは繰り越され、
-        // その次の入力までの待ち時間がその分だけ短くなることを確認する
-        // (0へリセットする旧実装では、この繰り越しが起きずジッターの原因になっていた)。
+        // クールダウンぶんを使い切った後、少し余分に時間が経ってから次の入力が来た場合、
+        // その超過ぶんが繰り越され、次の入力までの待ち時間がその分だけ短くなることを確認
+        // する(0へリセットする旧実装ではこの繰り越しが起きずジッターの原因になっていた)。
         let mut game = Game::new(6);
         for col in 4..=8 {
             game.board.rows[game.player.row + 1][col] = Cell::Rock { hits: 0 };
@@ -4073,9 +3762,8 @@ mod tests {
 
     #[test]
     fn move_cooldown_accum_does_not_bank_unbounded_after_a_long_idle_period() {
-        // 長時間入力が無い間にアキュムレータが際限なく貯まると、後からまとめて
-        // 連続入力が全て即座に通ってしまう(バースト)。上限で頭打ちにして
-        // それを防いでいることを確認する。
+        // 長時間入力が無い間にアキュムレータが際限なく貯まると、後からまとめて連続入力が
+        // 全て即座に通ってしまう(バースト)。上限で頭打ちにして防いでいることを確認する。
         let mut game = Game::new(7);
         for col in 4..=8 {
             game.board.rows[game.player.row + 1][col] = Cell::Rock { hits: 0 };
@@ -4142,7 +3830,7 @@ mod tests {
 
     #[test]
     fn reaching_level_10_grants_an_extra_life() {
-        // ユーザー指摘: 「Lv.10ごとにLive+1」(#169)。
+        // Lv.10ごとにライフ+1。
         let mut game = Game::new(5);
         game.player.row = 9 * crate::constants::LEVEL_STEP_M - 1; // depth=270, level=9のまま
         game.player.facing = Direction::Down;
@@ -4161,8 +3849,7 @@ mod tests {
 
     #[test]
     fn extra_life_at_level_10_is_clamped_at_the_lives_max() {
-        // 既にライフが上限(LIVES_MAX)の場合、イベント自体は発生するが上限を
-        // 超えて増えないことを確認する(#169)。
+        // 既にライフが上限(LIVES_MAX)の場合、イベント自体は発生するが増えない。
         let mut game = Game::new(5);
         game.player.row = 9 * crate::constants::LEVEL_STEP_M - 1;
         game.player.facing = Direction::Down;
@@ -4181,11 +3868,8 @@ mod tests {
 
     #[test]
     fn reaching_a_100m_checkpoint_clears_above_and_emits_the_event_and_flash() {
-        // ユーザー指摘(#178): 「100mすすむごとにそれより上部のオブジェクトを全クリア、
-        // 100mごとのゴールSEと演出、アニメーションする」。7章のレベル進行(30m刻み)とは
-        // 別の、100m刻みの独立した節目。#190により、到達判定は地面(CHECKPOINT_SAFE_
-        // ZONE_M)を実際に掘り抜いた地点(row=100+CHECKPOINT_SAFE_ZONE_M)まで後ろに
-        // ずれている(ユーザー指摘: 「地面についたら次、じゃなくて」)。
+        // 7章のレベル進行(30m刻み)とは別の、100m刻みの独立した節目。到達判定は地面
+        // (CHECKPOINT_SAFE_ZONE_M)を実際に掘り抜いた地点(row=100+CHECKPOINT_SAFE_ZONE_M)。
         let mut game = Game::new(90);
         game.player.row =
             crate::constants::CHECKPOINT_STEP_M + crate::constants::CHECKPOINT_SAFE_ZONE_M - 1; // 地面を掘り抜く直前
@@ -4214,11 +3898,9 @@ mod tests {
 
     #[test]
     fn checkpoint_ground_is_never_force_cleared_even_after_reaching_the_checkpoint() {
-        // #190: 「100mごとの地面そのものを掘ったら次の100mにすすむことにする。地面に
-        // ついたら次、じゃなくて」。地面(CHECKPOINT_SAFE_ZONE_M)部分はもう強制的に
-        // くり抜かない(プレイヤーが実際にドリルで掘り進む対象になった)ため、
-        // ゲーム開始直後はもちろん、実際にチェックポイントへ到達した後も、地面区間の
-        // 生成された地形(プレイヤー自身が掘っていない列)はそのまま残るはず。
+        // 地面(CHECKPOINT_SAFE_ZONE_M)部分は強制的にくり抜かずプレイヤーが掘り進む対象
+        // なので、ゲーム開始直後もチェックポイント到達後も、地面区間の生成された地形
+        // (プレイヤー自身が掘っていない列)はそのまま残るはず。
         let game = Game::new(300);
         let start = crate::constants::CHECKPOINT_STEP_M;
         let end = start + crate::constants::CHECKPOINT_SAFE_ZONE_M;
@@ -4233,11 +3915,9 @@ mod tests {
 
     #[test]
     fn applying_a_checkpoint_safe_zone_only_carves_the_gap_not_the_ground() {
-        // #190: 「100mごとの地面そのものを掘ったら次の100mにすすむことにする」。
         // apply_checkpoint_safe_zoneが実際にくり抜くのはスキマ(CHECKPOINT_ZONE_GAP_M)
-        // だけであり、地面(CHECKPOINT_SAFE_ZONE_M)区間そのものはくり抜かれず残る
-        // ことを直接確認する(`debug_clear_above_player`のような「頭上を全クリア」の
-        // 副次効果と混同しないよう、この関数単体を直接呼んで検証する)。
+        // だけで、地面(CHECKPOINT_SAFE_ZONE_M)区間は残ることを確認する(頭上を全クリア
+        // する`debug_clear_above_player`の副次効果と混同しないよう関数単体を直接呼ぶ)。
         let mut game = Game::new(301);
         game.board.rows[101][0] = Cell::Rock { hits: 0 };
 
@@ -4285,11 +3965,10 @@ mod tests {
     #[test]
     fn a_jump_that_skips_multiple_checkpoints_at_once_does_not_destructively_clear_or_fire_the_event()
      {
-        // #178実装時に発見: テストコード等が`player.row`を直接遠くへ書き換えると、
-        // 通常のプレイ(1行ずつしか進まない)では起こらない「一気に複数チェックポイント分
-        // 進む」ケースが生じうる。このとき区切り番号の追従はするが、頭上の破壊的な
-        // 全クリア・演出・イベント発火は行わない(無関係なテストの前提を壊さないため。
-        // 実際に一度、揺れ中セルを扱う別のテストがこれで壊れた)。
+        // テストコード等が`player.row`を直接遠くへ書き換えると、通常のプレイ(1行ずつ
+        // しか進まない)では起こらない「一気に複数チェックポイント分進む」ケースが生じる。
+        // このとき区切り番号の追従はするが、頭上の破壊的な全クリア・演出・イベント発火は
+        // 行わない(無関係なテストの前提を壊さないため)。
         let mut game = Game::new(92);
         clear_board(&mut game);
         game.player.row = 500; // 一気にcheckpoint=5相当まで飛ぶ(非正規経路)
@@ -4338,9 +4017,8 @@ mod tests {
     #[test]
     fn move_right_never_drills_and_climbs_over_a_blocking_color_block_on_second_press() {
         // カーソルキー(MoveLeft/MoveRight)は掘削を一切行わない。隣が塞がっていると、
-        // 1回目の入力ではぶつかって停止するだけで登らず、同じ方向への2回目の入力で
-        // 初めて1段上(row-1)へ登る(ユーザー指摘による2ステップ仕様)。ブロックは
-        // どちらの場合も破壊されない。
+        // 1回目の入力ではぶつかって停止するだけで登らず、同じ方向への2回目の入力で初めて
+        // 1段上(row-1)へ登る。ブロックはどちらの場合も破壊されない。
         let mut game = Game::new(6);
         game.player.row = 1;
         let target_col = game.player.col + 1;
@@ -4368,10 +4046,8 @@ mod tests {
 
     #[test]
     fn drilling_between_bump_and_second_press_does_not_cancel_the_pending_climb() {
-        // ユーザー指摘: 「カーソル押しっぱなしのときにzやx押すと進むのをキャンセル
-        // してしまう」。1回目のぶつかり(bumped_direction記憶)と2回目の同方向入力
-        // (段差登り)の間に掘削キー(Z/X)が挟まっても、段差登りがキャンセルされない
-        // ことを確認する。
+        // 1回目のぶつかり(bumped_direction記憶)と2回目の同方向入力(段差登り)の間に
+        // 掘削キーが挟まっても、段差登りがキャンセルされないことを確認する。
         let mut game = Game::new(6);
         game.player.row = 1;
         let target_col = game.player.col + 1;
@@ -4433,8 +4109,8 @@ mod tests {
 
     #[test]
     fn try_move_right_into_oxygen_capsule_collects_it_and_emits_event() {
-        // task2(ユーザー指摘): AIRカプセルは掘削不要で、Gameの公開API(try_move_right)を
-        // 通した隣接移動だけでも自動的に取得でき、SE再生用のGameEventも発火する。
+        // AIRカプセルは掘削不要で、隣接移動だけでも自動的に取得でき、SE再生用の
+        // GameEventも発火する。
         let mut game = Game::new(8);
         // 開始直後の上2行は常にEmptyなので、直下に足場を置いて横移動できる状態にする。
         game.board.rows[game.player.row + 1][game.player.col] = Cell::Rock { hits: 0 };
@@ -4527,9 +4203,8 @@ mod tests {
 
     #[test]
     fn drilling_a_rock_to_its_fifth_hit_vanishes_only_that_block() {
-        // ユーザー指摘: 「Xブロックは結合してても全体が消えるのではなく1ブロックしか
-        // 消せないものとする」。5回目のヒットで破壊されるのはそのセルのみで、
-        // 連結している隣の岩ブロックは影響を受けない。酸素ペナルティは-20%。
+        // 岩ブロックは連結していても掘削で消えるのは1ブロックのみ。5回目のヒットで
+        // 破壊されるのはそのセルだけで、隣の岩ブロックは影響を受けない(酸素は-20%)。
         let mut game = Game::new(40);
         game.player.facing = Direction::Down;
         let target_row = game.player.row + 1;
@@ -4563,9 +4238,8 @@ mod tests {
 
     #[test]
     fn falling_rock_blocks_connecting_to_four_or_more_auto_vanish_via_update() {
-        // ユーザー指摘: 「4個以上結合したらちゃんと消えないといけない」。岩ブロックも
-        // 支えを失えば(揺れを経て)落下し、支持されている岩ブロックに接触して連結、
-        // 4個以上になれば自動消滅する(得点は対象外)。
+        // 岩ブロックも支えを失えば(揺れを経て)落下し、支持されている岩ブロックに接触
+        // して連結、4個以上になれば自動消滅する(得点は対象外)。
         let mut game = Game::new(41);
         clear_board(&mut game);
         game.player.row = 999;
@@ -4631,12 +4305,9 @@ mod tests {
 
     #[test]
     fn chain_pause_blocks_gravity_resolution_until_it_elapses_then_resumes() {
-        // ユーザー指摘(#187): 「ブロックが消えて、連鎖的に次ブロックが消えるとき、0msで
-        // 連続するのではなく一定のインターバルで連鎖するように、設定画面から指定
-        // できるようにしてほしい」。`chain_pause_remaining`が0より大きい間は重力解決
-        // (盤面の変化)自体が一切進まず、経過後は通常通り再開することを確認する。
-        // 深度に応じた落下速度上昇(depth_fraction)の影響を避けるため、プレイヤーは
-        // 浅い深度に置く。
+        // `chain_pause_remaining`が0より大きい間は重力解決(盤面の変化)自体が一切進まず、
+        // 経過後は通常通り再開することを確認する。深度に応じた落下速度上昇
+        // (depth_fraction)の影響を避けるため、プレイヤーは浅い深度に置く。
         let mut game = Game::new(20);
         clear_board(&mut game);
         game.player.row = 1;
@@ -4735,9 +4406,8 @@ mod tests {
 
     #[test]
     fn auto_vanished_cells_show_a_vanish_flash_that_expires_after_block_vanish_flash_ms() {
-        // ユーザー指摘: 「ブロックが消える瞬間に消える演出してほしい」。自動消滅した
-        // セルは消滅直後にフラッシュ演出の対象になり、BLOCK_VANISH_FLASH_MS経過後に
-        // 対象から外れることを確認する。
+        // 自動消滅したセルは消滅直後にフラッシュ演出の対象になり、
+        // BLOCK_VANISH_FLASH_MS経過後に対象から外れることを確認する。
         let mut game = Game::new(12);
         clear_board(&mut game);
         game.player.row = 999;
@@ -4774,10 +4444,8 @@ mod tests {
 
     #[test]
     fn note_vanished_cells_extends_adjacent_still_flashing_cells_for_chain_reactions() {
-        // ユーザー指摘: 「隣接ブロックで消える演出に入るなかで完全に消える前に別の
-        // 隣接ブロックがあったら、消える演出を延長してそれも消す」。重力で連鎖的に
-        // 4連結消滅が起きた場合、先に消えたセルの演出が途切れず1つの連鎖に見えるように
-        // する。
+        // 重力で連鎖的に4連結消滅が起きた場合、先に消えたセルの演出が途切れず
+        // 1つの連鎖に見えるよう、隣接セルの消滅で残り時間が延長される。
         let mut game = Game::new(1);
         game.note_vanished_cells(vec![((0, 0), Cell::Color(ColorKind::Red))], Duration::ZERO);
         game.update(Duration::from_millis(BLOCK_VANISH_FLASH_MS / 2));
@@ -4841,10 +4509,8 @@ mod tests {
 
     #[test]
     fn color_block_resting_on_a_star_falls_once_the_star_melts_away() {
-        // ユーザー報告: 「掘っていないのに設置済みブロックが消える/落下する」
-        // (スター処理が原因ではないかとの推測)。スターブロックの上に乗っていた
-        // 色ブロックが、スターが溶けて消えた後もそのまま「浮いた」状態で残らず、
-        // ちゃんと支えを失って落下することを確認する。
+        // スターブロックの上に乗っていた色ブロックが、スターが溶けて消えた後に
+        // 「浮いた」状態で残らず、ちゃんと支えを失って落下することを確認する。
         let mut game = Game::new(41);
         clear_board(&mut game);
         game.player.row = 999;
@@ -4887,12 +4553,10 @@ mod tests {
 
     #[test]
     fn falling_block_merges_after_a_long_multi_row_fall_via_many_small_frame_updates() {
-        // ユーザー指摘: 「この緑の横に2つのところに、たて5が結合した。しかし消えなかった」
-        // 「こういうテストをちゃんとやってほしい」。1回の大きなdeltaでまとめて進める
-        // 既存テストと異なり、実際のmain.rs(FRAME_INTERVAL_MS=33msごとにupdate()を呼ぶ)
-        // と同じ細かい刻みで、かつ何十行分もの長い空洞を連続落下させたうえで、
-        // 既存の縦に連結した塊(3個)と接触・合流して合計5個以上になった時点で
-        // 自動消滅することを確認する。
+        // 1回の大きなdeltaでまとめて進める他のテストと異なり、実際のmain.rs
+        // (FRAME_INTERVAL_MS=33msごとにupdate())と同じ細かい刻みで何十行分もの空洞を
+        // 連続落下させ、既存の縦連結(3個)と合流して5個以上になった時点で自動消滅する
+        // ことを確認する。
         const FRAME_MS: u64 = 33;
         let mut game = Game::new(40);
         clear_board(&mut game);
@@ -4938,18 +4602,17 @@ mod tests {
         }
     }
 
-    // --- ブロック落下のピクセル単位補間描画(TERM独自拡張) ---
+    // --- ブロック落下のピクセル単位補間描画 ---
 
     #[test]
     fn recently_moved_blocks_and_progress_track_the_latest_gravity_tick() {
-        // ユーザー指摘: 「ブロックの落ち方をコマ送りでなくピクセル単位で滑らかにして
-        // ほしい」。実際に1マス落下したtickの直後は、その(移動後の位置, 移動前の位置)が
+        // 実際に1マス落下したtickの直後は、その(移動後の位置, 移動前の位置)が
         // recently_moved_blocksに記録され、block_fall_progressはそのtickの開始直後を
         // 表す小さな値になっていることを確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
-        // 深度による落下速度スケーリング(TERM独自拡張)の影響を受けないよう、
-        // プレイヤーは深度0m相当(等倍速)の浅い位置に置く。
+        // 深度による落下速度スケーリングの影響を受けないよう、プレイヤーは
+        // 深度0m相当(等倍速)の浅い位置に置く。
         game.player.row = 1;
         game.player.col = 5;
         game.board.rows[0][3] = Cell::Color(ColorKind::Red);
@@ -4981,10 +4644,8 @@ mod tests {
 
     #[test]
     fn free_fall_move_animation_duration_matches_player_fall_tick_ms_not_the_fixed_default() {
-        // ユーザー指摘: 「キャラの落ち方も1コマずつではなく、現在の落ちるスピードに
-        // あうように滑らかに落ちてほしい」。自由落下の見た目補間は、横移動用の固定の
-        // 短い時間(MOVE_ANIM_DURATION_MS)ではなく、実際のplayer_fall_tick_msぶんかけて
-        // 行われることを確認する。
+        // 自由落下の見た目補間は、横移動用の固定の短い時間(MOVE_ANIM_DURATION_MS)では
+        // なく、実際のplayer_fall_tick_msぶんかけて行われることを確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 10;
@@ -5011,10 +4672,9 @@ mod tests {
 
     #[test]
     fn player_falls_automatically_through_empty_space_without_any_input() {
-        // spec.md 1章(TERM独自拡張): 支えを失った(直下がEmptyな)プレイヤーは、入力が
-        // 無くてもFALL_TICK_MSごとに1マスずつ自動的に落下し続ける。
-        // ランダム生成された周囲のブロックが偶然崩れて割り込むことが無いよう、
-        // プレイヤーの通り道を広めにEmptyでクリアしてから検証する。
+        // spec.md 1章: 支えを失った(直下がEmptyな)プレイヤーは、入力が無くても
+        // FALL_TICK_MSごとに1マスずつ自動的に落下し続ける。周囲のブロックが偶然崩れて
+        // 割り込まないよう、通り道を広めにEmptyでクリアしてから検証する。
         let mut game = Game::new(20);
         for row in 5..16 {
             for col in 0..FIELD_WIDTH {
@@ -5037,10 +4697,9 @@ mod tests {
 
     #[test]
     fn player_does_not_get_stuck_floating_over_a_tall_open_shaft_across_many_frames() {
-        // ユーザー指摘: 「浮いてる、おかしいこれバグ」(スクリーンショット添付、プレイヤーが
-        // 大きな縦穴の上でずっと静止して見える)。main.rsの実際の使い方(FRAME_INTERVAL_MS
-        // =33msごとにupdate()を呼ぶ)を模して、細かいフレーム単位で何十フレームも進めても、
-        // 支えを失ったプレイヤーが一度も止まらず連続して落下し続けることを確認する。
+        // main.rsの実際の使い方(FRAME_INTERVAL_MS=33msごとにupdate()を呼ぶ)を模して、
+        // 細かいフレーム単位で何十フレームも進めても、支えを失ったプレイヤーが一度も
+        // 止まらず(大きな縦穴の上で浮いたまま静止せず)落下し続けることを確認する。
         const FRAME_MS: u64 = 33;
         let mut game = Game::new(30);
         clear_board(&mut game);
@@ -5101,13 +4760,11 @@ mod tests {
         assert_eq!(game.player.row, 5);
     }
 
-    // --- 押し潰されて死ぬ演出(TERM独自拡張、9章) ---
+    // --- 押し潰されて死ぬ演出(9章) ---
 
     #[test]
     fn oxygen_miss_also_activates_the_flash_effect() {
-        // ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」。
-        // 以前は押し潰しのみ「潰れた」フラッシュ演出を行っていたが、酸素切れ死亡でも
-        // 同じフラッシュ演出が起きるよう統一した。
+        // 酸素切れ死亡でも押し潰しと同じ「潰れた」フラッシュ演出が起きる。
         let mut game = Game::new(30);
         game.player.oxygen = 1.0;
 
@@ -5119,10 +4776,7 @@ mod tests {
     #[test]
     fn crush_death_clears_the_full_width_above_the_player_like_the_clear_above_item() {
         // 押し潰しミス発生時、プレイヤーより上のブロックが盤面幅全体でクリアされる
-        // (TERM独自拡張。#176。ユーザー指摘: 「死んだときのキャラの上位の消し方は
-        // Rアイテムと同じとする」)。以前は死亡地点の左右列を含めて3列分だけが対象
-        // だったが、Rアイテム(`debug_clear_above_player`)と全く同じ処理へ統一した
-        // ため、離れた列も含めて全てクリアされる。
+        // (Rアイテム`debug_clear_above_player`と同じ処理なので、離れた列も対象)。
         let mut game = Game::new_with_lives(34, 2); // ライフ2、押し潰されても即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -5141,7 +4795,7 @@ mod tests {
             (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
         ));
         // 押し潰し直後は「天に召される」演出中で、ライフ減算・頭上クリアは演出が
-        // 終わるまで遅延される(TERM独自拡張)。演出の完了を待つ。
+        // 終わるまで遅延される。演出の完了を待つ。
         game.update(Duration::from_millis(
             crate::constants::CRUSH_ASCEND_MS + 10,
         ));
@@ -5163,7 +4817,6 @@ mod tests {
 
     #[test]
     fn oxygen_death_goes_through_the_same_ascend_and_full_width_clear_as_crush_death() {
-        // ユーザー指摘: 「AIR不足で死んだときもブロックにつぶされたときと同じ処理」。
         // 酸素切れ死亡でも押し潰し死亡と全く同じ処理(「天に召される」演出→演出完了後に
         // 盤面幅全体をクリア・ライフ減算)が行われることを確認する。
         let mut game = Game::new_with_lives(34, 2); // ライフ2、酸素切れでも即GameOverにならない
@@ -5208,9 +4861,8 @@ mod tests {
 
     #[test]
     fn death_detonates_every_bomb_on_the_board_immediately_regardless_of_its_own_fuse() {
-        // ユーザー指摘(#176): 「画面内外の爆弾は即時爆発」。死亡(押し潰し)処理の際、
-        // 起爆までまだ全く余裕があるボムも含めて、盤面上の全てのボムがその場で
-        // 即座に爆発することを確認する。
+        // 死亡(押し潰し)処理の際、起爆までまだ全く余裕があるボムも含めて、盤面上の
+        // 全てのボムがその場で即座に爆発することを確認する。
         let mut game = Game::new_with_lives(74, 2); // ライフ2、押し潰されても即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -5249,8 +4901,7 @@ mod tests {
 
     #[test]
     fn resolve_block_player_overlap_pushes_the_overlapping_block_up_to_the_nearest_empty_cell() {
-        // ユーザー指摘(#176): 「ブロックとキャラが重ならないように重なったときは
-        // 必ずその一つうえへ、それでも重なったらさらにうえへを繰り返し演算する」。
+        // 重なったブロックは1つ上へ、そこも塞がっていればさらに上へと押し上げる。
         let mut game = Game::new(75);
         clear_board(&mut game);
         game.player.row = 500;
@@ -5274,9 +4925,8 @@ mod tests {
 
     #[test]
     fn crush_death_lets_oxygen_capsules_fall_instead_of_vanishing() {
-        // ユーザー指摘: 「キャラが死んだとき(AIR不足/つぶされたとき)...AIRは消えずに
-        // 上から落下してくるように」。3列クリアの範囲内にあったAIRは消滅させず、
-        // 周囲がEmptyになった結果、通常の重力で自然に落下することを確認する。
+        // 死亡時の頭上クリアの範囲内にあったAIRは消滅させず、周囲がEmptyになった結果、
+        // 通常の重力で自然に落下することを確認する。
         let mut game = Game::new_with_lives(70, 2); // ライフ2、押し潰されても即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -5287,16 +4937,15 @@ mod tests {
         let mut events = game.update(Duration::from_millis(
             (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
         ));
-        // 天に召される演出中も周囲の重力処理は止まらない(#68)ため、この1回の
-        // updateだけでAIRが最後まで落下しきる可能性もある。
+        // 天に召される演出中も周囲の重力処理は止まらないため、この1回のupdateだけで
+        // AIRが最後まで落下しきる可能性もある。
         events.extend(game.update(Duration::from_millis(
             crate::constants::CRUSH_ASCEND_MS + 10,
         )));
         assert_eq!(game.player.lives, 1, "演出完了でライフが減っているはず");
 
-        // AIRは3列クリアで消滅させられたわけではなく、通常の重力に従って落下を
-        // 続け、最終的にプレイヤーへ到達して取得(酸素回復)される。単に消滅した
-        // のではなく、正規のイベントとして処理されることを確認する。
+        // AIRは頭上クリアで消滅させられたのではなく、通常の重力に従って落下を続け、
+        // 最終的にプレイヤーへ到達して正規の取得イベントとして処理される。
         let oxygen_count = |game: &Game| {
             game.board
                 .rows
@@ -5321,7 +4970,6 @@ mod tests {
 
     #[test]
     fn ascending_sequence_does_not_freeze_unrelated_falling_blocks_elsewhere_on_the_board() {
-        // ユーザー指摘: 「潰れた瞬間もまわりの落下アニメーションを止めない」。
         // 「天に召される」演出中も、押し潰しとは無関係な別の場所の落下ブロックは
         // 通常通り重力で落下し続けることを確認する。
         let mut game = Game::new_with_lives(72, 2); // ライフ2、押し潰されても即GameOverにならない
@@ -5359,13 +5007,9 @@ mod tests {
 
     #[test]
     fn debug_clear_above_player_moves_off_screen_oxygen_capsules_to_just_outside_the_screen() {
-        // ユーザー指摘: 「Xでブロック消したときAIRは消えずに上から落下してくるように」
-        // +「Rアイテムの処理実行時は、上位の画面外アイテム等のオブジェクトを画面内に
-        // 入る座標までただちに移動し落下させるものとする」(#176)→「オブジェクトが
-        // いったん一番至近の画面外から上に配置してほしい。いきなり現れるのなし」
-        // (追加指摘)。画面内へ直接テレポートさせず、画面のすぐ外側
+        // 画面外のAIRは画面内へ直接テレポートさせず、画面のすぐ外側
         // (just_off_screen_row = entry_row - 1)まで移動させ、以後の重力ティックで
-        // 自然に画面内へ落ちてくるようにする。
+        // 自然に画面内へ落ちてくるようにする(いきなり現れないため)。
         let mut game = Game::new(71);
         clear_board(&mut game);
         game.player.row = 50;
@@ -5402,12 +5046,9 @@ mod tests {
     #[test]
     fn debug_clear_above_player_moves_off_screen_item_blocks_to_just_outside_the_screen_preserving_order()
      {
-        // ユーザー指摘: 「ショートカットRは、Cアイテム、Rアイテム、Kアイテムを削除
-        // しない(AIRと同じ扱い)」+「画面外アイテム等のオブジェクトを画面内に入る座標
-        // までただちに移動し落下させるものとする」(#176)→「オブジェクトがいったん
-        // 一番至近の画面外から上に配置してほしい。いきなり現れるのなし」(追加指摘)。
-        // 同じ列に複数ある場合、元の深さ順(浅い方が先)を保ったまま画面のすぐ外側から
-        // さらに浅い側へ詰め直す(画面内にはまだ現れない)。
+        // アイテムブロックもAIRと同じく削除されない。同じ列に複数ある場合、元の深さ順
+        // (浅い方が先)を保ったまま画面のすぐ外側からさらに浅い側へ詰め直す
+        // (画面内にはまだ現れない)。
         let mut game = Game::new(71);
         clear_board(&mut game);
         game.player.row = 50;
@@ -5455,8 +5096,7 @@ mod tests {
 
     #[test]
     fn debug_clear_above_player_shows_the_same_vanish_flash_as_auto_vanish() {
-        // ユーザー指摘: 「ショートカットRの動作だけど、消えるとき、結合して消えるとき
-        // と同じ消えるアニメーションして」。
+        // 頭上クリアでの消滅も、4連結自動消滅と同じフラッシュ演出を出す。
         let mut game = Game::new(71);
         clear_board(&mut game);
         game.player.row = 50;
@@ -5473,7 +5113,6 @@ mod tests {
 
     #[test]
     fn debug_fill_air_restores_oxygen_to_max_while_playing() {
-        // ユーザー指摘: 「AIRを100%にするショートカット追加」。
         let mut game = Game::new(72);
         game.player.oxygen = 1.0;
 
@@ -5496,7 +5135,6 @@ mod tests {
 
     #[test]
     fn debug_starify_visible_screen_converts_rock_and_diamond_within_range_to_stars() {
-        // ユーザー指摘: 「画面内をスター化する(Xブロック,ダイヤブロック100%)」。
         let mut game = Game::new(73);
         clear_board(&mut game);
         game.player.row = 999;
@@ -5546,7 +5184,7 @@ mod tests {
 
     #[test]
     fn debug_starify_visible_screen_does_not_convert_shaking_cells() {
-        // ユーザー指摘(#99と同じ理由): 揺れ中/落下中のブロックはスター化対象外。
+        // 揺れ中/落下中のブロックはスター化対象外。
         let mut game = Game::new(31);
         clear_board(&mut game);
         game.player.row = 500;
@@ -5574,9 +5212,8 @@ mod tests {
         game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
         assert_eq!(game.status, GameStatus::GameOver);
 
-        // GameOverになった後で改めて岩を置く(死亡時の頭上クリア(#176、Rアイテムと
-        // 同じ盤面幅全体)の影響を受けないようにするため。この岩はstarify自体が
-        // GameOver中に何もしないことだけを確認する目的で置いている)。
+        // GameOverになった後で改めて岩を置く(死亡時の頭上クリアの影響を受けずに、
+        // starifyがGameOver中は何もしないことだけを確認するため)。
         game.board.rows[990][3] = Cell::Rock { hits: 0 };
 
         game.debug_starify_visible_screen();
@@ -5621,9 +5258,7 @@ mod tests {
 
     #[test]
     fn crush_on_the_last_life_skips_the_ascending_sequence_and_ends_the_game_immediately() {
-        // ユーザー指摘: 「livesが0になったときはただちにゲームオーバーのダイアログ
-        // 出てOK」。最後のライフでの押し潰しは「天に召される」演出を行わず、
-        // 即座にGameOverへ進む。
+        // 最後のライフでの押し潰しは「天に召される」演出を行わず即座にGameOverへ進む。
         let mut game = Game::new_with_lives(35, 1); // ライフ1(最後の1機)
         clear_board(&mut game);
         game.player.row = 999;
@@ -5672,10 +5307,8 @@ mod tests {
 
     #[test]
     fn crush_death_se_event_fires_immediately_not_after_the_ascend_delay() {
-        // ユーザー指摘: 「キャラが死んだとき(AIR不足/つぶされたとき)しんだときのSEを
-        // 鳴らしてほしい」。押し潰された瞬間に(天に召される演出の完了=3秒近く後を
-        // 待たず)即座にGameEvent::LifeLostが発火し、演出完了時には重複して発火しない
-        // ことを確認する。
+        // 押し潰された瞬間に(天に召される演出の完了=3秒近く後を待たず)即座に
+        // GameEvent::LifeLostが発火し、演出完了時には重複して発火しないことを確認する。
         let mut game = Game::new_with_lives(80, 2); // ライフ2、押し潰されても即GameOverにならない
         clear_board(&mut game);
         game.player.row = 999;
@@ -5710,7 +5343,6 @@ mod tests {
 
     #[test]
     fn revived_event_fires_exactly_when_the_ascend_animation_completes() {
-        // ユーザー指摘: 「死んで、復活したときのSEほしい(よーし、がんばるぞーみたいな)」。
         let mut game = Game::new_with_lives(80, 2);
         clear_board(&mut game);
         game.player.row = 999;
@@ -5736,10 +5368,8 @@ mod tests {
 
     #[test]
     fn taking_air_from_under_a_block_does_not_cause_an_immediate_crush_it_shakes_first() {
-        // ユーザー指摘: 「AIRのうえにブロックがあるとき、そのAIRをとったら、すぐに
-        // そのうえのブロックが落ちてつぶされるバグ」。AIRを取得して支えを失った
-        // 直後も、通常の支え喪失(crush_flash_decays_to_inactive_after_crush_flash_duration
-        // 等)と同様にSHAKE_TICKSぶん揺れてから落下するはずで、即座には押し潰されない。
+        // AIRを取得して支えを失った直後も、通常の支え喪失と同様にSHAKE_TICKSぶん
+        // 揺れてから落下するはずで、即座には押し潰されない。
         let mut game = Game::new(50);
         clear_board(&mut game);
         game.player.row = 999;
@@ -5790,7 +5420,7 @@ mod tests {
         );
     }
 
-    // --- 掘削アニメーション(TERM独自拡張、9章) ---
+    // --- 掘削アニメーション(9章) ---
 
     #[test]
     fn drilling_frame_is_none_before_any_drill_input() {
@@ -5804,10 +5434,8 @@ mod tests {
 
     #[test]
     fn drilling_frame_alternates_then_clears_after_drill_anim_duration() {
-        // ユーザー指摘: 「上に掘る時、上向きながらピヨンピヨン跳ねる。左右に掘る時、
-        // 横にドリルをぐいぐい。下に掘る時、下向きながらドリルをぐいぐい」。掘削入力
-        // 直後はアニメーションフレームが交互に切り替わり、DRILL_ANIM_MS経過後は
-        // 通常表示(None)に戻ることを確認する。
+        // 掘削入力直後はアニメーションフレームが交互に切り替わり、DRILL_ANIM_MS
+        // 経過後は通常表示(None)に戻ることを確認する。
         let mut game = Game::new(61);
         clear_board(&mut game);
         game.player.row = 5;
@@ -5837,12 +5465,11 @@ mod tests {
         );
     }
 
-    // --- ヒヤリ回避スライダー演出(TERM独自拡張、9章) ---
+    // --- ヒヤリ回避スライダー演出(9章) ---
 
     #[test]
     fn dodge_slide_triggers_only_when_fleeing_a_block_that_was_actually_shaking_overhead() {
-        // ユーザー指摘: 「そもそも避けてないのに発動してるように見える」。単に
-        // 「最近動いた」だけでなく、移動前の頭上が実際に揺れていた(=本物の脅威から
+        // 単に「最近動いた」だけでなく、移動前の頭上が実際に揺れていた(=本物の脅威から
         // 逃げた)場合にのみスライダー演出が発火することを確認する。
         let mut game = Game::new(62);
         clear_board(&mut game);
@@ -5917,8 +5544,7 @@ mod tests {
     #[test]
     fn dodge_freeze_lifts_after_dodge_slide_ms_and_dodge_recovery_ms_elapse() {
         // スライダー演出(Sliding)→硬直(Recovering)の間は入力を凍結し、両方経過すれば
-        // 通常通り入力が通ることを確認する(ユーザー指摘: 「スライダー直後その状態で
-        // 起き上がるまでに1秒インターバル=この設定値も作る」)。
+        // 通常通り入力が通ることを確認する。
         let mut game = Game::new(63);
         clear_board(&mut game);
         game.set_dodge_recovery_ms(300);
@@ -5958,7 +5584,7 @@ mod tests {
         );
     }
 
-    // --- 移動の見た目補間アニメーション(TERM独自拡張、9章) ---
+    // --- 移動の見た目補間アニメーション(9章) ---
 
     #[test]
     fn new_game_starts_with_move_animation_already_settled() {
@@ -5970,9 +5596,8 @@ mod tests {
 
     #[test]
     fn debug_frame_starts_at_zero_and_increments_once_per_update_call() {
-        // ユーザー指摘: 「#85のデバッグ情報として、フレームのユニーク番号を取得
-        // できるようにしておき」。refresh_debug_logを呼ばない限りdisk I/Oは発生しない
-        // (debug_logがNoneのままno-opになる)ので、通常のテストには影響しない。
+        // refresh_debug_logを呼ばない限りdisk I/Oは発生しない(debug_logがNoneのまま
+        // no-opになる)ので、通常のテストには影響しない。
         let mut game = Game::new(1);
         assert_eq!(game.debug_frame(), 0);
         game.update(Duration::from_millis(16));
@@ -5983,8 +5608,8 @@ mod tests {
 
     #[test]
     fn new_with_width_generates_a_board_of_the_requested_width_and_centers_the_player() {
-        // ユーザー指摘: 「設定値に列の数を変更できるようにして」。指定した列数で
-        // 盤面が生成され、プレイヤーの開始列もその幅の中央に合わせ直されることを確認する。
+        // 指定した列数で盤面が生成され、プレイヤーの開始列もその幅の中央に
+        // 合わせ直されることを確認する。
         let game = Game::new_with_width(33, 8, FIELD_DEPTH_M);
         assert_eq!(game.board.width(), 8);
         for row in &game.board.rows {
@@ -6004,11 +5629,9 @@ mod tests {
 
     #[test]
     fn each_checkpoint_is_followed_by_an_empty_gap_but_not_an_empty_ground() {
-        // ユーザー指摘(#190): 「100mごとの地面そのものを掘ったら次の100mにすすむ
-        // ことにする。地面についたら次、じゃなくて」。各チェックポイント(100mごと)の
-        // 地面(CHECKPOINT_SAFE_ZONE_M)を実際に掘り抜いた直後、その先のスキマ
-        // (CHECKPOINT_ZONE_GAP_M)は完全にEmptyになる一方、地面区間そのものは
-        // くり抜かれず残ることを確認する(500mのボーナスフロアは例外なので対象外)。
+        // 各チェックポイント(100mごと)の地面(CHECKPOINT_SAFE_ZONE_M)を掘り抜いた直後、
+        // その先のスキマ(CHECKPOINT_ZONE_GAP_M)は完全にEmptyになる一方、地面区間そのもの
+        // はくり抜かれず残ることを確認する(500mのボーナスフロアは例外なので対象外)。
         let mut game = Game::new(200);
         for checkpoint_depth_m in (crate::constants::CHECKPOINT_STEP_M
             ..crate::constants::FIELD_DEPTH_M)
@@ -6055,9 +5678,8 @@ mod tests {
 
     #[test]
     fn a_gap_follows_the_ground_zone_before_normal_terrain_resumes() {
-        // ユーザー指摘(#189): 「100mきざみの地面と次のブロックがギチギチなので、
-        // 5mスキマあけて」。安全地帯(地面ビジュアル区間、CHECKPOINT_SAFE_ZONE_M)の
-        // 直後、さらにCHECKPOINT_ZONE_GAP_Mぶんも空になっていることを確認する。
+        // 安全地帯(地面ビジュアル区間、CHECKPOINT_SAFE_ZONE_M)の直後、さらに
+        // CHECKPOINT_ZONE_GAP_Mぶんも空になっていることを確認する。
         let mut game = Game::new(202);
         game.apply_checkpoint_safe_zone(100);
         let width = game.board.width();
@@ -6076,8 +5698,8 @@ mod tests {
 
     #[test]
     fn the_gap_after_the_bonus_floor_is_also_cleared() {
-        // #189: 500mボーナスフロア自体はアイテム/AIRを意図的に配置するが、その直後の
-        // スキマは通常のチェックポイントと同様に空けるはず。
+        // 500mボーナスフロア自体はアイテム/AIRを意図的に配置するが、その直後のスキマは
+        // 通常のチェックポイントと同様に空けるはず。
         let mut game = Game::new(203);
         game.apply_checkpoint_safe_zone(crate::constants::BONUS_FLOOR_DEPTH_M);
         let width = game.board.width();
@@ -6097,11 +5719,9 @@ mod tests {
 
     #[test]
     fn debris_that_lands_inside_an_already_carved_checkpoint_zone_is_purged_next_tick() {
-        // ユーザー指摘(#189): 「その地面よりも下にブロックが落ちないように(アイテム
-        // なども)」「100mラインを超えたら滞留してるブロック、アイテムはすべてパージで」。
-        // 既に到達済みのチェックポイントのスキマ区間に何か入り込んでも、次の重力
-        // tickで消滅フラッシュ演出付きでパージされることを確認する(#190: 地面部分は
-        // もう強制的にくり抜かないため、パージ対象はスキマのみ)。
+        // 既に到達済みのチェックポイントのスキマ区間に何か入り込んでも、次の重力tickで
+        // 消滅フラッシュ演出付きでパージされることを確認する(地面部分は強制的に
+        // くり抜かないため、パージ対象はスキマのみ)。
         let mut game = Game::new(204);
         clear_board(&mut game);
         game.player.row = 1;
@@ -6129,7 +5749,7 @@ mod tests {
 
     #[test]
     fn purge_does_not_touch_the_bonus_floor_zone() {
-        // #189: 500mボーナスフロアはアイテム/AIRを意図的に配置する区間なので、
+        // 500mボーナスフロアはアイテム/AIRを意図的に配置する区間なので、
         // パージの対象外であることを確認する。
         let mut game = Game::new(205);
         clear_board(&mut game);
@@ -6150,11 +5770,9 @@ mod tests {
 
     #[test]
     fn the_500m_bonus_floor_has_a_noticeably_higher_oxygen_density_than_a_normal_band() {
-        // ユーザー指摘(#179): 「500mフロアはC/K/Rアイテム/AIRそれぞれ500%固定フロア
-        // とする」。500mチェックポイント直後の帯はAIR(酸素カプセル、出現数に上限が
-        // 無い)の密度が、同じ幅の通常の帯より明らかに高いはず。#184: くり抜きは
-        // チェックポイントを踏んだ瞬間に行うため、500mを踏んだこととして
-        // `apply_checkpoint_safe_zone`を呼んでからボーナスフロアを判定する。
+        // 500mチェックポイント直後の帯はAIR(酸素カプセル、出現数に上限が無い)の密度が、
+        // 同じ幅の通常の帯より明らかに高いはず。くり抜きはチェックポイントを踏んだ瞬間に
+        // 行うため、`apply_checkpoint_safe_zone`を呼んでからボーナスフロアを判定する。
         let mut game = Game::new(201);
         game.apply_checkpoint_safe_zone(crate::constants::BONUS_FLOOR_DEPTH_M);
         let width = game.board.width();
@@ -6211,14 +5829,13 @@ mod tests {
         );
     }
 
-    // --- ショートカットC: 2色化+結合再計算(TERM独自拡張) ---
+    // --- ショートカットC: 2色化+結合再計算 ---
 
     #[test]
     fn debug_unify_nearby_colors_repaints_to_exactly_two_colors_and_never_vanishes() {
-        // ユーザー指摘: 「単にブロックの色を2色に変換するだけでよくて、消滅させなくて
-        // いい」。ランダムな2色のみへ塗り替えることは行うが、塗り替えによって新たに
-        // 4連結以上になった箇所があっても即座には自動消滅させない(色の選択はシードから
-        // 決まるため、シードを変えて十分な回数試行し両方の性質を確認する)。
+        // ランダムな2色のみへ塗り替えるが、塗り替えによって新たに4連結以上になった箇所が
+        // あっても即座には自動消滅させない(色の選択はシードから決まるため、シードを変えて
+        // 十分な回数試行し両方の性質を確認する)。
         let mut saw_four_or_more_connected_and_intact = false;
         for trial in 0..300 {
             let mut game = Game::new(trial);
@@ -6268,12 +5885,11 @@ mod tests {
         );
     }
 
-    // --- ボム(TERM独自拡張。#96。ユーザー指摘: 「白ボンが、爆弾をランダムに投げて
-    // くるイメージで、敵は出現しないものとする」) ---
+    // --- ボム ---
 
     #[test]
     fn pushing_into_a_resting_bomb_rolls_it_further_in_the_move_direction() {
-        // ユーザー指摘: 「爆弾はキャラが押したらそっちに転がる」(#149)。
+        // 静止中のボムは、プレイヤーが押した方向へ1マス転がる。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6312,9 +5928,8 @@ mod tests {
 
     #[test]
     fn player_is_grounded_returns_true_when_a_settled_bomb_rests_below() {
-        // ボムはCellグリッド外のオーバーレイなので、盤面だけ見るとEmptyのまま=
-        // 支持なしに見えてしまう。設置済み(Settling/Ticking)のボムは支えとして
-        // 扱うべき(#238。ユーザー報告: 「ボムと重なり合ってしまう」)。
+        // ボムはCellグリッド外のオーバーレイなので、盤面だけ見るとEmptyのまま=支持なし
+        // に見えてしまう。設置済み(Settling/Ticking)のボムは支えとして扱う。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6336,8 +5951,8 @@ mod tests {
 
     #[test]
     fn free_fall_does_not_drop_the_player_onto_a_settled_bomb() {
-        // #238の回帰テスト: 自由落下がボムの存在を無視して直下のEmptyマスへ落ち、
-        // プレイヤーとボムが同じマスに重なって見えるバグを再現・修正確認する。
+        // 自由落下がボムの存在を無視して直下のEmptyマスへ落ち、プレイヤーとボムが
+        // 同じマスに重なって見えるバグの回帰テスト。
         let mut game = Game::new(1);
         clear_board(&mut game);
         let bottom = game.board.depth_rows() - 1;
@@ -6368,9 +5983,8 @@ mod tests {
 
     #[test]
     fn free_fall_still_falls_through_a_bomb_that_has_not_settled_yet() {
-        // Entering/Rolling段階のボムはまだ登場・投擲演出中で実体を持たないため、
-        // 支えにはならず通過できるはず(#238の修正がSettling/Ticking以外まで
-        // 誤って対象にしていないことの確認)。
+        // Entering/Rolling段階のボムはまだ登場・投擲演出中で実体を持たないため、支えには
+        // ならず通過できるはず(支え判定がSettling/Ticking以外まで及んでいないことの確認)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         let bottom = game.board.depth_rows() - 1;
@@ -6401,8 +6015,7 @@ mod tests {
 
     #[test]
     fn pushing_a_bomb_against_a_wall_blocks_the_move() {
-        // 押し出し先が塞がっていれば、壁にぶつかった時と同じくその場に留まるはず
-        // (TERM独自拡張。#149)。
+        // 押し出し先が塞がっていれば、壁にぶつかった時と同じくその場に留まるはず。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6432,7 +6045,7 @@ mod tests {
     #[test]
     fn pushing_a_bomb_into_another_bomb_blocks_the_move() {
         // 押し出し先に既に他のボムが居座っていれば、同じく移動を妨げるはず
-        // (TERM独自拡張。#149。#143の「爆弾は爆弾に重ならない」と一貫させる)。
+        // (ボム同士は重ならないため)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6464,7 +6077,7 @@ mod tests {
     #[test]
     fn walking_toward_a_bomb_still_entering_does_not_push_it() {
         // 登場・投擲演出中(Entering/Rolling)のボムはまだ「静止」していないため、
-        // 押し出しの対象外(TERM独自拡張。#149)。
+        // 押し出しの対象外。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6495,8 +6108,7 @@ mod tests {
     #[test]
     fn pressing_toward_an_unpushable_bomb_twice_climbs_over_it_on_the_second_press() {
         // 押し出せないボムは岩ブロックと同じく、1回目はぶつかって停止するだけで、
-        // 同じ方向への2回目の入力で初めて1段登る(TERM独自拡張。#161。ユーザー指摘:
-        // 「爆弾をブロック扱いして、登れる...ようにして」)。
+        // 同じ方向への2回目の入力で初めて1段登る。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6538,8 +6150,7 @@ mod tests {
 
     #[test]
     fn climbing_over_a_bomb_fails_when_the_players_own_head_is_blocked() {
-        // 頭上(自分の真上)が塞がっていれば、岩ブロックの既存仕様(#30)と同じく
-        // ボムでも登れないはず(TERM独自拡張。#161)。
+        // 頭上(自分の真上)が塞がっていれば、岩ブロックと同じくボムでも登れないはず。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6568,7 +6179,7 @@ mod tests {
     #[test]
     fn climbing_over_a_bomb_fails_when_the_landing_cell_has_another_bomb() {
         // 登った先(1段上)に他のボムが居座っていれば、Cellのブロックで塞がっている
-        // 場合と同じく登れないはず(TERM独自拡張。#161)。
+        // 場合と同じく登れないはず。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6605,9 +6216,8 @@ mod tests {
 
     #[test]
     fn drilling_a_settled_bomb_removes_it_without_triggering_an_explosion() {
-        // 静止中(Settling/Ticking)のボムは掘削で除去できる(TERM独自拡張。#161。
-        // ユーザー指摘: 「爆弾をブロック扱いして...掘れるようにして」)。爆発は
-        // 誘発せず、通常のブロック消滅と同じ`BlockDestroyed`のみ発生する。
+        // 静止中(Settling/Ticking)のボムは掘削で除去できる。爆発は誘発せず、
+        // 通常のブロック消滅と同じ`BlockDestroyed`のみ発生する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6637,8 +6247,8 @@ mod tests {
 
     #[test]
     fn drilling_toward_a_bomb_still_entering_does_not_destroy_it() {
-        // まだ登場・投擲演出中(Entering/Rolling)のボムは掘削の対象外(#149の
-        // 「静止していないと干渉しない」ルールをドリルにも適用。TERM独自拡張。#161)。
+        // まだ登場・投擲演出中(Entering/Rolling)のボムは掘削の対象外
+        // (「静止していないと干渉しない」ルールは押し出しと同じ)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6714,10 +6324,9 @@ mod tests {
         clear_board(&mut game);
         game.player.row = 500;
         game.player.col = 5;
-        // ボムを盤面の最深行に置く(#140で落下判定が入ったため支えが必要)。Rockで
-        // 床を作ると、その床自体が支えを失って落下してしまう(このテストの経過
-        // 時間ではRockの揺れ猶予が明けるほど長い)ため、それ自体が常に支持される
-        // 最深行を使う。
+        // ボムを盤面の最深行に置く(ボムにも落下判定があるため支えが必要)。Rockで床を
+        // 作ると、このテストの経過時間では床自体の揺れ猶予が明けて落下してしまうため、
+        // それ自体が常に支持される最深行を使う。
         let bomb_row = FIELD_DEPTH_M - 1;
         game.bombs.push(Bomb {
             pos: (bomb_row, 5),
@@ -6744,7 +6353,7 @@ mod tests {
             "Rolling中も起爆カウントダウンが始まらないはず"
         );
 
-        // Rollingを終えるとSettling(左右に跳ねて落ち着き先を探す段階、#140)へ進む。
+        // Rollingを終えるとSettling(左右に跳ねて落ち着き先を探す段階)へ進む。
         game.update(Duration::from_millis(BOMB_ROLL_MS as u64));
         assert_eq!(game.bombs[0].phase, BombPhase::Settling);
         assert_eq!(
@@ -6761,9 +6370,8 @@ mod tests {
 
     #[test]
     fn bomb_fuse_warning_fires_exactly_once_when_remaining_time_crosses_the_danger_threshold() {
-        // ユーザー指摘: 「爆弾が爆発しそうな赤くチカチカするとき爆弾の爆発しそうな
-        // 導火線の音させろ」(#168)。本体が激しく赤く点滅し始める瞬間(残り時間が
-        // BOMB_DANGER_MSを初めて下回った瞬間)にBombFuseWarningを1回だけ発火する。
+        // 本体が激しく赤く点滅し始める瞬間(残り時間がBOMB_DANGER_MSを初めて下回った
+        // 瞬間)にBombFuseWarningを1回だけ発火する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6803,9 +6411,8 @@ mod tests {
 
     #[test]
     fn bomb_fuse_tick_fires_repeatedly_at_fixed_intervals_while_in_the_danger_zone() {
-        // ユーザー指摘(#183): 「爆弾爆発するまえに「ちちちちち」って乾いた音鳴らして
-        // くれよ」。危険域(残りBOMB_DANGER_MS以下)に入っている間、
-        // BOMB_FUSE_TICK_INTERVAL_MSごとに繰り返しBombFuseTickが発生するはず。
+        // 危険域(残りBOMB_DANGER_MS以下)に入っている間、BOMB_FUSE_TICK_INTERVAL_MS
+        // ごとに繰り返しBombFuseTickが発生するはず。
         let mut game = Game::new(2);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6895,18 +6502,15 @@ mod tests {
             BOMB_MAX_COUNT_ON_BOARD,
             "上限を超えてボムが設置されてはいけない"
         );
-        // ユーザー指摘: 「BOMB_MAX_COUNT_ON_BOARD = 10にして」(#216)。3のままに
-        // 戻ってしまう回帰を防ぐため、定数への参照だけでなく実際の値も固定する。
+        // 値が戻ってしまう回帰を防ぐため、定数への参照だけでなく実際の値も固定する。
         assert_eq!(BOMB_MAX_COUNT_ON_BOARD, 10);
     }
 
     #[test]
     fn bomb_explosion_converts_rock_and_diamond_within_blast_range_to_star_and_destroys_items_but_leaves_air_untouched()
      {
-        // ユーザー指摘: 「ボムはアイテムも消し飛ばす仕様に変更したい」(#213)。
-        // #110で「頭上一括クリア系の効果ではアイテムをAIRと同じ保護対象にする」と
-        // 決めたが、その保護をボムの爆風に限って解除する。AIRの扱いは従来通り
-        // (爆風の影響を受けない)で変更しない。
+        // 頭上一括クリア系の効果ではアイテムをAIRと同じ保護対象にしているが、その保護は
+        // ボムの爆風には及ばない。AIR自体は爆風の影響を受けない。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6962,9 +6566,8 @@ mod tests {
 
     #[test]
     fn bomb_destroying_an_item_does_not_trigger_the_item_effect() {
-        // #213。爆風でのアイテム破壊は「取得」ではないため、C/R/Kいずれの効果も
-        // 発動させない。爆風範囲外に置いた各効果の痕跡確認用セルが、爆発後も
-        // 元のままであることで確認する。
+        // 爆風でのアイテム破壊は「取得」ではないため、C/R/Kいずれの効果も発動させない。
+        // 爆風範囲外に置いた各効果の痕跡確認用セルが元のままであることで確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -6977,7 +6580,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
         // 爆風(ボムの行全体+ボムの列の上下)に入るアイテム3種
         game.board.rows[520][2] = Cell::Item(ItemEffect::ClearAbove);
         game.board.rows[520][8] = Cell::Item(ItemEffect::UnifyColors);
@@ -7026,8 +6629,8 @@ mod tests {
 
     #[test]
     fn bomb_destroying_an_item_does_not_change_the_score() {
-        // #213。ボムは現状スコアを一切生まない(岩のスター化・色統一・その後の
-        // 4連結自動消滅すら加点しない)ため、アイテム破壊も加点・減点しない。
+        // ボムは現状スコアを一切生まない(岩のスター化・色統一・その後の4連結自動消滅
+        // すら加点しない)ため、アイテム破壊も加点・減点しない。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7040,7 +6643,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
         game.board.rows[520][2] = Cell::Item(ItemEffect::ClearAbove);
         game.board.rows[520][8] = Cell::Item(ItemEffect::UnifyColors);
         game.board.rows[520][9] = Cell::Item(ItemEffect::StarifyScreen);
@@ -7057,8 +6660,7 @@ mod tests {
 
     #[test]
     fn bomb_explosion_leaves_item_blocks_outside_the_blast_untouched() {
-        // #213。破壊されるのはあくまで爆風の届いたマスのアイテムだけで、
-        // 範囲外のアイテムは無傷のまま残る。
+        // 破壊されるのは爆風の届いたマスのアイテムだけで、範囲外のアイテムは無傷で残る。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7071,7 +6673,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
         game.board.rows[520][8] = Cell::Item(ItemEffect::ClearAbove); // 爆風内
         game.board.rows[540][8] = Cell::Item(ItemEffect::UnifyColors); // 行も列も外れる
         game.board.rows[560][5] = Cell::Item(ItemEffect::StarifyScreen); // 同じ列だが縦の射程外
@@ -7097,8 +6699,8 @@ mod tests {
 
     #[test]
     fn blocks_resting_on_an_item_destroyed_by_a_bomb_fall_afterwards() {
-        // #213。アイテムがEmptyになることで支えを失った上のブロックは、通常の
-        // 重力(揺れ→落下)でそのまま落ちてくる。
+        // アイテムがEmptyになることで支えを失った上のブロックは、通常の重力
+        // (揺れ→落下)でそのまま落ちてくる。
         let last_row = FIELD_DEPTH_M - 1;
         let mut game = Game::new(1);
         clear_board(&mut game);
@@ -7148,9 +6750,8 @@ mod tests {
     #[test]
     fn destroyed_items_free_up_the_window_top_up_capacity() {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
-        // #213の副作用確認。アイテム出現数の窓単位補充(#210/#211)は現存個数を
-        // 都度数え直す方式なので、爆風でアイテムがEmptyになれば補充枠も自動的に
-        // 回復する(補充側のコードは変更していない)。
+        // アイテム出現数の窓単位補充は現存個数を都度数え直す方式なので、爆風で
+        // アイテムがEmptyになれば補充枠も自動的に回復する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         let count_clear_above = |game: &Game, from: usize, to: usize| {
@@ -7193,10 +6794,8 @@ mod tests {
 
     #[test]
     fn bomb_explosion_unifies_color_blocks_within_blast_range_to_a_single_shared_color() {
-        // ユーザー指摘: 「色ブロックは爆弾の炎によって一色に統一される」(#137)。
-        // 爆風内の異なる色のブロックが、爆発後は全て同じ1色になっていることを
-        // 確認する(具体的な色はランダムに選ばれるため、色そのものではなく
-        // 「全部同じ色になっているか」を検証する)。
+        // 爆風内の異なる色のブロックが、爆発後は全て同じ1色になっていることを確認する
+        // (色はランダムに選ばれるため、色そのものではなく一致しているかを検証する)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7212,8 +6811,8 @@ mod tests {
         game.board.rows[520][6] = Cell::Color(ColorKind::Red);
         game.board.rows[520][7] = Cell::Color(ColorKind::Blue);
         game.board.rows[521][5] = Cell::Color(ColorKind::Green);
-        // 爆風範囲外(縦距離BOMB_BLAST_ROW_RANGE+1、画面外。#142で横は画面幅全部が
-        // 範囲になったため、範囲外を示すには縦方向を使う)。
+        // 爆風範囲外(縦距離BOMB_BLAST_ROW_RANGE+1、画面外)。横は画面幅全部が範囲なので、
+        // 範囲外を示すには縦方向を使う。
         game.board.rows[520 - BOMB_BLAST_ROW_RANGE - 1][5] = Cell::Color(ColorKind::Yellow);
 
         game.update(Duration::from_millis(60));
@@ -7240,15 +6839,14 @@ mod tests {
 
     #[test]
     fn bomb_explosion_chain_detonates_another_bomb_caught_in_its_blast() {
-        // ユーザー指摘(#180): 「爆弾は誘爆する」。起爆カウントダウンが完了して
-        // 爆発したボムの爆風範囲内に別のボム(まだ起爆までかなり余裕がある)が
-        // あれば、そのボムも連鎖してその場で爆発することを確認する。
+        // 起爆カウントダウンが完了して爆発したボムの爆風範囲内に別のボム(まだ起爆まで
+        // 余裕がある)があれば、そのボムも連鎖してその場で爆発することを確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
         game.player.col = 5; // 爆風範囲外の位置
-        // 各ボムの真下に支えを置く(支えが無いと「下に他のボムがあるかどうか」の
-        // 判定・自由落下と絡んでボム自身の起爆カウントダウンが進まなくなるため)。
+        // 各ボムの真下に支えを置く(支えが無いと落下扱いになり、ボム自身の起爆
+        // カウントダウンが進まなくなるため)。
         game.board.rows[521][5] = Cell::Rock { hits: 0 };
         game.board.rows[521][7] = Cell::Rock { hits: 0 };
         game.bombs.push(Bomb {
@@ -7287,11 +6885,8 @@ mod tests {
     #[test]
     fn bomb_explosion_unify_that_forms_a_group_of_four_or_more_vanishes_immediately_like_a_landing()
     {
-        // ユーザー指摘: 「爆弾で変化した壁は落ちたときと同じ反応を発動させる。
-        // つまり４マス以上結合している場合は、消える」(#140)。爆風内の隣接する
-        // 4マスの色ブロック(元は別々の色)が一色に統一された結果、4連結以上に
-        // なった場合はその場で消滅する(通常の着地時の自動消滅と同じ扱い)ことを
-        // 確認する。
+        // 爆風内の隣接する4マスの色ブロック(元は別々の色)が一色に統一された結果、
+        // 4連結以上になった場合はその場で消滅する(着地時の自動消滅と同じ扱い)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7328,9 +6923,8 @@ mod tests {
 
     #[test]
     fn bomb_falls_while_ticking_if_the_cell_below_becomes_empty() {
-        // ユーザー指摘: 「爆弾は宙に浮かないように落ちること」(#140)。起爆カウント
-        // ダウン中でも、直下が空いていれば1マス落下し、その間はカウントダウンを
-        // 進めない(空中で起爆させないため)ことを確認する。
+        // 起爆カウントダウン中でも、直下が空いていれば1マス落下し、その間はカウント
+        // ダウンを進めない(空中で起爆させないため)ことを確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7359,9 +6953,7 @@ mod tests {
 
     #[test]
     fn bomb_in_settling_phase_falls_one_cell_per_settle_tick_when_unsupported() {
-        // ユーザー指摘: 「爆弾は宙に浮かないように落ちること」(#140)。Settling中も
-        // 直下が空いていれば`BOMB_SETTLE_TICK_MS`ごとに1マスずつ落下することを
-        // 確認する。
+        // Settling中も直下が空いていれば`BOMB_SETTLE_TICK_MS`ごとに1マスずつ落下する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7391,9 +6983,8 @@ mod tests {
 
     #[test]
     fn bomb_in_settling_phase_bounces_sideways_instead_of_falling_onto_another_bomb_below() {
-        // ユーザー指摘: 「爆弾は爆弾に重ならないようにする」「爆弾がしたにあったら、
-        // はねながら転がること」(#143)。直下が空セルでも、既に他のボムが
-        // 占めていれば、そこへは落下せず左右へバウンドするはず。
+        // 直下が空セルでも、既に他のボムが占めていれば、そこへは落下せず左右へ
+        // バウンドするはず(ボム同士は重ならない)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7464,7 +7055,6 @@ mod tests {
 
     #[test]
     fn bomb_ticking_above_another_bomb_bounces_sideways_after_a_full_settle_tick() {
-        // ユーザー指摘: 「爆弾がしたにあったら、はねながら転がること」(#143)。
         // 起爆カウントダウン中でも、直下に他のボムが居座っていればそこで静止せず、
         // 1 settle tick経過後に左右へバウンドするはず。
         let mut game = Game::new(1);
@@ -7503,11 +7093,9 @@ mod tests {
 
     #[test]
     fn spawning_a_new_bomb_never_lands_on_a_cell_already_occupied_by_another_bomb() {
-        // ユーザー指摘: 「爆弾は爆弾に重ならないようにする」(#143)。ボムはCellグリッド
-        // とは別のオーバーレイのため、既存ボムの位置も候補から除外されているかを
-        // 確認する。画面内(±STAR_VISIBLE_RANGE_ROWS)を岩で埋め、既存ボムが占める
-        // マスと、本当に空いているマスの2つだけをEmptyにすることで、新しいボムが
-        // 確実に後者へ設置されることを保証する(RNGのseedによらず決定的)。
+        // ボムはCellグリッドとは別のオーバーレイのため、既存ボムの位置も候補から除外
+        // されているかを確認する。画面内を岩で埋め、既存ボムが占めるマスと本当に空いて
+        // いるマスの2つだけをEmptyにすることで、RNGのseedによらず決定的に検証できる。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7542,9 +7130,7 @@ mod tests {
 
     #[test]
     fn bomb_in_settling_phase_bounces_sideways_instead_of_falling_onto_the_player() {
-        // ユーザー指摘: 「爆弾はキャラの頭にぶつかったら別の列にころがっていく」
-        // (#144)。直下が空セルでも、プレイヤーがそこに居れば落下せず左右へ
-        // バウンドするはず。
+        // 直下が空セルでも、プレイヤーがそこに居れば落下せず左右へバウンドするはず。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 521;
@@ -7569,9 +7155,8 @@ mod tests {
 
     #[test]
     fn bomb_ticking_above_the_player_bounces_sideways_after_a_full_settle_tick() {
-        // ユーザー指摘: 「爆弾はキャラの頭にぶつかったら別の列にころがっていく」
-        // (#144)。起爆カウントダウン中でも、直下にプレイヤーが居ればそこで
-        // 静止せず、1 settle tick経過後に左右へバウンドするはず。
+        // 起爆カウントダウン中でも、直下にプレイヤーが居ればそこで静止せず、
+        // 1 settle tick経過後に左右へバウンドするはず。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 521;
@@ -7613,7 +7198,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
         game.board.rows[520][5] = Cell::Rock { hits: 0 }; // 爆心地(距離0)
         game.board.rows[519][5] = Cell::Rock { hits: 0 }; // 距離1(上方向)
         game.board.rows[520][7] = Cell::Rock { hits: 0 }; // 距離2(右方向、520,6はEmptyのまま)
@@ -7650,12 +7235,9 @@ mod tests {
 
     #[test]
     fn bomb_explosion_shows_a_flame_flash_on_empty_cells_within_the_blast_too() {
-        // ユーザー指摘: 「爆打の火柱が描画されていない!」(#166)。#159で爆風が
-        // Rock/Diamondで止まらず遠くまで貫通するようになった結果、爆風経路の大半を
-        // 占めるEmpty(既に掘削済みの空間)には炎フラッシュが一切付かず、炎の柱が
-        // ほとんど見えなくなっていた。Empty/Oxygen等、内容を書き換えないセルでも
-        // 炎演出自体は他のセルと同じように発火するはず(アイテムブロックは#213で
-        // 破壊対象になったため、この「内容を書き換えないセル」からは外れた)。
+        // 爆風はRock/Diamondで止まらず遠くまで貫通するため、経路の大半はEmpty(既に
+        // 掘削済みの空間)になる。内容を書き換えないEmpty/Oxygen等のセルでも、炎演出
+        // 自体は他のセルと同じように発火するはず(付かないと炎の柱が見えなくなる)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 500;
@@ -7668,8 +7250,8 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
-        // 爆心地の右方向はすべてEmptyのまま(#159で導入された、遮蔽物なしの貫通経路)。
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
+        // 爆心地の右方向はすべてEmptyのまま(遮蔽物なしの貫通経路)。
 
         game.update(Duration::from_millis(60));
 
@@ -7703,7 +7285,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         }); // プレイヤーの1マス右、爆風範囲内
-        game.board.rows[501][6] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[501][6] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
 
         let events = game.update(Duration::from_millis(60));
 
@@ -7718,9 +7300,8 @@ mod tests {
 
     #[test]
     fn bomb_blast_range_now_reaches_across_the_entire_field_width() {
-        // ユーザー指摘: 「爆弾の爆発範囲は、横全部...に拡大したい」(#142)。遮るものが
-        // 無ければ、フィールド幅の端から端までプレイヤーを巻き込むことを確認する
-        // (BOMB_BLAST_COL_RANGE=FIELD_WIDTH_MAX、既定フィールド幅12なら距離11でも届く)。
+        // 横方向の爆風はフィールド幅全体に届く。遮るものが無ければ、端から端まで
+        // プレイヤーを巻き込むことを確認する(BOMB_BLAST_COL_RANGE=FIELD_WIDTH_MAX)。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 520;
@@ -7733,7 +7314,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][0] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][0] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
 
         let events = game.update(Duration::from_millis(60));
         assert!(
@@ -7746,9 +7327,8 @@ mod tests {
 
     #[test]
     fn bomb_blast_row_range_catches_the_player_within_the_screen_but_not_beyond() {
-        // ユーザー指摘: 「縦方向も全部(画面内ね)に拡大したい」(#142)。縦方向は盤面
-        // 全体の深度ではなく画面内(BOMB_BLAST_ROW_RANGE=14マス)に限定されるため、
-        // その距離ちょうどは巻き込むが、1マス超えたら巻き込まないことを確認する。
+        // 縦方向の爆風は盤面全体の深度ではなく画面内(BOMB_BLAST_ROW_RANGE)に限定される
+        // ため、その距離ちょうどは巻き込むが1マス超えたら巻き込まないことを確認する。
         let mut game = Game::new(1);
         clear_board(&mut game);
         game.player.row = 520 - BOMB_BLAST_ROW_RANGE;
@@ -7761,7 +7341,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
 
         let events = game.update(Duration::from_millis(60));
         assert!(
@@ -7786,7 +7366,7 @@ mod tests {
             remaining_ms: 50,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
 
         let events = game.update(Duration::from_millis(60));
         assert!(
@@ -7811,7 +7391,7 @@ mod tests {
             remaining_ms: BOMB_FUSE_MS,
             settle_bounce_dir: 1,
         });
-        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // 支え(#140で落下判定が入ったため必要)
+        game.board.rows[521][5] = Cell::Rock { hits: 0 }; // ボムの支え(ボムにも落下判定があるため必要)
 
         let events = game.update(Duration::from_millis(100));
 
@@ -7821,7 +7401,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // 落下tick間隔を遅くした際の「落下→消滅」演出(#234)
+    // 落下tick間隔を遅くした際の「落下→消滅」演出
     // -----------------------------------------------------------------------
 
     /// テスト用ヘルパー: 盤面を3行に切り詰め、最深行(row2)を常に支持される足場にした上で、
@@ -7857,9 +7437,9 @@ mod tests {
 
     #[test]
     fn landing_block_keeps_its_look_until_the_fall_interpolation_finishes_at_any_tick_rate() {
-        // #234。落下tick間隔を上げる(遅くする)と、消滅フラッシュの寿命(200ms固定)が
-        // 1tickぶんの落下補間より短くなり、落下中のブロックが空中で消えていた。
-        // どのtick間隔でも「補間が終わるまでは消滅直前の見た目を保持している」ことを確認する。
+        // 落下tick間隔を遅くすると、消滅フラッシュの寿命が1tickぶんの落下補間より短くなり、
+        // 落下中のブロックが空中で消えてしまう。どのtick間隔でも「補間が終わるまでは消滅
+        // 直前の見た目を保持している」ことを確認する。
         let frame = Duration::from_millis(FRAME_INTERVAL_MS);
         for tick_ms in [25u64, 150, 300, 450, 600] {
             let mut game = landing_vanish_game(tick_ms);
@@ -7907,9 +7487,9 @@ mod tests {
 
     #[test]
     fn vanish_flash_starts_only_after_the_falling_block_has_arrived() {
-        // #234。従来は着地tickの瞬間にフラッシュが始まり、まだ空中にいるブロックの
-        // 着地先が先に光っていた。着地セル・静止セルとも、落下補間が終わる(次のtickが
-        // 来る)まではフラッシュに入らないことを確認する。
+        // 着地tickの瞬間にフラッシュを始めると、まだ空中にいるブロックの着地先が先に光る。
+        // 着地セル・静止セルとも、落下補間が終わる(次のtickが来る)まではフラッシュに
+        // 入らないことを確認する。
         let mut game = landing_vanish_game(300);
         advance_to_landing_vanish(&mut game);
 
@@ -7952,8 +7532,8 @@ mod tests {
 
     #[test]
     fn vanish_flash_duration_scales_with_the_effective_fall_tick() {
-        // #234。フラッシュの長さを基準tick(FALL_TICK_MS)での`BLOCK_VANISH_FLASH_MS`から
-        // 実効tickに比例させ、遅いtickでは伸ばす。短すぎて視認できなくならないよう下限を持つ。
+        // フラッシュの長さを基準tick(FALL_TICK_MS)での`BLOCK_VANISH_FLASH_MS`から実効tickに
+        // 比例させ、遅いtickでは伸ばす。短すぎて視認できなくならないよう下限を持つ。
         let mut game = Game::new(1);
 
         game.set_block_fall_tick_ms(FALL_TICK_MS);
@@ -7980,8 +7560,8 @@ mod tests {
 
     #[test]
     fn shake_ticks_never_drops_to_zero_while_a_shake_duration_is_set() {
-        // #234。揺れtick数は整数除算のため、tick間隔が揺れ時間を超えると0になり
-        // 「予兆なしでいきなり落ちる」状態だった。揺れ時間が設定されている限り最低1tickは揺れる。
+        // 揺れtick数は整数除算のため、tick間隔が揺れ時間を超えると0になり「予兆なしで
+        // いきなり落ちる」。揺れ時間が設定されている限り最低1tickは揺れる。
         let mut game = Game::new(1);
         for tick_ms in [150u64, 300, 450, 500, 600] {
             game.set_block_fall_tick_ms(tick_ms);
@@ -8004,9 +7584,9 @@ mod tests {
 
     #[test]
     fn shake_ticks_uses_the_depth_adjusted_tick_everywhere_it_is_needed() {
-        // #234。`debug_unify_nearby_colors`の揺れリセットだけが深度補正前の生の
-        // `block_fall_tick_ms`で換算しており、重力tick側の基準と食い違っていた。
-        // 換算を1つの関数に統一し、深度が進んでも両者が同じ値を見ることを確認する。
+        // 揺れtick数の換算は1つの関数(`shake_ticks`)に統一してある。深度補正前の生の
+        // `block_fall_tick_ms`で換算すると重力tick側の基準と食い違うため、深度が進んでも
+        // 両者が同じ値を見ることを確認する。
         let mut game = Game::new(1);
         game.player.row = 999; // 最深部=実効tickが最大まで短縮される
         game.set_block_fall_tick_ms(FALL_TICK_MS);
@@ -8025,9 +7605,9 @@ mod tests {
 
     #[test]
     fn a_chain_pause_tick_finalizes_the_previous_fall_interpolation() {
-        // #234(副産物)。連鎖インターバルで足止めするtickは`last_block_moves`を
-        // 更新しないまま次のtickへ進むため、足止め中に前tickの落下補間が0から
-        // 再生され、着地済みのブロックが巻き戻って見えていた。
+        // 連鎖インターバルで足止めするtickが`last_block_moves`を更新しないまま次のtickへ
+        // 進むと、足止め中に前tickの落下補間が0から再生され、着地済みのブロックが
+        // 巻き戻って見える。
         let mut game = Game::new(5);
         clear_board(&mut game);
         game.player.row = 999;
@@ -8046,9 +7626,9 @@ mod tests {
 
     #[test]
     fn fall_interpolation_keeps_advancing_after_game_over() {
-        // #234(副産物)。`update`が`status != Playing`で早期returnするため、押し潰しで
-        // GameOverになった瞬間の落下補間が途中で凍り付き、押し潰したブロックが空中に
-        // 止まったままフラッシュへ移っていた。
+        // `update`が`status != Playing`で単純に早期returnすると、押し潰しでGameOverに
+        // なった瞬間の落下補間が途中で凍り付き、押し潰したブロックが空中に止まったまま
+        // フラッシュへ移ってしまう。
         let mut game = Game::new(1);
         game.set_block_fall_tick_ms(300);
         game.status = GameStatus::GameOver;
