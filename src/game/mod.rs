@@ -58,9 +58,11 @@ fn checkpoint_index_for_depth(depth_m: usize) -> usize {
 /// ボムの演出段階。白ボンが画面外から登場し、ボムを投げ、転がって静止し、爆発する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BombPhase {
-    /// 白ボンが画面端(`Bomb::origin`)に登場し、ボムを投げる直前までの間。
+    /// 白ボンが画面端(`Bomb::origin`)に登場し、ボムを投げる直前までの間。この間`pos`は
+    /// 毎フレーム再検証され、塞がれれば同じ列の上方向へずらされる(#241)。
     Entering,
-    /// 投げられたボムが`origin`から`pos`(最終設置マス)まで転がっている間。
+    /// 投げられたボムが`origin`から`pos`(最終設置マス)まで転がっている間。この間も`pos`は
+    /// 毎フレーム再検証され、塞がれれば同じ列の上方向へずらされる(#241)。
     Rolling,
     /// 転がり終えた直後、支えを失っていれば落下しつつ、左右に跳ねながら落ち着き先を
     /// 探している間。
@@ -1466,6 +1468,16 @@ impl Game {
             for (i, bomb) in self.bombs.iter_mut().enumerate() {
                 match bomb.phase {
                     BombPhase::Entering => {
+                        if let Some(p) = bomb_landing_pos_adjusted_upward(
+                            &self.board,
+                            bomb.pos,
+                            i,
+                            &bomb_positions,
+                            self.player.position(),
+                        ) {
+                            bomb.pos = p;
+                            bomb.origin.0 = p.0; // 「originとposは常に同じ行」の不変条件を維持するため
+                        }
                         bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
                         if bomb.phase_elapsed_ms >= BOMB_ENTER_MS {
                             bomb.phase = BombPhase::Rolling;
@@ -1473,6 +1485,16 @@ impl Game {
                         }
                     }
                     BombPhase::Rolling => {
+                        if let Some(p) = bomb_landing_pos_adjusted_upward(
+                            &self.board,
+                            bomb.pos,
+                            i,
+                            &bomb_positions,
+                            self.player.position(),
+                        ) {
+                            bomb.pos = p;
+                            bomb.origin.0 = p.0; // 「originとposは常に同じ行」の不変条件を維持するため
+                        }
                         bomb.phase_elapsed_ms = bomb.phase_elapsed_ms.saturating_add(delta_ms);
                         if bomb.phase_elapsed_ms >= BOMB_ROLL_MS {
                             bomb.phase = BombPhase::Settling;
@@ -2573,17 +2595,22 @@ impl Game {
 
     /// 画面内(プレイヤー位置から上下`STAR_VISIBLE_RANGE_ROWS`行)のEmptyマスを1つランダムに
     /// 選び、ボムを設置する。候補が無ければ何もしない。他のボムが既に占めているマスは
-    /// 候補から除外する(ボム同士を重ねないため)。
+    /// 候補から除外する(ボム同士を重ねないため)。プレイヤーが現在いるマスも候補から
+    /// 除外する(#241。含めてしまうとEntering/Rollingの再検証で毎回上へ逃げる不自然な
+    /// 演出になるため、そもそも狙わせない)。
     fn spawn_bomb_at_random_empty_cell(&mut self) {
         let start_row = self.player.row.saturating_sub(STAR_VISIBLE_RANGE_ROWS);
         let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS)
             .min(self.board.depth_rows().saturating_sub(1));
         let width = self.board.width();
         let occupied: Vec<board::Pos> = self.bombs.iter().map(|b| b.pos).collect();
+        let player_pos = self.player.position();
         let candidates: Vec<board::Pos> = (start_row..=end_row)
             .flat_map(|row| (0..width).map(move |col| (row, col)))
             .filter(|&(row, col)| {
-                self.board.cell(row, col) == Cell::Empty && !occupied.contains(&(row, col))
+                self.board.cell(row, col) == Cell::Empty
+                    && !occupied.contains(&(row, col))
+                    && (row, col) != player_pos
             })
             .collect();
         if candidates.is_empty() {
@@ -2651,6 +2678,35 @@ fn bomb_settle_step(
     } else {
         *bounce_dir = -*bounce_dir;
     }
+}
+
+/// 着地予定マス`pos`が塞がっていれば(非Emptyセル/プレイヤー/他のボム)、同じ列を上方向に
+/// 走査して最初の空きマスを返す。空いていれば`None`(変更不要)。列の最上段まで空きが
+/// 見つからなければ`None`(その場合は現状の挙動のまま何もしない)。
+///
+/// Entering/Rolling中のボムは、まだCellグリッド上に何の予約も残さない(#240の`solid`
+/// オーバーレイの対象外)。そのためspawn時点では空いていた`pos`へ、演出中に別のブロックが
+/// 落下してきたり、プレイヤーが歩いてきたりすると重なって見える(#241)。この関数を
+/// Entering/Rollingの各フレームで呼び、塞がれた瞬間に上へ逃がすことで重なりを防ぐ。
+fn bomb_landing_pos_adjusted_upward(
+    board: &Board,
+    pos: board::Pos,
+    self_index: usize,
+    bomb_positions: &[board::Pos],
+    player_pos: board::Pos,
+) -> Option<board::Pos> {
+    let is_free = |p: board::Pos| {
+        board.cell(p.0, p.1) == Cell::Empty
+            && p != player_pos
+            && !bomb_positions
+                .iter()
+                .enumerate()
+                .any(|(j, q)| j != self_index && *q == p)
+    };
+    if is_free(pos) {
+        return None;
+    }
+    (0..pos.0).rev().map(|r| (r, pos.1)).find(|&p| is_free(p))
 }
 
 /// `ms`を`step`ぶん増減させ、`DEBUG_FALL_TICK_MS_MIN`〜`MAX`にクランプする
@@ -6143,6 +6199,172 @@ mod tests {
             solid,
             vec![(10, 2), (10, 3)],
             "Settling/Tickingのボムだけを固体として扱うはず(Entering/Rollingは含めない)"
+        );
+    }
+
+    #[test]
+    fn a_block_falling_into_a_rolling_bombs_cell_pushes_the_landing_cell_up() {
+        // Entering/Rolling段階のボムはまだ着地予定マスへ何の予約も残さないため、演出中に
+        // 真上から落下してきたブロックと重なって見えるバグの回帰テスト(#241)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let bottom = game.board.depth_rows() - 1;
+        // 床と両脇の壁を作り、ボムが横に逃げられない部屋にする。
+        game.board.rows[bottom][4] = Cell::Rock { hits: 0 };
+        game.board.rows[bottom][5] = Cell::Rock { hits: 0 };
+        game.board.rows[bottom][6] = Cell::Rock { hits: 0 };
+        game.board.rows[bottom - 1][4] = Cell::Rock { hits: 0 };
+        game.board.rows[bottom - 1][6] = Cell::Rock { hits: 0 };
+        game.bombs.push(Bomb {
+            pos: (bottom - 1, 5),
+            origin: (bottom - 1, 0),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+        game.board.rows[bottom - 2][5] = Cell::Color(ColorKind::Red); // ボムの真上、未支持
+
+        for frame in 0..90 {
+            game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+            let bomb_pos = game.bombs[0].pos;
+            assert_eq!(
+                game.board.cell(bomb_pos.0, bomb_pos.1),
+                Cell::Empty,
+                "frame {frame}: ボムの着地予定マスへブロックが落下して重なっている"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bomb_never_settles_on_the_players_cell() {
+        // Entering中のボムがプレイヤーの現在マスと同じ位置に出現した場合でも、重ならず
+        // 上へ逃げ続けるはず(#241)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let row = 10;
+        let col = 5;
+        game.player.row = row;
+        game.player.col = col;
+        game.board.rows[row + 1][col] = Cell::Rock { hits: 0 }; // プレイヤーの足場
+        game.bombs.push(Bomb {
+            pos: (row, col),
+            origin: (row, 0),
+            phase: BombPhase::Entering,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        for frame in 0..90 {
+            game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+            assert_ne!(
+                game.bombs[0].pos,
+                game.player.position(),
+                "frame {frame}: ボムがプレイヤーのマスに重なっている"
+            );
+        }
+    }
+
+    #[test]
+    fn bomb_landing_pos_adjusted_upward_returns_none_when_pos_itself_is_free() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 0;
+        game.player.col = 0; // posとは無関係な位置に置く
+        let pos = (5, 5);
+
+        let result =
+            bomb_landing_pos_adjusted_upward(&game.board, pos, 0, &[pos], game.player.position());
+
+        assert_eq!(result, None, "何にも塞がれていなければ変更不要のはず");
+    }
+
+    #[test]
+    fn bomb_landing_pos_adjusted_upward_moves_up_when_pos_matches_the_player() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let pos = (5, 5);
+        game.player.row = pos.0;
+        game.player.col = pos.1;
+
+        let result =
+            bomb_landing_pos_adjusted_upward(&game.board, pos, 0, &[pos], game.player.position());
+
+        assert_eq!(
+            result,
+            Some((4, 5)),
+            "プレイヤーと重なっていれば直上の空きマスへずらすはず"
+        );
+    }
+
+    #[test]
+    fn bomb_landing_pos_adjusted_upward_moves_up_when_pos_matches_another_bomb() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 0;
+        game.player.col = 0; // posとは無関係な位置に置く
+        let pos = (5, 5);
+        // self_index=0がpos自身、index1に同じマスの別ボムがいる状態を模す。
+        let bomb_positions = [pos, pos];
+
+        let result = bomb_landing_pos_adjusted_upward(
+            &game.board,
+            pos,
+            0,
+            &bomb_positions,
+            game.player.position(),
+        );
+
+        assert_eq!(
+            result,
+            Some((4, 5)),
+            "他のボムと重なっていれば直上の空きマスへずらすはず"
+        );
+    }
+
+    #[test]
+    fn bomb_landing_pos_adjusted_upward_ignores_self_index_when_checking_bomb_overlap() {
+        // self_indexで指定した自分自身の現在位置を、他ボムとして塞がっていると
+        // 誤認してはいけない。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 0;
+        game.player.col = 0; // posとは無関係な位置に置く
+        let pos = (5, 5);
+        let bomb_positions = [(1, 1), (2, 2), pos]; // self_index=2がpos自身
+
+        let result = bomb_landing_pos_adjusted_upward(
+            &game.board,
+            pos,
+            2,
+            &bomb_positions,
+            game.player.position(),
+        );
+
+        assert_eq!(
+            result, None,
+            "自分自身の現在位置を他ボムとして誤検知してはいけない"
+        );
+    }
+
+    #[test]
+    fn bomb_landing_pos_adjusted_upward_returns_none_when_the_whole_column_above_is_blocked() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let pos = (5, 5);
+        game.player.row = pos.0;
+        game.player.col = pos.1; // posを塞ぐ
+        for r in 0..pos.0 {
+            game.board.rows[r][5] = Cell::Rock { hits: 0 }; // 列の上方向を全て塞ぐ
+        }
+
+        let result =
+            bomb_landing_pos_adjusted_upward(&game.board, pos, 0, &[pos], game.player.position());
+
+        assert_eq!(
+            result, None,
+            "列の最上段まで塞がっていれば変更不要(現状維持)のはず"
         );
     }
 
