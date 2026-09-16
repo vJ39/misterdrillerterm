@@ -35,7 +35,7 @@ use crate::constants::{
     STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
 use board::{
-    BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, bomb_blast_cells,
+    BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, Pos, bomb_blast_cells,
     connected_same_color, tick_star_melting,
 };
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
@@ -731,6 +731,20 @@ impl Game {
         })
     }
 
+    /// 静止中(Settling/Ticking)のボムが占めるマスの一覧。ボムはCellグリッド外のオーバー
+    /// レイなので、重力・支持判定系(`physics::process_gravity_tick`等)へ「固体オーバーレイ」
+    /// として明示的に渡す必要がある。渡さないとボムの真上のブロックがボムのマスへ落下して
+    /// 重なって見える。まだ登場・投擲演出中(Entering/Rolling)のボムは実体を持たないため
+    /// 含めない(`settled_bomb_at`と同じ基準)。盤面上のボムは`BOMB_MAX_COUNT_ON_BOARD`個
+    /// までなので`Vec`の線形探索で十分。
+    fn settled_bomb_positions(&self) -> Vec<Pos> {
+        self.bombs
+            .iter()
+            .filter(|b| matches!(b.phase, BombPhase::Settling | BombPhase::Ticking))
+            .map(|b| b.pos)
+            .collect()
+    }
+
     /// ↑ キー: facingをUpに変更するのみ(移動・掘削は発生しない。spec.md 1章)。
     /// Left/Rightの2ステップ段差登りにおける「ぶつかって停止中」の状態もリセットする。
     pub fn face_up(&mut self) {
@@ -768,7 +782,13 @@ impl Game {
         }
 
         let before = self.player.position();
-        let outcome = physics::drill_facing(&mut self.board, &mut self.player, &self.gravity_state);
+        let solid = self.settled_bomb_positions();
+        let outcome = physics::drill_facing(
+            &mut self.board,
+            &mut self.player,
+            &self.gravity_state,
+            &solid,
+        );
         self.push_drill_outcome_events(outcome, &mut events);
         self.note_possible_move(before);
 
@@ -1076,6 +1096,7 @@ impl Game {
             &self.gravity_state,
             (row, col),
             self.player.position(),
+            &self.settled_bomb_positions(),
         )
     }
 
@@ -1337,9 +1358,11 @@ impl Game {
             // 地点へ落ちてきても二重にライフを失わないよう、演出中は無敵として扱う。
             let invulnerable = self.invulnerability_ticks_remaining > 0 || self.is_dying();
             let shake_ticks = self.shake_ticks();
+            let solid = self.settled_bomb_positions();
             let result = physics::process_gravity_tick(
                 &mut self.board,
                 &mut self.player,
+                &solid,
                 &mut self.gravity_state,
                 invulnerable,
                 shake_ticks,
@@ -6010,6 +6033,116 @@ mod tests {
             game.player.row,
             bottom - 1,
             "登場演出中のボムは支えにならず、プレイヤーはそのマスへ落下できるはず"
+        );
+    }
+
+    #[test]
+    fn falling_blocks_do_not_land_on_a_settled_bomb() {
+        // 落下ブロックがボムの存在を無視して直下のEmptyマスへ落ち、ブロックとボムが
+        // 同じマスに重なって見えるバグの回帰テスト(#240)。プレイヤー版(#238)と同じ
+        // 構造の別インスタンスで、全種別で再現していた。
+        let kinds = [
+            Cell::Color(ColorKind::Red),
+            Cell::Rock { hits: 0 },
+            Cell::Diamond,
+            Cell::Star { visible_ms: 0 },
+            Cell::Item(ItemEffect::ClearAbove),
+            Cell::Oxygen,
+        ];
+
+        for kind in kinds {
+            let mut game = Game::new(1);
+            clear_board(&mut game);
+            let bottom = game.board.depth_rows() - 1;
+            // ボム自身の足場は盤面最深行に置く(それ以外の行に浮かせたRockは支えが
+            // 無く自重力で落下してしまい、テストの前提が崩れるため)。
+            game.board.rows[bottom][5] = Cell::Rock { hits: 0 };
+            game.bombs.push(Bomb {
+                pos: (bottom - 1, 5),
+                origin: (bottom - 1, 0),
+                phase: BombPhase::Ticking,
+                phase_elapsed_ms: 0,
+                remaining_ms: BOMB_FUSE_MS,
+                settle_bounce_dir: 1,
+            });
+            game.board.rows[bottom - 2][5] = kind; // ボムの真上、盤面上の支えは無い
+
+            for _ in 0..90 {
+                game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+            }
+
+            assert_eq!(
+                game.board.cell(bottom - 1, 5),
+                Cell::Empty,
+                "{kind:?}: ボムのマスへブロックが落下して重なっている"
+            );
+            assert_eq!(
+                game.board.cell(bottom - 2, 5),
+                kind,
+                "{kind:?}: 設置済みのボムに支えられて元の位置に残るはず"
+            );
+        }
+    }
+
+    #[test]
+    fn falling_blocks_still_fall_through_a_bomb_that_has_not_settled_yet() {
+        // Entering/Rolling段階のボムはまだ登場・投擲演出中で実体を持たないため、
+        // ブロックの支えにもならず通過できるはず(プレイヤー版の対称形)。
+        for phase in [BombPhase::Entering, BombPhase::Rolling] {
+            let mut game = Game::new(1);
+            clear_board(&mut game);
+            let bottom = game.board.depth_rows() - 1;
+            game.board.rows[bottom][5] = Cell::Rock { hits: 0 };
+            game.bombs.push(Bomb {
+                pos: (bottom - 1, 5),
+                origin: (bottom - 1, 0),
+                phase,
+                phase_elapsed_ms: 0,
+                remaining_ms: BOMB_FUSE_MS,
+                settle_bounce_dir: 1,
+            });
+            game.board.rows[bottom - 2][5] = Cell::Color(ColorKind::Red);
+
+            for _ in 0..90 {
+                game.update(Duration::from_millis(FRAME_INTERVAL_MS));
+            }
+
+            assert_eq!(
+                game.board.cell(bottom - 2, 5),
+                Cell::Empty,
+                "{phase:?}: 演出中のボムは支えにならず、ブロックは落下するはず"
+            );
+        }
+    }
+
+    #[test]
+    fn settled_bomb_positions_lists_only_settling_and_ticking_bombs() {
+        // 固体オーバーレイの対象phaseが`settled_bomb_at`と揃っていることの単体確認。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        let phases = [
+            BombPhase::Entering,
+            BombPhase::Rolling,
+            BombPhase::Settling,
+            BombPhase::Ticking,
+        ];
+        for (i, phase) in phases.into_iter().enumerate() {
+            game.bombs.push(Bomb {
+                pos: (10, i),
+                origin: (10, 0),
+                phase,
+                phase_elapsed_ms: 0,
+                remaining_ms: BOMB_FUSE_MS,
+                settle_bounce_dir: 1,
+            });
+        }
+
+        let solid = game.settled_bomb_positions();
+
+        assert_eq!(
+            solid,
+            vec![(10, 2), (10, 3)],
+            "Settling/Tickingのボムだけを固体として扱うはず(Entering/Rollingは含めない)"
         );
     }
 

@@ -230,8 +230,9 @@ fn is_overhead_unstable(
     gravity: &GravityState,
     target: (usize, usize),
     player_pos: (usize, usize),
+    solid: &[Pos],
 ) -> bool {
-    fall_hazard_status(board, gravity, target, player_pos)
+    fall_hazard_status(board, gravity, target, player_pos, solid)
         .is_some_and(|status| status.unsupported && !status.shaking)
 }
 
@@ -244,8 +245,9 @@ pub(crate) fn is_falling_hazard(
     gravity: &GravityState,
     target: (usize, usize),
     player_pos: (usize, usize),
+    solid: &[Pos],
 ) -> bool {
-    fall_hazard_status(board, gravity, target, player_pos)
+    fall_hazard_status(board, gravity, target, player_pos, solid)
         .is_some_and(|status| status.unsupported || status.shaking)
 }
 
@@ -270,30 +272,35 @@ struct FallHazardStatus {
 /// 自動取得を通じて行われる。アイテムブロックもAIRと同じ扱いにする(TERM独自
 /// 拡張。ユーザー指摘: 「アイテムはAIRと同じ用に…上から振ってきても死なない
 /// ように」)。
+///
+/// `solid`(設置済みボムの位置)は重力ティック(`apply_gravity_tick`)と同じ支えとして渡す。
+/// 渡し忘れると、ボムの上に載って静止している塊が「未支持かつ揺れていない=落下中」と
+/// 誤判定され、上向き掘削で押し潰し扱いになってしまう。
 fn fall_hazard_status(
     board: &Board,
     gravity: &GravityState,
     target: (usize, usize),
     player_pos: (usize, usize),
+    solid: &[Pos],
 ) -> Option<FallHazardStatus> {
     match board.cell(target.0, target.1) {
         Cell::Empty | Cell::Oxygen | Cell::Item(_) => None,
         Cell::Color(color) => {
             let group = connected_same_color(board, target, color);
             Some(FallHazardStatus {
-                unsupported: !is_group_supported(board, &group, player_pos),
+                unsupported: !is_group_supported(board, &group, player_pos, solid),
                 shaking: group.iter().any(|&p| gravity.is_shaking(p)),
             })
         }
         Cell::Rock { .. } => {
             let group = connected_rock_group(board, target);
             Some(FallHazardStatus {
-                unsupported: !is_group_supported(board, &group, player_pos),
+                unsupported: !is_group_supported(board, &group, player_pos, solid),
                 shaking: group.iter().any(|&p| gravity.is_shaking(p)),
             })
         }
         Cell::Diamond | Cell::Star { .. } => Some(FallHazardStatus {
-            unsupported: !is_supported(board, target, player_pos),
+            unsupported: !is_supported(board, target, player_pos, solid),
             shaking: gravity.is_shaking(target),
         }),
     }
@@ -321,10 +328,14 @@ fn fall_hazard_status(
 /// 進むのをキャンセルしてしまう」)、掘削では触らないようにした。段差登りの判定
 /// (`move_lateral`)自体は呼び出し時点の盤面を都度見て判定するため、掘削を挟んでも
 /// 誤って段差を登ってしまうことはない。
+///
+/// `solid`は設置済みボムの位置(Cellグリッド外オーバーレイ)。頭上の不安定判定でボムを
+/// 支えとして数えるために渡す。
 pub fn drill_facing(
     board: &mut Board,
     player: &mut Player,
     gravity: &GravityState,
+    solid: &[Pos],
 ) -> DrillOutcome {
     let (dr, dc) = player.facing.delta();
     let nr = player.row as isize + dr;
@@ -336,7 +347,7 @@ pub fn drill_facing(
     let target = (nr as usize, nc as usize);
 
     if player.facing == Direction::Up
-        && is_overhead_unstable(board, gravity, target, player.position())
+        && is_overhead_unstable(board, gravity, target, player.position(), solid)
     {
         return DrillOutcome::CrushedByUnstableOverhead;
     }
@@ -384,14 +395,17 @@ pub struct GravityTickResult {
 /// `shake_ticks`: 支えを失ってから実際に落下し始めるまでの揺れティック数
 /// (呼び出し側が揺れ時間設定(ms)とブロック落下tick間隔から都度換算して渡す。
 /// デバッグショートカットで実行時調整可能・TERM独自拡張)。
+///
+/// `solid`: 設置済みボムの位置(Cellグリッド外オーバーレイ)。支え・障害物として扱う。
 pub fn process_gravity_tick(
     board: &mut Board,
     player: &mut Player,
+    solid: &[Pos],
     gravity: &mut GravityState,
     invulnerable: bool,
     shake_ticks: u8,
 ) -> GravityTickResult {
-    let outcome = apply_gravity_tick(board, player.position(), gravity, shake_ticks);
+    let outcome = apply_gravity_tick(board, player.position(), solid, gravity, shake_ticks);
 
     if outcome.auto_vanished_blocks > 0 {
         player.award_auto_vanish_score(outcome.auto_vanished_blocks);
@@ -486,9 +500,9 @@ mod tests {
         invulnerable: bool,
     ) -> GravityTickResult {
         for _ in 0..SHAKE_TICKS {
-            process_gravity_tick(board, player, gravity, invulnerable, SHAKE_TICKS);
+            process_gravity_tick(board, player, &[], gravity, invulnerable, SHAKE_TICKS);
         }
-        process_gravity_tick(board, player, gravity, invulnerable, SHAKE_TICKS)
+        process_gravity_tick(board, player, &[], gravity, invulnerable, SHAKE_TICKS)
     }
 
     // --- MoveLeft/MoveRight: 掘削なしの地形追従移動(facing変更・フィールド端・移動/1段登り/停止) ---
@@ -735,7 +749,7 @@ mod tests {
         let mut player = Player::new();
         player.bumped_direction = Some(Direction::Right);
 
-        drill_facing(&mut board, &mut player, &GravityState::new());
+        drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
 
         assert_eq!(player.bumped_direction, Some(Direction::Right));
     }
@@ -748,7 +762,7 @@ mod tests {
         let target_col = player.col - 1;
         board.rows[player.row][target_col] = Cell::Color(ColorKind::Blue);
 
-        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
 
         assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
         assert_eq!(player.col, target_col + 1); // 動いていない(元の位置のまま)
@@ -764,7 +778,7 @@ mod tests {
         player.facing = Direction::Down;
         board.rows[player.row + 1][player.col] = Cell::Color(ColorKind::Green);
 
-        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
 
         assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
         assert_eq!(player.row, 0, "掘っただけでは移動しない");
@@ -783,7 +797,7 @@ mod tests {
         player.facing = Direction::Down;
         board.rows[player.row + 1][player.col] = Cell::Rock { hits: 0 };
 
-        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
 
         assert_eq!(outcome, DrillOutcome::RockHitIntact);
         assert_eq!(player.row, 0); // 降下しない
@@ -796,7 +810,7 @@ mod tests {
         player.row = 1;
         player.facing = Direction::Up;
 
-        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
 
         assert_eq!(outcome, DrillOutcome::NoEffect);
         assert_eq!(player.row, 1); // Upは移動しない(spec.md 1章)
@@ -813,7 +827,7 @@ mod tests {
         player.facing = Direction::Up;
         board.rows[0][player.col] = Cell::Diamond; // 直下(row0)を含め周囲は空=未支持
 
-        let outcome = drill_facing(&mut board, &mut player, &GravityState::new());
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
 
         assert_eq!(outcome, DrillOutcome::CrushedByUnstableOverhead);
     }
@@ -947,15 +961,21 @@ mod tests {
         player.facing = Direction::Left; // (1,0)を移動せずに掘削する
         let mut gravity = GravityState::new();
 
-        let drill_outcome = drill_facing(&mut board, &mut player, &gravity);
+        let drill_outcome = drill_facing(&mut board, &mut player, &gravity, &[]);
         assert_eq!(drill_outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
         assert_eq!(board.cell(1, 0), Cell::Empty, "支えの掘削は完了している");
         assert_eq!(player.col, 1, "Left方向のDrillはその場から動かない");
 
         // 支えを失った直後、SHAKE_TICKSぶんはまだ落下しない。
         for _ in 0..SHAKE_TICKS {
-            let tick =
-                process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
+            let tick = process_gravity_tick(
+                &mut board,
+                &mut player,
+                &[],
+                &mut gravity,
+                false,
+                SHAKE_TICKS,
+            );
             assert_eq!(tick.moved_cells.len(), 0);
         }
         assert_eq!(
@@ -965,7 +985,14 @@ mod tests {
         );
 
         // 揺れが明けた次のティックで初めて1マス落下する。
-        let tick = process_gravity_tick(&mut board, &mut player, &mut gravity, false, SHAKE_TICKS);
+        let tick = process_gravity_tick(
+            &mut board,
+            &mut player,
+            &[],
+            &mut gravity,
+            false,
+            SHAKE_TICKS,
+        );
         assert_eq!(tick.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
@@ -1034,5 +1061,87 @@ mod tests {
             player.oxygen,
             10.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
         );
+    }
+
+    // --- 固体オーバーレイ(設置済みボム)を支えとして扱う(#240) ---
+
+    /// 固体オーバーレイのテストで共通に使う盤面を組む。row1のcol0/col1に横並びの赤
+    /// ブロック、プレイヤーは(2, 1)。col0の直下(2, 0)にオーバーレイを置けば塊は支持され、
+    /// 置かなければ未支持(落下中)になる。
+    fn board_with_a_group_over_an_overlay() -> (Board, Player) {
+        let mut board = empty_board(4);
+        let mut player = Player::new();
+        player.row = 2;
+        player.col = 1;
+        player.facing = Direction::Up;
+        board.rows[1][0] = Cell::Color(ColorKind::Red);
+        board.rows[1][1] = Cell::Color(ColorKind::Red);
+        (board, player)
+    }
+
+    #[test]
+    fn drilling_up_into_a_group_held_by_a_solid_overlay_is_not_a_crush() {
+        // 設置済みボムに片側を支えられて静止している塊は落下中ではないので、上向き
+        // 掘削は押し潰しにならず普通に掘れるはず。オーバーレイを渡し忘れると
+        // 「未支持かつ揺れていない=落下中」と誤判定され、プレイヤーが即死する。
+        let (mut board, mut player) = board_with_a_group_over_an_overlay();
+        let solid = [(2usize, 0usize)];
+
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &solid);
+
+        assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 2 });
+    }
+
+    #[test]
+    fn drilling_up_into_the_same_group_without_a_solid_overlay_still_crushes() {
+        // 上のテストの対比。オーバーレイが無ければ塊は本当に未支持=落下中なので、
+        // 従来通り押し潰しになる。
+        let (mut board, mut player) = board_with_a_group_over_an_overlay();
+
+        let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
+
+        assert_eq!(outcome, DrillOutcome::CrushedByUnstableOverhead);
+    }
+
+    #[test]
+    fn is_falling_hazard_is_false_for_a_group_held_by_a_solid_overlay() {
+        // オートプレイの安全確認(Game::is_cell_unstable)もこの関数を通るため、
+        // オーバーレイ支持の塊を危険と誤判定しないことを固定する。
+        let (board, player) = board_with_a_group_over_an_overlay();
+        let gravity = GravityState::new();
+        let player_pos = player.position();
+        let solid = [(2usize, 0usize)];
+
+        assert!(
+            !is_falling_hazard(&board, &gravity, (1, 1), player_pos, &solid),
+            "オーバーレイに支えられた塊は落下の脅威にならないはず"
+        );
+        assert!(
+            is_falling_hazard(&board, &gravity, (1, 1), player_pos, &[]),
+            "オーバーレイが無ければ従来通り脅威として扱われるはず"
+        );
+    }
+
+    #[test]
+    fn is_falling_hazard_is_false_for_a_single_cell_resting_on_a_solid_overlay() {
+        // ダイヤ・スターは連結対象外で単独セル判定(`is_supported`)を通るため、塊版とは
+        // 別に固定する。プレイヤーの真上にある場合は支えのマスがプレイヤー自身の位置に
+        // なりボムが入れないので、脅威判定(オートプレイの安全確認)側で検証する。
+        for kind in [Cell::Diamond, Cell::Star { visible_ms: 0 }] {
+            let mut board = empty_board(4);
+            board.rows[1][1] = kind;
+            let gravity = GravityState::new();
+            let player_pos = (3usize, 5usize); // 判定に絡まない離れた位置
+            let solid = [(2usize, 1usize)];
+
+            assert!(
+                !is_falling_hazard(&board, &gravity, (1, 1), player_pos, &solid),
+                "{kind:?}: オーバーレイに支えられた単独セルは脅威にならないはず"
+            );
+            assert!(
+                is_falling_hazard(&board, &gravity, (1, 1), player_pos, &[]),
+                "{kind:?}: オーバーレイが無ければ従来通り脅威として扱われるはず"
+            );
+        }
     }
 }

@@ -980,13 +980,24 @@ pub struct FallTickOutcome {
 /// あるセル`pos`が「支持されている」か(spec.md 4.2)。最深行、または直下が非Emptyかつ
 /// プレイヤー不在なら真(プレイヤー位置は常に空洞扱いで支えにならない)。単独セル専用で、
 /// 連結グループの判定には`is_group_supported`を使うこと(仲間セルを支えと誤認するため)。
-pub(crate) fn is_supported(board: &Board, pos: (usize, usize), player_pos: (usize, usize)) -> bool {
+///
+/// `solid`はCellグリッド外のオーバーレイ(設置済みボム)が占めるマスの一覧。グリッド上は
+/// Emptyだが物理的には塞がっているため、非Emptyセルと同じ「支え」として扱う。
+pub(crate) fn is_supported(
+    board: &Board,
+    pos: (usize, usize),
+    player_pos: (usize, usize),
+    solid: &[Pos],
+) -> bool {
     let (row, col) = pos;
     let depth_rows = board.depth_rows();
     if row + 1 >= depth_rows {
         return true;
     }
     let below = (row + 1, col);
+    if solid.contains(&below) {
+        return true;
+    }
     board.cell(below.0, below.1) != Cell::Empty && below != player_pos
 }
 
@@ -1033,10 +1044,14 @@ fn collect_fall_groups(board: &Board) -> Vec<Vec<(usize, usize)>> {
 /// `group`(1つの塊)が全体として支持されているか。どれか1つのセルでも「直下がグループ外の
 /// 非Emptyセル」または「最深行」なら塊全体が支持されているとみなす。直下が仲間セルの場合、
 /// そのセル自身は支えにならない(仲間越しに本当の支えを探す)。
+///
+/// `solid`(設置済みボム等のCellグリッド外オーバーレイ)は`is_supported`と同じく支えとして
+/// 扱う。
 pub(crate) fn is_group_supported(
     board: &Board,
     group: &[(usize, usize)],
     player_pos: (usize, usize),
+    solid: &[Pos],
 ) -> bool {
     let depth_rows = board.depth_rows();
     let group_set: HashSet<(usize, usize)> = group.iter().copied().collect();
@@ -1048,6 +1063,9 @@ pub(crate) fn is_group_supported(
         let below = (r + 1, c);
         if group_set.contains(&below) {
             return false; // 仲間は支えにならない。他のセルの判定に委ねる
+        }
+        if solid.contains(&below) {
+            return true;
         }
         board.cell(below.0, below.1) != Cell::Empty && below != player_pos
     })
@@ -1062,6 +1080,7 @@ fn has_stable_support(
     cell_to_group: &HashMap<(usize, usize), usize>,
     supported: &[bool],
     player_pos: (usize, usize),
+    solid: &[Pos],
 ) -> bool {
     let depth_rows = board.depth_rows();
     let group_set: HashSet<(usize, usize)> = group.iter().copied().collect();
@@ -1073,6 +1092,11 @@ fn has_stable_support(
         let below = (r + 1, c);
         if group_set.contains(&below) {
             return false; // 仲間は支えにならない。他のセルの判定に委ねる
+        }
+        if solid.contains(&below) {
+            // 設置済みボムは重力の対象外で、このティックで立ち退くことがないため
+            // 常に安定した支えとして扱う。
+            return true;
         }
         if below == player_pos || board.cell(below.0, below.1) == Cell::Empty {
             return false;
@@ -1088,9 +1112,15 @@ fn has_stable_support(
 /// のスナップショット基準で全塊同時に支持判定→未支持の塊は`shake_ticks`ぶん揺れてから
 /// 1マスずつ落下する(4.2〜4.4)。移動先がプレイヤーなら押し潰し確定(酸素・アイテムは例外で
 /// 取得扱い、5章)。着地した色/岩ブロックの塊は4個以上なら自動消滅する(4.5・4.9)。
+///
+/// `solid`はCellグリッド外のオーバーレイ(設置済みボム)が占めるマスの一覧。盤面上はEmpty
+/// だが物理的には塞がっているため、支持判定・着地先判定・自動消滅判定のすべてで非Emptyセル
+/// と同じ「支え/障害物」として扱う。これを渡さないと、ボムの真上で支えを失ったブロックが
+/// ボムのマスへ落下して重なって見える。
 pub fn apply_gravity_tick(
     board: &mut Board,
     player_pos: (usize, usize),
+    solid: &[Pos],
     gravity: &mut GravityState,
     shake_ticks: u8,
 ) -> FallTickOutcome {
@@ -1108,7 +1138,7 @@ pub fn apply_gravity_tick(
     // まず素朴な支持判定(直下が非Emptyかどうか)で初期化する。
     let mut supported: Vec<bool> = groups
         .iter()
-        .map(|g| is_group_supported(&snapshot, g, player_pos))
+        .map(|g| is_group_supported(&snapshot, g, player_pos, solid))
         .collect();
 
     // 連鎖的な再判定。支えの根拠セルが属する塊自体がこのティックで未支持なら、支えられて
@@ -1126,6 +1156,7 @@ pub fn apply_gravity_tick(
                 &cell_to_group,
                 &supported,
                 player_pos,
+                solid,
             ) {
                 supported[i] = false;
                 changed = true;
@@ -1168,9 +1199,10 @@ pub fn apply_gravity_tick(
         }
     }
 
-    // 着地先(snapshot時点)が非Emptyで「今ティックで立ち退く別候補」でもない候補は落下を
-    // 見送り揺れ中に戻す。揺れ猶予の消化は塊ごとに独立して進むため、まだ揺れ猶予中で物理的
-    // に残っている支えを、先に揺れ明けした側が無警告で上書きしてしまうのを防ぐ。
+    // 着地先(snapshot時点)が非Empty(または設置済みボムが占有)で「今ティックで立ち退く
+    // 別候補」でもない候補は落下を見送り揺れ中に戻す。揺れ猶予の消化は塊ごとに独立して進む
+    // ため、まだ揺れ猶予中で物理的に残っている支えを、先に揺れ明けした側が無警告で上書き
+    // してしまうのを防ぐ。
     // 1候補の見送りで別候補の立ち退き先が失われうるため、変化が無くなるまで繰り返す。
     loop {
         let vacating: HashSet<(usize, usize)> = candidates
@@ -1181,7 +1213,7 @@ pub fn apply_gravity_tick(
             group.iter().any(|&(r, c)| {
                 let to = (r + 1, c);
                 to != player_pos
-                    && snapshot.cell(to.0, to.1) != Cell::Empty
+                    && (snapshot.cell(to.0, to.1) != Cell::Empty || solid.contains(&to))
                     && !vacating.contains(&to)
             })
         });
@@ -1286,7 +1318,9 @@ pub fn apply_gravity_tick(
                 // 支持判定は落下塊自身だけでなく、接触した既存の塊も含む現在の連結グループ
                 // 全体で行う。真横への接触だと落下塊単独では未支持と誤判定され、次tickで
                 // 合体・支持済み扱いになり、以後二度と自動消滅チェックされず永久に残るため。
-                if !is_group_supported(board, &vanish_group, player_pos) {
+                // 同じ理由で`solid`(設置済みボム)も必ず渡す。ボムの上に着地した塊を未支持と
+                // 誤判定すると、この自動消滅チェックがスキップされたまま永久に残ってしまう。
+                if !is_group_supported(board, &vanish_group, player_pos, solid) {
                     continue; // まだ落下中(次ティック以降に改めて着地判定する)
                 }
                 if vanish_group.len() >= 4 {
@@ -1304,7 +1338,7 @@ pub fn apply_gravity_tick(
                     .into_iter()
                     .filter(|&pos| pos != player_pos)
                     .collect();
-                if !is_group_supported(board, &vanish_group, player_pos) {
+                if !is_group_supported(board, &vanish_group, player_pos, solid) {
                     continue;
                 }
                 if vanish_group.len() >= 4 {
@@ -3144,14 +3178,14 @@ mod tests {
         // SHAKE_TICKS ぶんは揺れるだけで移動しない。この間`is_shaking`はtrueを返し、
         // 描画側がシェイク演出に使えるデータとして残る(spec.md 4.3)。
         for _ in 0..SHAKE_TICKS {
-            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+            let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
             assert_eq!(outcome.moved_cells.len(), 0);
             assert!(gravity.is_shaking((0, 0)));
         }
         assert_eq!(board.cell(0, 0), Cell::Color(ColorKind::Red));
 
         // SHAKE_TICKS+1ティック目で実際に1マス落下する
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
@@ -3171,11 +3205,11 @@ mod tests {
         let mut gravity = GravityState::new();
 
         for _ in 0..SHAKE_TICKS {
-            apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+            apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         }
 
         // SHAKE_TICKS+1回目の呼び出しで揺れが明けて最初の1マスが落ちる。
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
         assert!(!gravity.is_shaking((1, 0)));
@@ -3183,7 +3217,7 @@ mod tests {
         // 以降、最深行に着地するまで毎ティック連続で1マスずつ落下し続け、
         // 揺れ状態(is_shaking)には一切戻らない。
         for expected_row in 2..6 {
-            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+            let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
             assert_eq!(
                 outcome.moved_cells.len(),
                 1,
@@ -3208,7 +3242,7 @@ mod tests {
         let mut gravity = GravityState::new();
 
         for _ in 0..=SHAKE_TICKS {
-            apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+            apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         }
         assert_eq!(
             board.cell(1, 0),
@@ -3219,7 +3253,7 @@ mod tests {
         // ショートカットC相当の書き換え直後に呼ばれる想定の関数。
         gravity.reset_shake_progress(SHAKE_TICKS);
 
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         assert_eq!(
             outcome.moved_cells.len(),
             1,
@@ -3237,7 +3271,7 @@ mod tests {
         board.rows[0][0] = Cell::Color(ColorKind::Red);
         let mut gravity = GravityState::new();
 
-        apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         assert!(gravity.is_shaking((0, 0)), "揺れ猶予中のはず");
 
         gravity.reset_shake_progress(SHAKE_TICKS);
@@ -3255,7 +3289,7 @@ mod tests {
         board.rows[1][0] = Cell::Color(ColorKind::Blue); // 支えあり
         let mut gravity = GravityState::new();
 
-        apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
 
         assert!(!gravity.is_shaking((0, 0)));
     }
@@ -3268,9 +3302,9 @@ mod tests {
         gravity: &mut GravityState,
     ) -> FallTickOutcome {
         for _ in 0..SHAKE_TICKS {
-            apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS);
+            apply_gravity_tick(board, player_pos, &[], gravity, SHAKE_TICKS);
         }
-        apply_gravity_tick(board, player_pos, gravity, SHAKE_TICKS)
+        apply_gravity_tick(board, player_pos, &[], gravity, SHAKE_TICKS)
     }
 
     #[test]
@@ -3285,7 +3319,7 @@ mod tests {
         let mut gravity = GravityState::new();
         let player_pos = (999, 999);
         for _ in 0..(SHAKE_TICKS as usize + 6) {
-            apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
         }
 
         assert!(
@@ -3818,7 +3852,7 @@ mod tests {
         let player_pos = (usize::MAX, usize::MAX);
 
         for _ in 0..(SHAKE_TICKS as usize + 1) * 10 {
-            apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
         }
 
         for r in 0..6 {
@@ -3929,7 +3963,7 @@ mod tests {
         let mut gravity = GravityState::new();
 
         for _ in 0..SHAKE_TICKS {
-            let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+            let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
             assert_eq!(outcome.moved_cells.len(), 0);
             assert!(gravity.is_shaking((0, 0)));
         }
@@ -3938,7 +3972,7 @@ mod tests {
             "揺れている間はまだ落下しない"
         );
 
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
         assert_eq!(outcome.moved_cells.len(), 1);
         assert_eq!(board.cell(0, 0), Cell::Empty);
         assert!(
@@ -3994,7 +4028,7 @@ mod tests {
         board.rows[2][3] = Cell::Color(ColorKind::Red);
         let mut gravity = GravityState::new();
 
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS);
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS);
 
         assert_eq!(outcome.auto_vanished_blocks, 0);
         assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
@@ -4027,8 +4061,8 @@ mod tests {
         board.rows[1][0] = Cell::Oxygen;
         let mut gravity = GravityState::new();
 
-        apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 揺れ
-        let outcome = apply_gravity_tick(&mut board, (99, 99), &mut gravity, SHAKE_TICKS); // 支持判定
+        apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS); // 揺れ
+        let outcome = apply_gravity_tick(&mut board, (99, 99), &[], &mut gravity, SHAKE_TICKS); // 支持判定
 
         assert_eq!(
             outcome.moved_cells.len(),
@@ -4108,12 +4142,12 @@ mod tests {
         let player_pos = (usize::MAX, usize::MAX);
 
         for _ in 0..(SHAKE_TICKS as usize + 1) * 30 {
-            apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
         }
 
         for group in collect_fall_groups(&board) {
             assert!(
-                is_group_supported(&board, &group, player_pos),
+                is_group_supported(&board, &group, player_pos, &[]),
                 "十分な時間が経っても未支持のまま残っている塊がある: {group:?}"
             );
         }
@@ -4140,12 +4174,12 @@ mod tests {
             let player_pos = (usize::MAX, usize::MAX); // 影響しない盤外位置
 
             for _ in 0..(SHAKE_TICKS as usize + 1) * 60 {
-                apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+                apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
             }
 
             for group in collect_fall_groups(&board) {
                 assert!(
-                    is_group_supported(&board, &group, player_pos),
+                    is_group_supported(&board, &group, player_pos, &[]),
                     "seed={seed}: 十分な時間が経っても未支持のまま残っている塊がある: {group:?}"
                 );
             }
@@ -4183,12 +4217,12 @@ mod tests {
             let player_pos = (usize::MAX, usize::MAX);
 
             for _ in 0..(SHAKE_TICKS as usize + 1) * 70 {
-                apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+                apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
             }
 
             for group in collect_fall_groups(&board) {
                 assert!(
-                    is_group_supported(&board, &group, player_pos),
+                    is_group_supported(&board, &group, player_pos, &[]),
                     "seed={seed}: reroll後・深い深度で十分な時間が経っても未支持のまま残っている塊がある: {group:?}"
                 );
             }
@@ -4214,7 +4248,8 @@ mod tests {
         let player_pos = (usize::MAX, usize::MAX);
 
         for tick in 0..((SHAKE_TICKS as usize + 1) * 10) {
-            let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            let outcome =
+                apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
             if board.cell(8, 3) != Cell::Diamond {
                 let logged = outcome
                     .vanished_cells
@@ -4264,7 +4299,8 @@ mod tests {
         let player_pos = (usize::MAX, usize::MAX);
 
         for tick in 0..((SHAKE_TICKS as usize + 1) * 20) {
-            let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+            let outcome =
+                apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
             if board.cell(19, 3) != Cell::Diamond {
                 let logged = outcome
                     .vanished_cells
@@ -4315,6 +4351,7 @@ mod tests {
         let outcome = apply_gravity_tick(
             &mut board,
             (usize::MAX, usize::MAX),
+            &[],
             &mut gravity,
             SHAKE_TICKS,
         );
@@ -4342,6 +4379,7 @@ mod tests {
             apply_gravity_tick(
                 &mut board,
                 (usize::MAX, usize::MAX),
+                &[],
                 &mut gravity,
                 SHAKE_TICKS,
             );
@@ -4388,7 +4426,8 @@ mod tests {
             let before = count_diamonds(&board);
 
             for _ in 0..(SHAKE_TICKS as usize + 1) * 60 {
-                let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+                let outcome =
+                    apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
                 assert!(
                     !outcome
                         .vanished_cells
@@ -4448,7 +4487,8 @@ mod tests {
             let before = count_diamonds(&board);
 
             for _ in 0..(SHAKE_TICKS as usize + 1) * 70 {
-                let outcome = apply_gravity_tick(&mut board, player_pos, &mut gravity, SHAKE_TICKS);
+                let outcome =
+                    apply_gravity_tick(&mut board, player_pos, &[], &mut gravity, SHAKE_TICKS);
                 assert!(
                     !outcome
                         .vanished_cells
@@ -4478,5 +4518,241 @@ mod tests {
             "横方向の同色ランの平均長が想定より短い(clustered生成が機能していない疑い、\
              完全独立抽選なら1.33程度になるはず): {avg}"
         );
+    }
+
+    // --- 固体オーバーレイ(設置済みボム)を支え/障害物として扱う(#240) ---
+
+    /// 固体オーバーレイのテストで共通に使う盤外のプレイヤー位置。
+    const OFF_BOARD_PLAYER: (usize, usize) = (usize::MAX, usize::MAX);
+
+    /// 固体オーバーレイのテストで扱う全セル種別。
+    fn overlay_test_cell_kinds() -> [Cell; 6] {
+        [
+            Cell::Color(ColorKind::Red),
+            Cell::Rock { hits: 0 },
+            Cell::Diamond,
+            Cell::Star { visible_ms: 0 },
+            Cell::Item(ItemEffect::ClearAbove),
+            Cell::Oxygen,
+        ]
+    }
+
+    #[test]
+    fn every_cell_kind_rests_on_top_of_a_solid_overlay() {
+        // 設置済みボムはCellグリッド外のオーバーレイのため、盤面だけを見る重力解決では
+        // 支えとして数えられず、真上のブロックがボムのマスへ落ちて重なって見えていた
+        // (#240)。全種別が固体オーバーレイの真上で静止することを確認する。
+        for kind in overlay_test_cell_kinds() {
+            let mut board = empty_board(5);
+            board.rows[1][0] = kind; // オーバーレイの真上。盤面上の支えは無い
+            let solid = [(2usize, 0usize)];
+            let mut gravity = GravityState::new();
+
+            for _ in 0..(SHAKE_TICKS as usize + 2) {
+                let outcome = apply_gravity_tick(
+                    &mut board,
+                    OFF_BOARD_PLAYER,
+                    &solid,
+                    &mut gravity,
+                    SHAKE_TICKS,
+                );
+                assert!(
+                    outcome.moved_cells.is_empty(),
+                    "{kind:?}: 固体オーバーレイの上では落下しないはず"
+                );
+            }
+
+            assert_eq!(board.cell(1, 0), kind, "{kind:?}: 元の位置に残るはず");
+            assert_eq!(
+                board.cell(2, 0),
+                Cell::Empty,
+                "{kind:?}: オーバーレイのマスへ入って重なってはいけない"
+            );
+            assert!(
+                !gravity.is_shaking((1, 0)),
+                "{kind:?}: 支持されているので揺れもしないはず"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_solid_overlay_every_cell_kind_still_falls_through_that_cell() {
+        // 上のテストの対比。`solid`が空スライスなら従来通りの挙動(素通りして落下)で
+        // あることを確認し、支えが増えたのはオーバーレイを渡した場合だけだと固定する。
+        for kind in overlay_test_cell_kinds() {
+            let mut board = empty_board(5);
+            board.rows[1][0] = kind;
+            let mut gravity = GravityState::new();
+
+            for _ in 0..(SHAKE_TICKS as usize + 1) * 5 {
+                apply_gravity_tick(&mut board, OFF_BOARD_PLAYER, &[], &mut gravity, SHAKE_TICKS);
+            }
+
+            assert_eq!(
+                board.cell(4, 0),
+                kind,
+                "{kind:?}: オーバーレイが無ければ最深行まで落ちるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_falling_from_above_stops_one_row_above_the_solid_overlay() {
+        // 既に落下を始めている塊(揺れ明け済み)も、オーバーレイの1マス上で止まるはず。
+        let mut board = empty_board(6);
+        board.rows[0][0] = Cell::Color(ColorKind::Red);
+        let solid = [(3usize, 0usize)];
+        let mut gravity = GravityState::new();
+
+        for _ in 0..(SHAKE_TICKS as usize + 1) * 6 {
+            apply_gravity_tick(
+                &mut board,
+                OFF_BOARD_PLAYER,
+                &solid,
+                &mut gravity,
+                SHAKE_TICKS,
+            );
+        }
+
+        assert_eq!(
+            board.cell(2, 0),
+            Cell::Color(ColorKind::Red),
+            "オーバーレイの1マス上で止まるはず"
+        );
+        assert_eq!(
+            board.cell(3, 0),
+            Cell::Empty,
+            "オーバーレイのマスは空のまま"
+        );
+        assert!(
+            !gravity.is_shaking((2, 0)),
+            "支持されて止まったのだから、揺れ続けてもいけない"
+        );
+    }
+
+    #[test]
+    fn a_two_wide_group_is_supported_when_only_one_side_rests_on_the_solid_overlay() {
+        // 塊単位の支持判定。片側だけがオーバーレイに乗っていれば塊全体が支持される
+        // (ちぎれて片側だけ落ちることもない)。
+        let mut board = empty_board(5);
+        board.rows[1][0] = Cell::Color(ColorKind::Red);
+        board.rows[1][1] = Cell::Color(ColorKind::Red);
+        let solid = [(2usize, 0usize)]; // col1の直下は空洞のまま
+        let mut gravity = GravityState::new();
+
+        for _ in 0..(SHAKE_TICKS as usize + 2) {
+            apply_gravity_tick(
+                &mut board,
+                OFF_BOARD_PLAYER,
+                &solid,
+                &mut gravity,
+                SHAKE_TICKS,
+            );
+        }
+
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(
+            board.cell(1, 1),
+            Cell::Color(ColorKind::Red),
+            "片側だけがオーバーレイに乗っていても塊全体が支持されるはず"
+        );
+        assert!(
+            !gravity.is_shaking((1, 0)) && !gravity.is_shaking((1, 1)),
+            "支持されているのだから揺れ続けてもいけない"
+        );
+    }
+
+    #[test]
+    fn stacked_groups_are_both_supported_through_the_solid_overlay() {
+        // 異色2段積み(上段Blue on 下段Red on オーバーレイ)。`has_stable_support`の連鎖
+        // 判定でもオーバーレイを安定した支えとして扱わないと、下段が未支持と判定されて
+        // 上段まで巻き込まれ、2段まとめて落ちてしまう。
+        let mut board = empty_board(5);
+        board.rows[1][0] = Cell::Color(ColorKind::Blue);
+        board.rows[2][0] = Cell::Color(ColorKind::Red);
+        let solid = [(3usize, 0usize)];
+        let mut gravity = GravityState::new();
+
+        for _ in 0..(SHAKE_TICKS as usize + 2) {
+            apply_gravity_tick(
+                &mut board,
+                OFF_BOARD_PLAYER,
+                &solid,
+                &mut gravity,
+                SHAKE_TICKS,
+            );
+        }
+
+        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Blue));
+        assert_eq!(board.cell(2, 0), Cell::Color(ColorKind::Red));
+        assert_eq!(board.cell(3, 0), Cell::Empty);
+        assert!(
+            !gravity.is_shaking((1, 0)) && !gravity.is_shaking((2, 0)),
+            "連鎖判定でも支えとして数えられるので、どちらの段も揺れ続けないはず"
+        );
+    }
+
+    #[test]
+    fn a_four_color_row_landing_on_a_single_solid_overlay_point_auto_vanishes() {
+        // 着地後の自動消滅判定が呼ぶ`is_group_supported`にもオーバーレイを渡さないと、
+        // 「まだ落下中」と誤判定されて消滅がスキップされる。次tick以降は支持済みなので
+        // 二度と判定されず、4連結が永久に残ってしまう。
+        let mut board = empty_board(6);
+        for col in 0..4 {
+            board.rows[1][col] = Cell::Color(ColorKind::Red);
+        }
+        let solid = [(3usize, 0usize)]; // col0の1マス下だけがオーバーレイ
+        let mut gravity = GravityState::new();
+
+        let mut vanished = 0usize;
+        for _ in 0..(SHAKE_TICKS as usize + 2) {
+            let outcome = apply_gravity_tick(
+                &mut board,
+                OFF_BOARD_PLAYER,
+                &solid,
+                &mut gravity,
+                SHAKE_TICKS,
+            );
+            vanished += outcome.auto_vanished_blocks;
+        }
+
+        assert_eq!(
+            vanished, 4,
+            "オーバーレイ1点に支えられて着地した4連結は自動消滅するはず"
+        );
+        for col in 0..4 {
+            assert_eq!(board.cell(2, col), Cell::Empty, "col={col}が消え残っている");
+        }
+    }
+
+    #[test]
+    fn a_four_rock_row_landing_on_a_single_solid_overlay_point_auto_vanishes() {
+        // 岩ブロック版(得点は発生しないが自動消滅はする、4.9)。
+        let mut board = empty_board(6);
+        for col in 0..4 {
+            board.rows[1][col] = Cell::Rock { hits: 0 };
+        }
+        let solid = [(3usize, 0usize)];
+        let mut gravity = GravityState::new();
+
+        let mut vanished = 0usize;
+        for _ in 0..(SHAKE_TICKS as usize + 2) {
+            let outcome = apply_gravity_tick(
+                &mut board,
+                OFF_BOARD_PLAYER,
+                &solid,
+                &mut gravity,
+                SHAKE_TICKS,
+            );
+            vanished += outcome.auto_vanished_rock_blocks;
+        }
+
+        assert_eq!(
+            vanished, 4,
+            "オーバーレイ1点に支えられて着地した岩4連結も自動消滅するはず"
+        );
+        for col in 0..4 {
+            assert_eq!(board.cell(2, col), Cell::Empty, "col={col}が消え残っている");
+        }
     }
 }
