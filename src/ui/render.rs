@@ -467,7 +467,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         line("T: オートプレイ ON/OFF   G: 無敵(ミス無効) ON/OFF(Tとは独立)"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
-        line(", / .: 揺れ時間 長く/短く"),
+        line(", / .: 落下待ち時間(揺れ) 長く/短く"),
     ];
 
     if let Some(jukebox) = jukebox {
@@ -644,6 +644,8 @@ pub enum SettingsChoice {
     BlockFallSpeed,
     /// キャラ自身の自由落下速度(tick間隔, ms)。デバッグショートカット(-/=)と同じ値を設定画面からも調整する。
     PlayerFallSpeed,
+    /// 揺れ時間(支えを失ってから実際に落下し始めるまでの猶予, ms)。デバッグショートカット(, .)と同じ値を設定画面からも調整する。
+    ShakeDuration,
     /// 横移動(MoveLeft/MoveRight)のクールダウン間隔(ms、小さいほど速い)。
     MoveSpeed,
     /// 「わ〜!」スライダー演出後、キャラが起き上がるまでの硬直インターバル(ms)。
@@ -677,7 +679,8 @@ impl SettingsChoice {
             SettingsChoice::ColorClusterRate => SettingsChoice::FieldWidth,
             SettingsChoice::FieldWidth => SettingsChoice::BlockFallSpeed,
             SettingsChoice::BlockFallSpeed => SettingsChoice::PlayerFallSpeed,
-            SettingsChoice::PlayerFallSpeed => SettingsChoice::MoveSpeed,
+            SettingsChoice::PlayerFallSpeed => SettingsChoice::ShakeDuration,
+            SettingsChoice::ShakeDuration => SettingsChoice::MoveSpeed,
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DebugLogEnabled,
@@ -710,7 +713,8 @@ impl SettingsChoice {
             SettingsChoice::FieldWidth => SettingsChoice::ColorClusterRate,
             SettingsChoice::BlockFallSpeed => SettingsChoice::FieldWidth,
             SettingsChoice::PlayerFallSpeed => SettingsChoice::BlockFallSpeed,
-            SettingsChoice::MoveSpeed => SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::ShakeDuration => SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::MoveSpeed => SettingsChoice::ShakeDuration,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::MoveSpeed,
         }
     }
@@ -739,6 +743,7 @@ pub fn draw_settings(
     field_width: usize,
     block_fall_tick_ms: u64,
     player_fall_tick_ms: u64,
+    shake_duration_ms: u64,
     move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
     bomb_spawn_rate_percent: u32,
@@ -897,6 +902,11 @@ pub fn draw_settings(
             "キャラの落下速度(小さいほど速い)",
             player_fall_tick_ms,
             selection == SettingsChoice::PlayerFallSpeed,
+        ),
+        ms_line(
+            "落下待ち時間(揺れ)",
+            shake_duration_ms,
+            selection == SettingsChoice::ShakeDuration,
         ),
         ms_line(
             "横移動速度(小さいほど速い)",
@@ -2900,6 +2910,7 @@ mod tests {
             SettingsChoice::FieldWidth,
             SettingsChoice::BlockFallSpeed,
             SettingsChoice::PlayerFallSpeed,
+            SettingsChoice::ShakeDuration,
             SettingsChoice::MoveSpeed,
             SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::BombRate,
@@ -3110,10 +3121,10 @@ mod tests {
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
-        // クリップして見えなくなる)。見出し1+空行1+設定項目22(#224でMUSIC音量・SE音量の
-        // 2項目、#233で巻き戻しストック上限を追加)+空行1+案内2行=27行、枠(上下)2行込みで
-        // 29行必要。設定を追加したらこの定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 27;
+        // クリップして見えなくなる)。見出し1+空行1+設定項目23(#224でMUSIC音量・SE音量の
+        // 2項目、#233で巻き戻しストック上限、#243で揺れ時間(落下待ち)を追加)+空行1+
+        // 案内2行=28行、枠(上下)2行込みで30行必要。設定を追加したらこの定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 28;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);

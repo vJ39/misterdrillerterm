@@ -28,14 +28,14 @@ use constants::{
     ATTRACT_MODE_IDLE_MS, BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN,
     BOMB_SPAWN_RATE_PERCENT_STEP, CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP,
     COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN,
-    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN,
-    FIELD_WIDTH_STEP, FRAME_INTERVAL_MS, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX,
-    MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP, REWIND_STOCK_MAX_SETTING_MAX,
-    REWIND_STOCK_MAX_SETTING_MIN, SOUND_VOLUME_PERCENT_MAX, SOUND_VOLUME_PERCENT_MIN,
-    SOUND_VOLUME_PERCENT_STEP, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
-    SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS, STAR_SPAWN_RATE_PERCENT_MAX,
-    STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
+    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
+    DEBUG_SHAKE_DURATION_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX,
+    DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, FRAME_INTERVAL_MS,
+    ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP,
+    REWIND_STOCK_MAX_SETTING_MAX, REWIND_STOCK_MAX_SETTING_MIN, SOUND_VOLUME_PERCENT_MAX,
+    SOUND_VOLUME_PERCENT_MIN, SOUND_VOLUME_PERCENT_STEP, SPAWN_RATE_PERCENT_MAX,
+    SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
+    STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_STEP,
 };
 use game::{Game, GameEvent, GameOverChoice, GameStatus, InputAction};
 use settings::Settings;
@@ -370,6 +370,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::FieldWidth
                             | ui::render::SettingsChoice::BlockFallSpeed
                             | ui::render::SettingsChoice::PlayerFallSpeed
+                            | ui::render::SettingsChoice::ShakeDuration
                             | ui::render::SettingsChoice::MoveSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs
                             | ui::render::SettingsChoice::BombRate
@@ -455,6 +456,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings_selection,
                                 ui::render::SettingsChoice::BlockFallSpeed
                                     | ui::render::SettingsChoice::PlayerFallSpeed
+                                    | ui::render::SettingsChoice::ShakeDuration
                                     | ui::render::SettingsChoice::MoveSpeed
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
                                     | ui::render::SettingsChoice::BombRate
@@ -473,6 +475,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.player_fall_tick_ms =
                                     adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
                                 game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
+                            }
+                            ui::render::SettingsChoice::ShakeDuration => {
+                                settings.shake_duration_ms =
+                                    adjust_shake_duration_ms(settings.shake_duration_ms, increase);
+                                game.set_shake_duration_ms(settings.shake_duration_ms);
                             }
                             ui::render::SettingsChoice::MoveSpeed => {
                                 settings.move_cooldown_ms =
@@ -724,6 +731,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.field_width,
                             settings.block_fall_tick_ms,
                             settings.player_fall_tick_ms,
+                            settings.shake_duration_ms,
                             settings.move_cooldown_ms,
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
@@ -759,6 +767,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.field_width,
                     settings.block_fall_tick_ms,
                     settings.player_fall_tick_ms,
+                    settings.shake_duration_ms,
                     settings.move_cooldown_ms,
                     settings.dodge_recovery_ms,
                     settings.bomb_spawn_rate_percent,
@@ -813,6 +822,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::FieldWidth
                         | ui::render::SettingsChoice::BlockFallSpeed
                         | ui::render::SettingsChoice::PlayerFallSpeed
+                        | ui::render::SettingsChoice::ShakeDuration
                         | ui::render::SettingsChoice::MoveSpeed
                         | ui::render::SettingsChoice::DodgeRecoveryMs
                         | ui::render::SettingsChoice::BombRate
@@ -899,6 +909,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::FieldWidth
                                 | ui::render::SettingsChoice::BlockFallSpeed
                                 | ui::render::SettingsChoice::PlayerFallSpeed
+                                | ui::render::SettingsChoice::ShakeDuration
                                 | ui::render::SettingsChoice::MoveSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                                 | ui::render::SettingsChoice::BombRate
@@ -923,6 +934,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::PlayerFallSpeed => {
                                 settings.player_fall_tick_ms =
                                     adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
+                            }
+                            ui::render::SettingsChoice::ShakeDuration => {
+                                settings.shake_duration_ms =
+                                    adjust_shake_duration_ms(settings.shake_duration_ms, increase);
                             }
                             ui::render::SettingsChoice::MoveSpeed => {
                                 settings.move_cooldown_ms =
@@ -1394,6 +1409,20 @@ fn adjust_dodge_recovery_ms(current: u64, increase: bool) -> u64 {
     }
 }
 
+/// 揺れ時間(支えを失ってから実際に落下し始めるまでの猶予, ms)を
+/// `DEBUG_SHAKE_DURATION_STEP_MS`ぶん増減する(#243)。
+fn adjust_shake_duration_ms(current: u64, increase: bool) -> u64 {
+    if increase {
+        current
+            .saturating_add(DEBUG_SHAKE_DURATION_STEP_MS)
+            .min(DEBUG_SHAKE_DURATION_MS_MAX)
+    } else {
+        // DEBUG_SHAKE_DURATION_MS_MINは0固定のため、saturating_subの結果に対する.max()は
+        // 不要(clippy::unnecessary_min_or_max)。
+        current.saturating_sub(DEBUG_SHAKE_DURATION_STEP_MS)
+    }
+}
+
 /// 自動消滅の連鎖インターバル(ms)を`CHAIN_VANISH_INTERVAL_MS_STEP`ぶん増減する。
 /// 連鎖消滅を0ms連続でなく一定間隔で進めるための設定。
 fn adjust_chain_vanish_interval_ms(current: u64, increase: bool) -> u64 {
@@ -1768,6 +1797,19 @@ mod tests {
             adjust_dodge_recovery_ms(u64::MAX, true),
             DODGE_RECOVERY_MS_MAX
         );
+    }
+
+    #[test]
+    fn adjust_shake_duration_ms_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(
+            adjust_shake_duration_ms(u64::MAX, true),
+            DEBUG_SHAKE_DURATION_MS_MAX
+        );
+    }
+
+    #[test]
+    fn adjust_shake_duration_ms_saturates_at_min_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(adjust_shake_duration_ms(0, false), 0);
     }
 
     #[test]
