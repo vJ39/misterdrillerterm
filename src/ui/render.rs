@@ -15,7 +15,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::constants::{
     BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
-    OXYGEN_MAX, STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
+    DEBUG_INCOMING_ATTACK_POWER, INCOMING_ROCK_WARNING_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS,
+    STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -464,6 +465,9 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         line("C: 周辺ブロックを2色に統一   L: ライフ+1   A: AIRを100%に回復"),
         line("R: 自分より上のブロックを全削除   K: 画面内のX/ダイヤを全てスターに"),
         line("B: ボムを画面内のランダムな位置に設置"),
+        line(&format!(
+            "O: 相手から攻撃力{DEBUG_INCOMING_ATTACK_POWER}を受け取る(自分の溜め分と相殺し、残りが岩として降る)"
+        )),
         line("T: オートプレイ ON/OFF   G: 無敵(ミス無効) ON/OFF(Tとは独立)"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
         line("- / =: 自分の落下速度 遅く/速く"),
@@ -654,6 +658,10 @@ pub enum SettingsChoice {
     BombRate,
     /// ボム設置(Ticking開始)から爆発までの時間(ms)。
     BombFuse,
+    /// 対戦の妨害ルール(#247)で、岩1個を降らせるのに必要な攻撃力。
+    AttackBlocksPerRock,
+    /// 対戦の妨害ルール(#247)で、1回に降らせる岩の個数上限。
+    AttackRocksPerWaveMax,
     /// 調査用のブロック状態遷移ログ(SQLite)を記録するかどうか。
     DebugLogEnabled,
     /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=即座に連鎖)。
@@ -686,7 +694,9 @@ impl SettingsChoice {
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::BombFuse,
-            SettingsChoice::BombFuse => SettingsChoice::DebugLogEnabled,
+            SettingsChoice::BombFuse => SettingsChoice::AttackBlocksPerRock,
+            SettingsChoice::AttackBlocksPerRock => SettingsChoice::AttackRocksPerWaveMax,
+            SettingsChoice::AttackRocksPerWaveMax => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::RewindStockMax,
             SettingsChoice::RewindStockMax => SettingsChoice::Music,
@@ -699,7 +709,9 @@ impl SettingsChoice {
             SettingsChoice::Music => SettingsChoice::RewindStockMax,
             SettingsChoice::RewindStockMax => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::DebugLogEnabled,
-            SettingsChoice::DebugLogEnabled => SettingsChoice::BombFuse,
+            SettingsChoice::DebugLogEnabled => SettingsChoice::AttackRocksPerWaveMax,
+            SettingsChoice::AttackRocksPerWaveMax => SettingsChoice::AttackBlocksPerRock,
+            SettingsChoice::AttackBlocksPerRock => SettingsChoice::BombFuse,
             SettingsChoice::BombFuse => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::MusicVolume => SettingsChoice::Music,
@@ -752,6 +764,8 @@ pub fn draw_settings(
     dodge_recovery_ms: u64,
     bomb_spawn_rate_percent: u32,
     bomb_fuse_ms: u32,
+    attack_blocks_per_rock: u32,
+    attack_rocks_per_wave_max: u32,
     debug_log_enabled: bool,
     chain_vanish_interval_ms: u64,
     rewind_stock_max: u8,
@@ -771,6 +785,8 @@ pub fn draw_settings(
     // 縦に余裕を持たせる(必要行数はテスト`settings_screen_box_is_tall_enough_...`で確認)。
     // #233で項目が22個になり90%(28行)では1行あふれるため95%(30行)へ広げた。
     // #246で項目が23個になりさらに1行増えたため97%(31行)へ広げた。
+    // #247で対戦の2項目が加わって26個になったが、97%より高くはできないため、
+    // 見出しの下と案内の上にあった空行2行を削って収めている。
     let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
     frame.render_widget(Clear, settings_area);
 
@@ -810,7 +826,7 @@ pub fn draw_settings(
         };
         Line::from(Span::styled(format!("{prefix}{label}: {percent}%"), style))
     };
-    let count_line = |label: &str, count: u8, is_selected: bool| {
+    let count_line = |label: &str, count: u32, is_selected: bool| {
         let prefix = if is_selected { "> " } else { "  " };
         let style = if is_selected {
             selected_style
@@ -840,7 +856,6 @@ pub fn draw_settings(
 
     let paragraph = Paragraph::new(vec![
         Line::from(Span::styled("SETTINGS", text_style)),
-        Line::from(""),
         toggle_line("MUSIC", music_enabled, selection == SettingsChoice::Music),
         rate_line(
             "MUSIC音量",
@@ -888,7 +903,11 @@ pub fn draw_settings(
             item_starify_screen_rate_percent,
             selection == SettingsChoice::ItemStarifyScreenRate,
         ),
-        count_line("色数", color_count, selection == SettingsChoice::ColorCount),
+        count_line(
+            "色数",
+            u32::from(color_count),
+            selection == SettingsChoice::ColorCount,
+        ),
         rate_line(
             "色ブロック結合割合",
             color_cluster_rate_percent,
@@ -934,6 +953,16 @@ pub fn draw_settings(
             u64::from(bomb_fuse_ms),
             selection == SettingsChoice::BombFuse,
         ),
+        count_line(
+            "対戦: 岩1個に必要な攻撃力",
+            attack_blocks_per_rock,
+            selection == SettingsChoice::AttackBlocksPerRock,
+        ),
+        count_line(
+            "対戦: 一度に降る岩の上限",
+            attack_rocks_per_wave_max,
+            selection == SettingsChoice::AttackRocksPerWaveMax,
+        ),
         toggle_line(
             "DEBUG LOG",
             debug_log_enabled,
@@ -946,10 +975,9 @@ pub fn draw_settings(
         ),
         count_line(
             "巻き戻しストック上限",
-            rewind_stock_max,
+            u32::from(rewind_stock_max),
             selection == SettingsChoice::RewindStockMax,
         ),
-        Line::from(""),
         Line::from(Span::styled(
             "↑↓で選択 / MUSIC・SE・DEBUG LOGはSpaceか←→でトグル",
             text_style,
@@ -1014,6 +1042,7 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
     let buf = frame.buffer_mut();
 
     draw_static_field(buf, inner, &cam, visible_rows, game, &moved_map);
+    draw_incoming_rock_warnings(buf, inner, cam.row_f, visible_rows, game);
     draw_falling_blocks(buf, inner, cam.row_f, visible_rows, game, &moved_map);
     draw_bombs(buf, inner, cam.row_f, visible_rows, game);
     draw_player(buf, inner, cam.row_f, game);
@@ -1206,6 +1235,57 @@ fn draw_pending_vanish_cell(
         }
         // 接続罫線を持たない種類(AIR・スター・アイテム等)はそのまま通常描画でよい。
         other => draw_logical_cell(buf, x, y, &game.board, row, col, other),
+    }
+}
+
+/// 相手の攻撃で降ってくる岩(#247)の予告を描く。点滅・赤色・炎は一切使わず、
+///
+/// - 落下経路(出現予定マスから下方向にEmptyが続く区間)の背景を`INCOMING_ROCK_PATH_BG`へ
+/// - 出現予定マス自体は、残り時間に応じてフィールド背景色から岩の地色へ近づく背景へ
+///
+/// 変えるだけにとどめる。画面外(カメラより上)にある予告についても、ボムのような赤い
+/// 警告ラインは出さない(spec.md 12.8「控えめな予告」)。
+fn draw_incoming_rock_warnings(
+    buf: &mut Buffer,
+    inner: Rect,
+    cam_row_f: f32,
+    visible_rows: usize,
+    game: &Game,
+) {
+    if game.incoming_rocks().is_empty() {
+        return;
+    }
+    let player_pos = game.player.position();
+    // 設置済み(Settling/Ticking)のボムはCellグリッド外のオーバーレイなので、盤面のセル
+    // だけを見ると落下経路が通り抜けているように見えてしまう。
+    let blocked_by_bomb = |pos: Pos| {
+        game.bombs()
+            .iter()
+            .any(|b| b.pos == pos && matches!(b.phase, BombPhase::Settling | BombPhase::Ticking))
+    };
+    for rock in game.incoming_rocks() {
+        let (spawn_row, col) = rock.pos;
+
+        // 落下経路: 出現予定マスの1つ下から、Empty(かつプレイヤー・設置済みボム以外)が
+        // 続く間だけを塗る。塞がっているマスに当たったらそこで止める。
+        let mut row = spawn_row + 1;
+        while row < game.board.depth_rows()
+            && game.board.cell(row, col) == BoardCell::Empty
+            && (row, col) != player_pos
+            && !blocked_by_bomb((row, col))
+        {
+            if let Some((x, y)) = cell_screen_pos(inner, cam_row_f, visible_rows, row, col) {
+                fill_block(buf, x, y, colors::INCOMING_ROCK_PATH_BG);
+            }
+            row += 1;
+        }
+
+        // 出現予定マス(ゴースト岩)。残り時間が減るほど岩の地色へ近づける。
+        let progress = 1.0
+            - (rock.remaining_ms as f32 / INCOMING_ROCK_WARNING_MS.max(1) as f32).clamp(0.0, 1.0);
+        if let Some((x, y)) = cell_screen_pos(inner, cam_row_f, visible_rows, spawn_row, col) {
+            fill_block(buf, x, y, colors::incoming_rock_ghost_bg(progress));
+        }
     }
 }
 
@@ -2926,6 +3006,8 @@ mod tests {
             SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::BombRate,
             SettingsChoice::BombFuse,
+            SettingsChoice::AttackBlocksPerRock,
+            SettingsChoice::AttackRocksPerWaveMax,
             SettingsChoice::DebugLogEnabled,
             SettingsChoice::ChainVanishInterval,
             SettingsChoice::RewindStockMax,
@@ -2957,6 +3039,14 @@ mod tests {
         assert!(
             seen.contains(&SettingsChoice::RewindStockMax),
             "#233で追加した巻き戻しストック上限へカーソルが到達できない"
+        );
+        assert!(
+            seen.contains(&SettingsChoice::AttackBlocksPerRock),
+            "#247で追加した「岩1個に必要な攻撃力」へカーソルが到達できない"
+        );
+        assert!(
+            seen.contains(&SettingsChoice::AttackRocksPerWaveMax),
+            "#247で追加した「一度に降る岩の上限」へカーソルが到達できない"
         );
     }
 
@@ -3116,9 +3206,9 @@ mod tests {
         // 枠の高さが実際の内容行数(操作欄+ジュークボックス欄+空行+末尾行)を収められているか
         // 回帰確認する。内容行数が増えたらこの定数も増やすこと。
         // 内訳: 操作見出し1+操作5(#233で巻き戻し1行を追加)+空行1+一時停止見出し1+
-        // 一時停止2+空行1+デバッグ見出し1+デバッグ7+空行1+ジュークボックス見出し1+
-        // 曲4+空行1+末尾1=27行。
-        const REQUIRED_CONTENT_LINES: u16 = 27;
+        // 一時停止2+空行1+デバッグ見出し1+デバッグ8(#247でOキーを追加)+空行1+
+        // ジュークボックス見出し1+曲4+空行1+末尾1=28行。
+        const REQUIRED_CONTENT_LINES: u16 = 28;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let help_area = centered_rect(90, HELP_OVERLAY_PERCENT_Y, frame_rect);
@@ -3133,10 +3223,11 @@ mod tests {
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
-        // クリップして見えなくなる)。見出し1+空行1+設定項目24(#224でMUSIC音量・SE音量の
-        // 2項目、#233で巻き戻しストック上限、#243で揺れ時間(落下待ち)、#246でボム爆発
-        // までの時間を追加)+空行1+案内2行=29行、枠(上下)2行込みで31行必要。設定を
-        // 追加したらこの定数も増やすこと。
+        // クリップして見えなくなる)。見出し1+設定項目26(#224でMUSIC音量・SE音量の2項目、
+        // #233で巻き戻しストック上限、#243で揺れ時間(落下待ち)、#246でボム爆発までの
+        // 時間、#247で対戦の2項目を追加)+案内2行=29行、枠(上下)2行込みで31行必要。
+        // 設定を追加したらこの定数も増やすこと(#247で項目を2つ増やした際、これ以上は
+        // 枠を高くできないため見出し前後の空行2行を削って収めている)。
         const REQUIRED_CONTENT_LINES: u16 = 29;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
@@ -3146,6 +3237,226 @@ mod tests {
             "設定画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
             REQUIRED_CONTENT_LINES,
             settings_area.height
+        );
+    }
+
+    /// TestBackendへ実際に描画し、画面に見えている文字を行ごとに連結して返す。
+    /// 行数の算術チェックでは拾えない「枠からはみ出して見えない」を確認する用途。
+    fn rendered_screen_text(draw: impl FnOnce(&mut Frame)) -> String {
+        let backend = ratatui::backend::TestBackend::new(200, 60);
+        let mut terminal = ratatui::Terminal::new(backend).expect("TestBackendを初期化できるはず");
+        terminal.draw(draw).expect("描画できるはず");
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| {
+                        buf.cell(Position::new(x, y))
+                            .map(|c| c.symbol())
+                            .unwrap_or(" ")
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `rendered_screen_text`の結果に`needle`が出ているか。全角文字は1セル目に本体・
+    /// 2セル目に詰め物が入るため、空白を落としてから突き合わせる。
+    fn screen_shows(text: &str, needle: &str) -> bool {
+        text.replace(' ', "").contains(&needle.replace(' ', ""))
+    }
+
+    /// テスト用に`draw_settings`を既定値で描画する(選択項目だけを変える)。
+    fn render_settings_screen(selection: SettingsChoice) -> String {
+        rendered_screen_text(|frame| {
+            draw_settings(
+                frame,
+                selection,
+                true,
+                true,
+                100,
+                100,
+                100,
+                100,
+                100,
+                100,
+                100,
+                100,
+                100,
+                4,
+                100,
+                FIELD_WIDTH,
+                150,
+                150,
+                450,
+                80,
+                800,
+                100,
+                5000,
+                10,
+                4,
+                true,
+                0,
+                3,
+                false,
+            );
+        })
+    }
+
+    #[test]
+    fn settings_screen_actually_shows_the_attack_rule_rows() {
+        // #247で追加した2項目が、値つきで画面に出ている(枠からクリップされていない)ことを
+        // 実描画で確認する。
+        let text = render_settings_screen(SettingsChoice::AttackBlocksPerRock);
+        assert!(
+            screen_shows(&text, "対戦: 岩1個に必要な攻撃力: 10"),
+            "「岩1個に必要な攻撃力」の行が画面に出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "対戦: 一度に降る岩の上限: 4"),
+            "「一度に降る岩の上限」の行が画面に出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "> 対戦: 岩1個に必要な攻撃力"),
+            "選択中の項目にカーソル(>)が付いていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn settings_screen_still_shows_its_last_line_after_the_attack_rows_were_added() {
+        // #247で項目を2つ増やした結果、枠の高さに対して内容行がぴったりになった。
+        // 最下段(操作案内の2行目)が切れていないことを実描画で確認する。
+        let text = render_settings_screen(SettingsChoice::Music);
+        assert!(
+            screen_shows(&text, "Escで閉じる"),
+            "最下段の案内行がクリップされている:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "SETTINGS"),
+            "先頭の見出しがクリップされている:\n{text}"
+        );
+    }
+
+    // --- 相手の攻撃で降ってくる岩の予告(#247) ---
+
+    /// 予告テスト用に、指定列の`spawn_row`から`empty_rows`行ぶんを空にしたゲームを作る。
+    fn game_with_incoming_rock(col: usize, spawn_row: usize, empty_rows: usize) -> Game {
+        let mut game = Game::new(7);
+        game.player.row = 500;
+        game.player.col = 0;
+        for r in spawn_row..(spawn_row + empty_rows) {
+            game.board.rows[r][col] = BoardCell::Empty;
+        }
+        game.board.rows[spawn_row + empty_rows][col] = BoardCell::Rock { hits: 0 };
+        game.incoming_rocks_mut().push(crate::game::IncomingRock {
+            pos: (spawn_row, col),
+            remaining_ms: INCOMING_ROCK_WARNING_MS,
+        });
+        game
+    }
+
+    #[test]
+    fn incoming_rock_warning_paints_the_ghost_cell_and_the_empty_fall_path_below_it() {
+        // 出現予定マスはゴースト岩、その下の連続するEmptyは落下経路として塗る。
+        let col = 3;
+        let spawn_row = 495;
+        let game = game_with_incoming_rock(col, spawn_row, 3);
+
+        let inner = Rect::new(0, 0, 20, 20);
+        let mut buf = Buffer::empty(inner);
+        draw_incoming_rock_warnings(&mut buf, inner, spawn_row as f32, 10, &game);
+
+        let bg_at = |buf: &Buffer, row: usize| {
+            let (x, y) = cell_screen_pos(inner, spawn_row as f32, 10, row, col)
+                .expect("画面内に収まっているはず");
+            buf.cell(Position::new(x, y)).unwrap().bg
+        };
+        assert_eq!(
+            bg_at(&buf, spawn_row),
+            colors::incoming_rock_ghost_bg(0.0),
+            "出現予定マスは予告開始直後のゴースト色になるはず"
+        );
+        for row in (spawn_row + 1)..(spawn_row + 3) {
+            assert_eq!(
+                bg_at(&buf, row),
+                colors::INCOMING_ROCK_PATH_BG,
+                "{row}行目の落下経路が塗られていない"
+            );
+        }
+        assert_ne!(
+            bg_at(&buf, spawn_row + 3),
+            colors::INCOMING_ROCK_PATH_BG,
+            "経路はEmptyでないマスに当たったところで止まるはず"
+        );
+    }
+
+    #[test]
+    fn incoming_rock_ghost_cell_approaches_the_rock_color_as_the_warning_runs_out() {
+        // 予告は点滅させず、残り時間に応じて岩の地色へ寄せるだけにする。
+        let col = 3;
+        let spawn_row = 495;
+        let mut game = game_with_incoming_rock(col, spawn_row, 3);
+        let inner = Rect::new(0, 0, 20, 20);
+        let (x, y) =
+            cell_screen_pos(inner, spawn_row as f32, 10, spawn_row, col).expect("画面内のはず");
+
+        let mut buf_start = Buffer::empty(inner);
+        draw_incoming_rock_warnings(&mut buf_start, inner, spawn_row as f32, 10, &game);
+        let at_start = buf_start.cell(Position::new(x, y)).unwrap().bg;
+
+        game.incoming_rocks_mut()[0].remaining_ms = 0;
+        let mut buf_end = Buffer::empty(inner);
+        draw_incoming_rock_warnings(&mut buf_end, inner, spawn_row as f32, 10, &game);
+        let at_end = buf_end.cell(Position::new(x, y)).unwrap().bg;
+
+        assert_ne!(at_start, at_end, "予告の進行に応じて色が変わるはず");
+        assert_eq!(
+            at_end,
+            colors::ROCK_BG_INTACT,
+            "出現直前は岩の地色と同じになるはず"
+        );
+    }
+
+    #[test]
+    fn incoming_rock_warning_path_stops_at_the_player_cell() {
+        // プレイヤーが立っているマスは落下経路として塗らない(自分の姿が隠れないように)。
+        let col = 3;
+        let spawn_row = 495;
+        let mut game = game_with_incoming_rock(col, spawn_row, 3);
+        game.player.col = col;
+        game.player.row = spawn_row + 1;
+
+        let inner = Rect::new(0, 0, 20, 20);
+        let mut buf = Buffer::empty(inner);
+        draw_incoming_rock_warnings(&mut buf, inner, spawn_row as f32, 10, &game);
+
+        let (x, y) =
+            cell_screen_pos(inner, spawn_row as f32, 10, spawn_row + 1, col).expect("画面内のはず");
+        assert_ne!(
+            buf.cell(Position::new(x, y)).unwrap().bg,
+            colors::INCOMING_ROCK_PATH_BG,
+            "プレイヤーのマスで経路が止まるはず"
+        );
+    }
+
+    #[test]
+    fn no_incoming_rock_warning_is_drawn_without_any_incoming_rock() {
+        // 予告が1つも無ければ何も描かない(通常プレイの見た目を変えない)。
+        let mut game = Game::new(7);
+        game.player.row = 500;
+        assert!(game.incoming_rocks().is_empty(), "前提: 予告が無いこと");
+
+        let inner = Rect::new(0, 0, 20, 20);
+        let mut buf = Buffer::empty(inner);
+        draw_incoming_rock_warnings(&mut buf, inner, 495.0, 10, &game);
+
+        assert!(
+            !buf.content
+                .iter()
+                .any(|c| c.bg == colors::INCOMING_ROCK_PATH_BG
+                    || c.bg == colors::incoming_rock_ghost_bg(0.0)),
+            "予告が無いのに塗られているセルがある"
         );
     }
 

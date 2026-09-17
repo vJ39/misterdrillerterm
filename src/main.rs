@@ -25,6 +25,8 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
+    ATTACK_BLOCKS_PER_ROCK_MAX, ATTACK_BLOCKS_PER_ROCK_MIN, ATTACK_BLOCKS_PER_ROCK_STEP,
+    ATTACK_ROCKS_PER_WAVE_MAX_MAX, ATTACK_ROCKS_PER_WAVE_MAX_MIN, ATTACK_ROCKS_PER_WAVE_MAX_STEP,
     ATTRACT_MODE_IDLE_MS, BOMB_FUSE_MS_MAX, BOMB_FUSE_MS_MIN, BOMB_FUSE_MS_STEP,
     BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN, BOMB_SPAWN_RATE_PERCENT_STEP,
     CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP, COLOR_CLUSTER_RATE_PERCENT_MIN,
@@ -376,6 +378,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::DodgeRecoveryMs
                             | ui::render::SettingsChoice::BombRate
                             | ui::render::SettingsChoice::BombFuse
+                            | ui::render::SettingsChoice::AttackBlocksPerRock
+                            | ui::render::SettingsChoice::AttackRocksPerWaveMax
                             | ui::render::SettingsChoice::ChainVanishInterval
                             | ui::render::SettingsChoice::RewindStockMax => {}
                         }
@@ -463,6 +467,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
                                     | ui::render::SettingsChoice::BombRate
                                     | ui::render::SettingsChoice::BombFuse
+                                    | ui::render::SettingsChoice::AttackBlocksPerRock
+                                    | ui::render::SettingsChoice::AttackRocksPerWaveMax
                                     | ui::render::SettingsChoice::ChainVanishInterval
                                     | ui::render::SettingsChoice::RewindStockMax
                             ) =>
@@ -505,6 +511,23 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 settings.bomb_fuse_ms =
                                     adjust_bomb_fuse_ms(settings.bomb_fuse_ms, increase);
                                 game.set_bomb_fuse_ms(settings.bomb_fuse_ms);
+                            }
+                            ui::render::SettingsChoice::AttackBlocksPerRock => {
+                                settings.attack_blocks_per_rock = adjust_attack_blocks_per_rock(
+                                    settings.attack_blocks_per_rock,
+                                    increase,
+                                );
+                                game.set_attack_blocks_per_rock(settings.attack_blocks_per_rock);
+                            }
+                            ui::render::SettingsChoice::AttackRocksPerWaveMax => {
+                                settings.attack_rocks_per_wave_max =
+                                    adjust_attack_rocks_per_wave_max(
+                                        settings.attack_rocks_per_wave_max,
+                                        increase,
+                                    );
+                                game.set_attack_rocks_per_wave_max(
+                                    settings.attack_rocks_per_wave_max,
+                                );
                             }
                             ui::render::SettingsChoice::ChainVanishInterval => {
                                 settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
@@ -634,6 +657,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
                     InputAction::DebugStarifyVisibleScreen => game.debug_starify_visible_screen(),
                     InputAction::DebugPlaceBomb => game.debug_place_bomb(),
+                    InputAction::DebugReceiveOpponentAttack => game.debug_receive_opponent_attack(),
                     // 速度系デバッグショートカット([ ] - = , .)。落下・揺れの速度は
                     // スナップショット(Game丸ごと)にも含まれるため、変更前の履歴へ
                     // 戻ると変更を取り消したのと同じことになる。混乱を避けるため、
@@ -744,6 +768,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
                             settings.bomb_fuse_ms,
+                            settings.attack_blocks_per_rock,
+                            settings.attack_rocks_per_wave_max,
                             settings.debug_log_enabled,
                             settings.chain_vanish_interval_ms,
                             settings.rewind_stock_max,
@@ -781,6 +807,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.dodge_recovery_ms,
                     settings.bomb_spawn_rate_percent,
                     settings.bomb_fuse_ms,
+                    settings.attack_blocks_per_rock,
+                    settings.attack_rocks_per_wave_max,
                     settings.debug_log_enabled,
                     settings.chain_vanish_interval_ms,
                     settings.rewind_stock_max,
@@ -837,6 +865,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::DodgeRecoveryMs
                         | ui::render::SettingsChoice::BombRate
                         | ui::render::SettingsChoice::BombFuse
+                        | ui::render::SettingsChoice::AttackBlocksPerRock
+                        | ui::render::SettingsChoice::AttackRocksPerWaveMax
                         | ui::render::SettingsChoice::ChainVanishInterval
                         | ui::render::SettingsChoice::RewindStockMax => {}
                     },
@@ -925,6 +955,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                                 | ui::render::SettingsChoice::BombRate
                                 | ui::render::SettingsChoice::BombFuse
+                                | ui::render::SettingsChoice::AttackBlocksPerRock
+                                | ui::render::SettingsChoice::AttackRocksPerWaveMax
                                 | ui::render::SettingsChoice::ChainVanishInterval
                                 | ui::render::SettingsChoice::RewindStockMax
                         ) =>
@@ -968,6 +1000,19 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             ui::render::SettingsChoice::BombFuse => {
                                 settings.bomb_fuse_ms =
                                     adjust_bomb_fuse_ms(settings.bomb_fuse_ms, increase);
+                            }
+                            ui::render::SettingsChoice::AttackBlocksPerRock => {
+                                settings.attack_blocks_per_rock = adjust_attack_blocks_per_rock(
+                                    settings.attack_blocks_per_rock,
+                                    increase,
+                                );
+                            }
+                            ui::render::SettingsChoice::AttackRocksPerWaveMax => {
+                                settings.attack_rocks_per_wave_max =
+                                    adjust_attack_rocks_per_wave_max(
+                                        settings.attack_rocks_per_wave_max,
+                                        increase,
+                                    );
                             }
                             ui::render::SettingsChoice::ChainVanishInterval => {
                                 settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
@@ -1376,6 +1421,34 @@ fn adjust_bomb_fuse_ms(current: u32, increase: bool) -> u32 {
     }
 }
 
+/// 岩1個に必要な攻撃力(#247)を1ステップぶん増減する。
+/// `ATTACK_BLOCKS_PER_ROCK_MIN`〜`MAX`の範囲、`ATTACK_BLOCKS_PER_ROCK_STEP`刻みで調整する。
+fn adjust_attack_blocks_per_rock(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(ATTACK_BLOCKS_PER_ROCK_STEP)
+            .min(ATTACK_BLOCKS_PER_ROCK_MAX)
+    } else {
+        current
+            .saturating_sub(ATTACK_BLOCKS_PER_ROCK_STEP)
+            .max(ATTACK_BLOCKS_PER_ROCK_MIN)
+    }
+}
+
+/// 1ウェーブで降る岩の個数上限(#247)を1ステップぶん増減する。
+/// `ATTACK_ROCKS_PER_WAVE_MAX_MIN`〜`MAX`の範囲、`ATTACK_ROCKS_PER_WAVE_MAX_STEP`刻み。
+fn adjust_attack_rocks_per_wave_max(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(ATTACK_ROCKS_PER_WAVE_MAX_STEP)
+            .min(ATTACK_ROCKS_PER_WAVE_MAX_MAX)
+    } else {
+        current
+            .saturating_sub(ATTACK_ROCKS_PER_WAVE_MAX_STEP)
+            .max(ATTACK_ROCKS_PER_WAVE_MAX_MIN)
+    }
+}
+
 /// 出現する色ブロックの色数(`COLOR_COUNT_MIN`〜`COLOR_COUNT_MAX`)を1ずつ増減する。
 fn adjust_color_count(current: u8, increase: bool) -> u8 {
     if increase {
@@ -1611,6 +1684,9 @@ fn handle_events(
             GameEvent::BombExploded => audio::sfx::play_bomb_explosion(mixer, gain),
             GameEvent::BombFuseWarning => audio::sfx::play_bomb_fuse_warning(mixer, gain),
             GameEvent::BombFuseTick => audio::sfx::play_bomb_fuse_tick(mixer, gain),
+            // 相手の攻撃で降ってきた岩の出現(#247)。専用の波形は作らず、既存の岩ヒット音を
+            // 1ウェーブにつき1回だけ鳴らす(個数は問わない)。予告開始時は無音のまま。
+            GameEvent::IncomingRocksSpawned { .. } => audio::sfx::play_rock_hit(mixer, gain),
             // 100mごとのチェックポイント到達。最終ゴール(Cleared)と同じファンファーレを使い回す。
             GameEvent::Checkpoint100m { .. } => audio::sfx::play_clear_fanfare(mixer, gain),
             // 無敵によるミス回避(TERM独自拡張。#218)。デバッグ用の記録専用イベントで、
@@ -1806,6 +1882,54 @@ mod tests {
     #[test]
     fn adjust_bomb_fuse_ms_saturates_at_min_instead_of_underflowing_when_current_is_corrupted() {
         assert_eq!(adjust_bomb_fuse_ms(0, false), BOMB_FUSE_MS_MIN);
+    }
+
+    #[test]
+    fn adjust_attack_blocks_per_rock_saturates_at_both_ends_when_current_is_corrupted() {
+        // #247。破損したsettings.jsonの値でもオーバーフロー/アンダーフローせず範囲へ収める。
+        assert_eq!(
+            adjust_attack_blocks_per_rock(u32::MAX, true),
+            ATTACK_BLOCKS_PER_ROCK_MAX
+        );
+        assert_eq!(
+            adjust_attack_blocks_per_rock(0, false),
+            ATTACK_BLOCKS_PER_ROCK_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_blocks_per_rock_moves_by_one_step_inside_the_range() {
+        let up = adjust_attack_blocks_per_rock(ATTACK_BLOCKS_PER_ROCK_MIN, true);
+        assert_eq!(up, ATTACK_BLOCKS_PER_ROCK_MIN + ATTACK_BLOCKS_PER_ROCK_STEP);
+        assert_eq!(
+            adjust_attack_blocks_per_rock(up, false),
+            ATTACK_BLOCKS_PER_ROCK_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_rocks_per_wave_max_saturates_at_both_ends_when_current_is_corrupted() {
+        assert_eq!(
+            adjust_attack_rocks_per_wave_max(u32::MAX, true),
+            ATTACK_ROCKS_PER_WAVE_MAX_MAX
+        );
+        assert_eq!(
+            adjust_attack_rocks_per_wave_max(0, false),
+            ATTACK_ROCKS_PER_WAVE_MAX_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_rocks_per_wave_max_moves_by_one_step_inside_the_range() {
+        let up = adjust_attack_rocks_per_wave_max(ATTACK_ROCKS_PER_WAVE_MAX_MIN, true);
+        assert_eq!(
+            up,
+            ATTACK_ROCKS_PER_WAVE_MAX_MIN + ATTACK_ROCKS_PER_WAVE_MAX_STEP
+        );
+        assert_eq!(
+            adjust_attack_rocks_per_wave_max(up, false),
+            ATTACK_ROCKS_PER_WAVE_MAX_MIN
+        );
     }
 
     #[test]

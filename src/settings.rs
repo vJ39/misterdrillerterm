@@ -9,7 +9,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::constants::{
-    BOMB_FUSE_MS, CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M,
+    ATTACK_BLOCKS_PER_ROCK_DEFAULT, ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT, BOMB_FUSE_MS,
+    CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M,
     DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT,
     REWIND_STOCK_MAX_DEFAULT, REWIND_STOCK_MAX_SETTING_MAX, REWIND_STOCK_MAX_SETTING_MIN,
     SHAKE_DURATION_MS, SOUND_VOLUME_PERCENT_DEFAULT, SOUND_VOLUME_PERCENT_MAX,
@@ -84,6 +85,11 @@ pub struct Settings {
     /// #246)。設定画面から調整する。新規に出現するボムから反映され、設置済みボムの
     /// 残り時間には影響しない。
     pub bomb_fuse_ms: u32,
+    /// 対戦の妨害ルール(#247)で、岩1個を降らせるのに必要な攻撃力(消したブロック数)。
+    /// TERM独自拡張。設定画面から調整する。
+    pub attack_blocks_per_rock: u32,
+    /// 対戦の妨害ルール(#247)で、1回(1ウェーブ)に降らせる岩の個数上限。同上。
+    pub attack_rocks_per_wave_max: u32,
     /// #85調査用のブロック状態遷移ログ(SQLite、`debug_log`モジュール)を記録するか
     /// どうか(TERM独自拡張。#167。ユーザー指摘: 「デバッグ用のDB記録するしない
     /// トグル設定に追加」)。設定画面から切り替える。既定は有効(以前の常時記録の
@@ -128,6 +134,8 @@ impl Default for Settings {
             field_width: FIELD_WIDTH_DEFAULT,
             bomb_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
             bomb_fuse_ms: BOMB_FUSE_MS,
+            attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_DEFAULT,
+            attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT,
             debug_log_enabled: true,
             chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
             last_course_depth_m: COURSE_NORMAL_DEPTH_M,
@@ -223,6 +231,12 @@ impl Settings {
             bomb_fuse_ms: parse_u64_field(&text, "bomb_fuse_ms")
                 .map(|v| v as u32)
                 .unwrap_or(default.bomb_fuse_ms),
+            attack_blocks_per_rock: parse_u64_field(&text, "attack_blocks_per_rock")
+                .map(|v| v as u32)
+                .unwrap_or(default.attack_blocks_per_rock),
+            attack_rocks_per_wave_max: parse_u64_field(&text, "attack_rocks_per_wave_max")
+                .map(|v| v as u32)
+                .unwrap_or(default.attack_rocks_per_wave_max),
             debug_log_enabled: parse_bool_field(&text, "debug_log_enabled")
                 .unwrap_or(default.debug_log_enabled),
             chain_vanish_interval_ms: parse_u64_field(&text, "chain_vanish_interval_ms")
@@ -261,7 +275,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"bomb_fuse_ms\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"bomb_fuse_ms\": {},\n  \"attack_blocks_per_rock\": {},\n  \"attack_rocks_per_wave_max\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.music_volume_percent,
@@ -283,6 +297,8 @@ impl Settings {
             self.field_width,
             self.bomb_spawn_rate_percent,
             self.bomb_fuse_ms,
+            self.attack_blocks_per_rock,
+            self.attack_rocks_per_wave_max,
             self.debug_log_enabled,
             self.chain_vanish_interval_ms,
             self.last_course_depth_m,
@@ -345,6 +361,10 @@ fn value_after_key<'a>(text: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::{
+        ATTACK_BLOCKS_PER_ROCK_MAX, ATTACK_BLOCKS_PER_ROCK_MIN, ATTACK_ROCKS_PER_WAVE_MAX_MAX,
+        ATTACK_ROCKS_PER_WAVE_MAX_MIN,
+    };
 
     #[test]
     fn default_settings_has_music_and_se_enabled_and_default_fall_speeds() {
@@ -390,6 +410,55 @@ mod tests {
         );
         assert_eq!(settings.last_course_depth_m, COURSE_NORMAL_DEPTH_M);
         assert_eq!(settings.rewind_stock_max, REWIND_STOCK_MAX_DEFAULT);
+        assert_eq!(
+            settings.attack_blocks_per_rock,
+            ATTACK_BLOCKS_PER_ROCK_DEFAULT
+        );
+        assert_eq!(
+            settings.attack_rocks_per_wave_max,
+            ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT
+        );
+    }
+
+    #[test]
+    fn load_from_missing_attack_rule_keys_falls_back_to_defaults() {
+        // #247を追加する前に保存されたsettings.jsonにはキー自体が無い。
+        let path = temp_settings_path("attack-missing-keys");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"music_enabled\": true}").unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(
+            loaded.attack_blocks_per_rock,
+            ATTACK_BLOCKS_PER_ROCK_DEFAULT
+        );
+        assert_eq!(
+            loaded.attack_rocks_per_wave_max,
+            ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_reads_the_saved_attack_rule_values() {
+        let path = temp_settings_path("attack-values");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"attack_blocks_per_rock\": 7, \"attack_rocks_per_wave_max\": 3}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.attack_blocks_per_rock, 7);
+        assert_eq!(loaded.attack_rocks_per_wave_max, 3);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
@@ -466,6 +535,8 @@ mod tests {
             field_width: 8,
             bomb_spawn_rate_percent: 60,
             bomb_fuse_ms: 2500,
+            attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_MIN,
+            attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_MIN,
             debug_log_enabled: false,
             chain_vanish_interval_ms: 150,
             last_course_depth_m: 500,
@@ -496,6 +567,8 @@ mod tests {
             field_width: 20,
             bomb_spawn_rate_percent: 300,
             bomb_fuse_ms: 9000,
+            attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_MAX,
+            attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_MAX,
             debug_log_enabled: true,
             chain_vanish_interval_ms: 1000,
             last_course_depth_m: 1000,

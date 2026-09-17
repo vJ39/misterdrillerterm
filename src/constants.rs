@@ -306,6 +306,39 @@ pub const BOMB_SETTLE_MS: u32 = 600;
 /// Settling中に1歩(1マス)ぶん移動する間隔(ms)。
 pub const BOMB_SETTLE_TICK_MS: u32 = 80;
 
+// ---------------------------------------------------------------------------
+// 対戦の妨害ルール(攻撃力→岩投下。#247。spec.md 12.8)。自分が消したブロック数を
+// 攻撃力として数え、相殺を経た残りを相手の盤面へ岩(Xブロック)として降らせる。
+// 通信層(#10本体)はまだ無いため、現状はデバッグショートカット(O)からのみ発火する。
+// ---------------------------------------------------------------------------
+
+/// 岩1個を降らせるのに必要な攻撃力(消したブロック数)の既定値。設定画面から調整する。
+pub const ATTACK_BLOCKS_PER_ROCK_DEFAULT: u32 = 10;
+/// 同設定の下限。1なら消したブロック数がそのまま岩の個数になる。
+pub const ATTACK_BLOCKS_PER_ROCK_MIN: u32 = 1;
+/// 同設定の上限。
+pub const ATTACK_BLOCKS_PER_ROCK_MAX: u32 = 30;
+/// 同設定の調整刻み幅。
+pub const ATTACK_BLOCKS_PER_ROCK_STEP: u32 = 1;
+
+/// 1回(1ウェーブ)で降らせる岩の個数上限の既定値。設定画面から調整する。
+pub const ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT: u32 = 4;
+/// 同設定の下限。
+pub const ATTACK_ROCKS_PER_WAVE_MAX_MIN: u32 = 1;
+/// 同設定の上限。1ウェーブで出現行の全列を埋める以上の意味は無いため、フィールド幅の
+/// 上限に合わせる。
+pub const ATTACK_ROCKS_PER_WAVE_MAX_MAX: u32 = FIELD_WIDTH_MAX as u32;
+/// 同設定の調整刻み幅。
+pub const ATTACK_ROCKS_PER_WAVE_MAX_STEP: u32 = 1;
+
+/// 岩が降ってくる前の予告表示時間(ms)。この間は落下経路の背景を控えめに変えるだけで、
+/// 点滅・警告音は一切出さない(ボムの`BOMB_ENTER_MS`と同じ「出現前に必ず予兆を見せる」
+/// 方針だけを踏襲する)。
+pub const INCOMING_ROCK_WARNING_MS: u32 = 800;
+
+/// デバッグショートカット(O)で受け取ったことにする、相手の攻撃力。
+pub const DEBUG_INCOMING_ATTACK_POWER: u32 = 30;
+
 /// Xブロック(岩)・AIR(酸素カプセル)の出現率設定(%、100=通常の確率のまま)。
 /// 設定画面からプレイ中でも調整でき、settings.jsonに永続化する。
 pub const SPAWN_RATE_PERCENT_DEFAULT: u32 = 100;

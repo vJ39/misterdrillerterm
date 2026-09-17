@@ -54,6 +54,8 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Char('k') | KeyCode::Char('K') => InputAction::DebugStarifyVisibleScreen,
         // ボム(Bomb)の頭文字。#96。ユーザー指摘: 「ショートカットキーもくれ」。
         KeyCode::Char('b') | KeyCode::Char('B') => InputAction::DebugPlaceBomb,
+        // 対戦の妨害ルール(#247)。O=Opponent(相手の攻撃を受け取る)。
+        KeyCode::Char('o') | KeyCode::Char('O') => InputAction::DebugReceiveOpponentAttack,
         // オートプレイ(#218)。T=auTopilot、G=God mode(無敵)。
         // TはONにすると無敵も同時にONになり、Gは無敵だけを単独で切り替える。
         KeyCode::Char('t') | KeyCode::Char('T') => InputAction::DebugToggleAutopilot,
@@ -208,6 +210,63 @@ mod tests {
     }
 
     #[test]
+    fn action_from_key_code_maps_the_incoming_attack_key() {
+        // #247: O(大文字小文字とも)で相手の攻撃を受け取るデバッグショートカット。
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('o')),
+            InputAction::DebugReceiveOpponentAttack
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('O')),
+            InputAction::DebugReceiveOpponentAttack
+        );
+    }
+
+    #[test]
+    fn the_incoming_attack_key_does_not_collide_with_any_other_shortcut() {
+        // #247でOキーを追加する際、既存のショートカットを奪っていないことを確認する。
+        let existing_keys = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Backspace,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Char('z'),
+            KeyCode::Char('p'),
+            KeyCode::Char('u'),
+            KeyCode::Char('m'),
+            KeyCode::Char('e'),
+            KeyCode::Char('s'),
+            KeyCode::Char('h'),
+            KeyCode::Char('c'),
+            KeyCode::Char('l'),
+            KeyCode::Char('a'),
+            KeyCode::Char('r'),
+            KeyCode::Char('k'),
+            KeyCode::Char('b'),
+            KeyCode::Char('t'),
+            KeyCode::Char('g'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Char('-'),
+            KeyCode::Char('='),
+            KeyCode::Char(','),
+            KeyCode::Char('.'),
+        ];
+        for key in existing_keys {
+            assert_ne!(
+                action_from_key_code(key),
+                InputAction::DebugReceiveOpponentAttack,
+                "{key:?}がOキーのアクションに奪われている"
+            );
+        }
+    }
+
+    #[test]
     fn action_from_key_code_maps_the_rewind_keys() {
         // #233: Backspace・U(大文字小文字とも)のいずれでも巻き戻しを起動できる。
         assert_eq!(
@@ -250,6 +309,7 @@ mod tests {
             KeyCode::Char('r'),
             KeyCode::Char('k'),
             KeyCode::Char('b'),
+            KeyCode::Char('o'),
             KeyCode::Char('t'),
             KeyCode::Char('g'),
             KeyCode::Char('['),

@@ -71,6 +71,11 @@ pub const ROCK_BG_CRACKED: Color = Color::Rgb(175, 125, 80);
 /// 岩ブロックのXマーク/ヒビの前景色。
 pub const ROCK_X_FG: Color = Color::Rgb(240, 225, 200);
 
+/// 相手の攻撃で降ってくる岩(#247)の予告で、落下経路のEmptyマスに敷く背景色。
+/// `FIELD_EMPTY_BG`よりわずかに明るい暖色寄りにとどめ、点滅も赤色も使わない
+/// (spec.md 12.8「控えめな予告」)。
+pub const INCOMING_ROCK_PATH_BG: Color = Color::Rgb(46, 40, 42);
+
 pub const OXYGEN_BG: Color = Color::Rgb(20, 190, 200);
 pub const OXYGEN_FG: Color = Color::Rgb(255, 255, 255);
 
@@ -237,6 +242,20 @@ pub fn rock_bg(hits: u8) -> Color {
     };
     let Color::Rgb(br, bg, bb) = ROCK_BG_CRACKED else {
         unreachable!("ROCK_BG_CRACKEDは常にColor::Rgb")
+    };
+    Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
+}
+
+/// 相手の攻撃で降ってくる岩(#247)の出現予定マスに敷く「ゴースト岩」の背景色。
+/// 予告の進行度(`progress`、0.0=予告開始直後、1.0=出現直前)に応じて、フィールド背景色
+/// から岩の地色(`ROCK_BG_INTACT`)へ線形に近づける。グリフは描かず背景色だけで示す。
+pub fn incoming_rock_ghost_bg(progress: f32) -> Color {
+    let t = progress.clamp(0.0, 1.0);
+    let Color::Rgb(ar, ag, ab) = FIELD_EMPTY_BG else {
+        unreachable!("FIELD_EMPTY_BGは常にColor::Rgb")
+    };
+    let Color::Rgb(br, bg, bb) = ROCK_BG_INTACT else {
+        unreachable!("ROCK_BG_INTACTは常にColor::Rgb")
     };
     Color::Rgb(lerp_u8(ar, br, t), lerp_u8(ag, bg, t), lerp_u8(ab, bb, t))
 }
