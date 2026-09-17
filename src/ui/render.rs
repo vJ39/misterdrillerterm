@@ -257,8 +257,8 @@ pub fn draw(
                 "Sキーで設定画面 / Hキーでヘルプ",
             ],
         ),
-        // 押し潰されてのミスは、GameOverオーバーレイを出す前に一呼吸「潰れた」演出
-        // (draw_field内のdraw_player)を見せる(spec.md 5章・9章)。
+        // ミスは死因・ライフの残りを問わず、GameOverオーバーレイを出す前に「天に召される」
+        // 演出(draw_field内のdraw_player)を見せ切る(spec.md 5章・9.5)。
         GameStatus::GameOver if !game.crush_flash_active() => draw_game_over_overlay(
             frame,
             plan.game_frame,

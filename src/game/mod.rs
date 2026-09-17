@@ -259,7 +259,8 @@ pub enum GameEvent {
     LifeLost { cause: MissCause },
     /// 「天に召される」演出が終わり、その場に復活した瞬間
     Revived,
-    /// 最後のライフを失い、ゲームオーバーになった。`cause`は`LifeLost`と同じ記録用。
+    /// 最後のライフでミスした(「天に召される」演出の完了後にGameOverへ遷移する)。
+    /// `cause`は`LifeLost`と同じ記録用。
     GameOverMiss { cause: MissCause },
     /// 深度1000m到達でゲームクリアした
     Cleared,
@@ -1042,9 +1043,10 @@ impl Game {
 
     /// ミス(酸素切れ/押し潰し/爆風)を処理する(spec.md 8章)。原因を問わず同じ処理を行う。
     ///
-    /// ライフが残っていれば「天に召される」演出(`ascending_remaining`)から開始し、死亡
-    /// 地点の3列クリア・ライフ減算・酸素回復は演出が終わるまで`update()`側で遅延させる。
-    /// ライフが0になる場合はこの演出を行わず、即座にGameOverダイアログへ進む。
+    /// ライフの残りを問わず「天に召される」演出(`ascending_remaining`)から開始し、死亡
+    /// 地点の3列クリア・ライフ減算・酸素回復・GameOverへの遷移は、演出が終わるまで
+    /// `tick_ascending`へ遅延させる。最後のライフだった場合も同じ演出を見せてから
+    /// GameOverダイアログへ進む(#257)。
     ///
     /// 無敵(`set_invincible`)が有効な場合は、ライフ処理・演出を一切行わず`avert_miss`
     /// (回避として記録するだけ)へ振り替える。
@@ -1057,19 +1059,15 @@ impl Game {
 
         self.crush_flash_remaining = Duration::from_millis(CRUSH_FLASH_MS);
 
+        // 死亡SEはミスが発生した瞬間に即座に鳴らす(遅らせると演出完了まで3秒近く無音に
+        // なる)。最後のライフを失う場合はミス(ゲームオーバー)音、まだ残っていればライフ
+        // ロス音を鳴らし分ける。ライフ減算・GameOver遷移・復活自体は演出完了
+        // (tick_ascending)まで遅延する。
         if self.player.lives <= 1 {
-            self.resolve_death_board_effects(events);
-            let game_over = self.player.lose_life();
-            debug_assert!(game_over, "lives<=1のはずなのでlose_lifeは必ずtrueを返す");
-            self.status = GameStatus::GameOver;
-            self.game_over_selection = GameOverChoice::BackToTitle;
             events.push(GameEvent::GameOverMiss { cause });
-            return;
+        } else {
+            events.push(GameEvent::LifeLost { cause });
         }
-
-        // ライフ減算・酸素回復自体は演出完了まで遅延する(tick_ascending)が、死亡SEは
-        // ミスが発生した瞬間に即座に鳴らす(遅らせると演出完了まで3秒近く無音になる)。
-        events.push(GameEvent::LifeLost { cause });
         self.ascending_remaining = Some(Duration::from_millis(CRUSH_ASCEND_MS));
     }
 
@@ -1241,7 +1239,8 @@ impl Game {
     /// 「天に召される」演出の進行を1フレームぶん進める。演出中は`is_input_frozen`経由で
     /// プレイヤー自身の入力・自由落下・酸素減少だけが凍結され、周囲の落下ブロックの重力
     /// 処理は止めない。演出が終わった瞬間、死亡地点の3列クリア・押し潰したブロック自体の
-    /// クリア・ライフ減算・酸素回復をまとめて行い、その場に復活する。
+    /// クリア・ライフ減算をまとめて行い、ライフが残っていれば酸素を全回復してその場に
+    /// 復活する。最後のライフだった場合はここでGameOverへ遷移する(#257)。
     fn tick_ascending(&mut self, delta: Duration, events: &mut Vec<GameEvent>) {
         let Some(remaining) = self.ascending_remaining else {
             return;
@@ -1250,20 +1249,24 @@ impl Game {
         if remaining == Duration::ZERO {
             self.ascending_remaining = None;
             // 押し潰したブロック自体は、潰された様子が見えるよう演出中その場に残して
-            // いた。復活するのでここで消す(死亡時の盤面処理より先に行い、この演出用の
+            // いた。演出が終わるのでここで消す(死亡時の盤面処理より先に行い、この演出用の
             // 残骸をブロック/キャラ重なり解消の対象にしない)。
             self.board
                 .set(self.player.row, self.player.col, Cell::Empty);
+            // resolve_death_board_effectsは、内部で呼ぶdebug_clear_above_player等が
+            // status == Playingを前提にしているため、statusを変更する前に呼ぶ。
             self.resolve_death_board_effects(events);
-            let game_over = self.player.lose_life();
-            debug_assert!(
-                !game_over,
-                "ライフ0のケースはapply_missで即座に処理済みのはず"
-            );
-            self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
-            // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に発火済み
-            // のため重複させない。復活した瞬間のSEだけをここで発火する。
-            events.push(GameEvent::Revived);
+            if self.player.lose_life() {
+                self.status = GameStatus::GameOver;
+                self.game_over_selection = GameOverChoice::BackToTitle;
+                // GameEvent::GameOverMiss(ミス音)は演出開始時にapply_missで既に発火済み
+                // のため、ここでは何も発火しない(復活しないのでRevivedも出さない)。
+            } else {
+                self.invulnerability_ticks_remaining = INVULNERABILITY_TICKS;
+                // GameEvent::LifeLost(死亡SE)は押し潰された瞬間にapply_missで既に発火済み
+                // のため重複させない。復活した瞬間のSEだけをここで発火する。
+                events.push(GameEvent::Revived);
+            }
         } else {
             self.ascending_remaining = Some(remaining);
         }
@@ -1413,6 +1416,16 @@ impl Game {
         // のプレイヤー」へ適用され、全回復させた酸素を同じフレーム内で減衰させてしまう。
         let was_dying = self.is_dying();
         self.tick_ascending(delta, &mut events);
+
+        // 演出の完了で最後のライフを失いGameOverになった場合は、この時点で打ち切る。
+        // 続けてしまうと、酸素切れ死のときは酸素が0のまま(最後のライフでは
+        // `lose_life`が回復しない)なので、同じフレームの酸素切れ判定が再び真になり
+        // `apply_miss`が二重に走る。その結果`ascending_remaining`が再セットされ、
+        // 以後のupdateはGameOverで早期returnして`tick_ascending`へ到達しなくなるため、
+        // 演出が永久に終わらずGameOverダイアログが表示できなくなる。
+        if self.status != GameStatus::Playing {
+            return events;
+        }
 
         // 「わ〜!」スライダー演出中は入力のみを凍結する(is_input_frozenが各入力ハンドラ
         // で担う)。周囲の重力・自由落下・酸素減少は止めない。
@@ -2084,6 +2097,8 @@ impl Game {
     }
 
     /// 押し潰しの「潰れた」演出が表示中かどうか(GameOverオーバーレイの表示可否判定にも使う)。
+    /// 最後のライフでのミスも同じ演出を経てからGameOverになるため、GameOverへ遷移した
+    /// 時点ではこれは偽になっており、そのままオーバーレイを表示できる(#257)。
     pub fn crush_flash_active(&self) -> bool {
         self.crush_flash_remaining > Duration::ZERO || self.ascending_remaining.is_some()
     }
@@ -2548,8 +2563,11 @@ impl Game {
     }
 
     /// デバッグ: ライフを1増やす(`LIVES_MAX`でクランプ)。Playing中のみ有効。
+    /// 「天に召される」演出中(`is_dying`)も無効にする。演出の完了時にライフを減らして
+    /// 復活/GameOverを分岐するため、途中でライフを増やすと本来GameOverになる場面が
+    /// 復活側へ倒れてしまうため(#257)。
     pub fn debug_add_life(&mut self) {
-        if self.status == GameStatus::Playing {
+        if self.status == GameStatus::Playing && !self.is_dying() {
             self.player.lives = (self.player.lives + 1).min(LIVES_MAX);
         }
     }
@@ -3783,17 +3801,63 @@ mod tests {
 
     #[test]
     fn oxygen_running_out_on_last_life_ends_the_game() {
+        // 最後のライフでも「天に召される」演出を経てからGameOverになる(#257)。
         let mut game = Game::new_with_lives(2, 1);
         game.player.oxygen = 1.0;
 
         let events = game.update(Duration::from_secs(1));
 
-        assert_eq!(game.status, GameStatus::GameOver);
+        assert_eq!(game.status, GameStatus::Playing, "演出中はまだPlaying");
+        assert!(game.is_dying(), "最後のライフでも演出を経由するはず");
+        assert_eq!(game.player.lives, 1, "演出完了までライフ減算は遅延される");
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, GameEvent::GameOverMiss { .. }))
+                .any(|e| matches!(e, GameEvent::GameOverMiss { .. })),
+            "ミス音は演出開始時に鳴らす: {events:?}"
         );
+
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+
+        assert_eq!(game.status, GameStatus::GameOver);
+        assert_eq!(game.player.lives, 0);
+    }
+
+    #[test]
+    fn oxygen_death_on_the_last_life_reaches_a_displayable_game_over_dialog() {
+        // 演出完了でGameOverへ遷移するフレームで打ち切らないと、酸素0のままの
+        // プレイヤーが同じフレーム内で再び酸素切れ判定に引っかかり、ミスが二重に
+        // 走って演出が終わらなくなる(GameOverダイアログが永久に出ない)。
+        let mut game = Game::new_with_lives(2, 1);
+        game.player.oxygen = 1.0;
+
+        let mut events = game.update(Duration::from_secs(1));
+        events.extend(game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        )));
+
+        assert_eq!(game.status, GameStatus::GameOver);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::GameOverMiss { .. }))
+                .count(),
+            1,
+            "ミス音は1回だけのはず(二重ミスしていない): {events:?}"
+        );
+        assert!(!game.is_dying(), "演出は終わっているはず");
+        assert!(
+            !game.crush_flash_active(),
+            "演出が終わっていればGameOverダイアログを表示できる"
+        );
+
+        // さらにフレームを進めても演出が復活しない(＝ダイアログが出続ける)こと。
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+        assert!(!game.crush_flash_active());
     }
 
     // --- 無敵(ミス無効) / オートプレイの土台 ---
@@ -4134,6 +4198,10 @@ mod tests {
         let mut game = Game::new_with_lives(2, 1);
         game.player.oxygen = 1.0;
         game.update(Duration::from_secs(1));
+        // 最後のライフでも「天に召される」演出を経てからGameOverになる(#257)。
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert_eq!(game.status, GameStatus::GameOver);
         assert_eq!(game.game_over_selection(), GameOverChoice::BackToTitle);
 
@@ -4159,6 +4227,10 @@ mod tests {
         let mut game = Game::new_with_lives(2, 1);
         game.player.oxygen = 1.0;
         game.update(Duration::from_secs(1));
+        // 最後のライフでも「天に召される」演出を経てからGameOverになる(#257)。
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert_eq!(game.status, GameStatus::GameOver);
         let depth_before = game.player.depth_m();
         let score_before = game.player.score;
@@ -5705,7 +5777,11 @@ mod tests {
     fn debug_fill_air_does_nothing_when_not_playing() {
         let mut game = Game::new_with_lives(72, 1);
         game.player.oxygen = 1.0;
-        game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
+        game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でミスさせる
+        // 最後のライフでも「天に召される」演出を経てからGameOverになる(#257)。
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert_eq!(game.status, GameStatus::GameOver);
 
         game.debug_fill_air();
@@ -5789,7 +5865,11 @@ mod tests {
         game.player.row = 999;
         game.player.col = 5;
         game.player.oxygen = 1.0;
-        game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でGameOverにする
+        game.update(Duration::from_secs(1)); // 酸素切れ+ライフ1でミスさせる
+        // 最後のライフでも「天に召される」演出を経てからGameOverになる(#257)。
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
         assert_eq!(game.status, GameStatus::GameOver);
 
         // GameOverになった後で改めて岩を置く(死亡時の頭上クリアの影響を受けずに、
@@ -5837,9 +5917,84 @@ mod tests {
     }
 
     #[test]
-    fn crush_on_the_last_life_skips_the_ascending_sequence_and_ends_the_game_immediately() {
-        // 最後のライフでの押し潰しは「天に召される」演出を行わず即座にGameOverへ進む。
+    fn crushed_on_the_last_life_plays_the_ascending_sequence_before_game_over() {
+        // 最後のライフでの押し潰しも「天に召される」演出を見せてからGameOverへ進む
+        // (#257。以前はライフ1のときだけ演出を飛ばして即GameOverにしていた)。
         let mut game = Game::new_with_lives(35, 1); // ライフ1(最後の1機)
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        let events = game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+
+        assert_eq!(
+            game.status,
+            GameStatus::Playing,
+            "演出中はまだGameOverにならないはず"
+        );
+        assert!(game.is_dying(), "「天に召される」演出が始まっているはず");
+        assert!(game.crush_flash_active(), "「潰れた」見た目のままのはず");
+        assert_eq!(game.player.lives, 1, "ライフ減算は演出完了まで遅延される");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::GameOverMiss { .. })),
+            "ミス音は演出開始時に鳴らす: {events:?}"
+        );
+
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+
+        assert_eq!(game.status, GameStatus::GameOver, "演出完了でGameOverへ");
+        assert_eq!(game.player.lives, 0);
+        assert!(
+            !game.crush_flash_active(),
+            "演出が終わっていればGameOverダイアログを表示できる"
+        );
+        assert_eq!(
+            game.board.cell(999, 5),
+            Cell::Empty,
+            "押し潰したブロックは演出完了時に消えるはず"
+        );
+    }
+
+    #[test]
+    fn input_is_ignored_while_the_ascending_sequence_plays_on_the_last_life() {
+        // 演出中(is_dying)は入力が凍結される。最後のライフでも同じ。
+        let mut game = Game::new_with_lives(35, 1);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+        game.board.rows[999][6] = Cell::Color(ColorKind::Blue); // 右隣: 掘削・移動の的
+
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+        assert!(game.is_dying(), "前提: 演出中");
+        let pos_before = game.player.position();
+
+        game.apply_input(InputAction::MoveRight);
+        game.apply_input(InputAction::MoveLeft);
+        game.apply_input(InputAction::Drill);
+
+        assert_eq!(game.player.position(), pos_before, "位置は変わらないはず");
+        assert_eq!(
+            game.board.cell(999, 6),
+            Cell::Color(ColorKind::Blue),
+            "掘削も効かないはず"
+        );
+    }
+
+    #[test]
+    fn pausing_during_the_ascending_sequence_on_the_last_life_defers_the_game_over() {
+        // 一時停止中はupdateがPlaying以外で打ち切られるため演出も進まない。
+        // 再開後に続きから進み、最後にGameOverへ到達する。
+        let mut game = Game::new_with_lives(35, 1);
         clear_board(&mut game);
         game.player.row = 999;
         game.player.col = 5;
@@ -5848,13 +6003,52 @@ mod tests {
         game.update(Duration::from_millis(
             (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
         ));
+        assert!(game.is_dying(), "前提: 演出中");
+        let remaining_before = game.ascending_remaining;
+
+        game.toggle_pause();
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
 
         assert_eq!(
-            game.status,
-            GameStatus::GameOver,
-            "演出を待たず即座にGameOverになるはず"
+            game.ascending_remaining, remaining_before,
+            "一時停止中は演出が進まないはず"
         );
+        assert_eq!(game.status, GameStatus::Paused);
+
+        game.toggle_pause();
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+
+        assert_eq!(game.status, GameStatus::GameOver, "再開後に演出が完了する");
         assert_eq!(game.player.lives, 0);
+    }
+
+    #[test]
+    fn debug_add_life_does_nothing_while_the_ascending_sequence_plays() {
+        // 演出の完了時にライフを減らして復活/GameOverを分岐するため、演出中に
+        // ライフを増やせてしまうと本来のGameOverが復活側へ倒れる(#257)。
+        let mut game = Game::new_with_lives(35, 1);
+        clear_board(&mut game);
+        game.player.row = 999;
+        game.player.col = 5;
+        game.board.rows[998][5] = Cell::Color(ColorKind::Red); // プレイヤーの真上、支えなし
+
+        game.update(Duration::from_millis(
+            (SHAKE_TICKS as u64 + 1) * FALL_TICK_MS + 10,
+        ));
+        assert!(game.is_dying(), "前提: 演出中");
+
+        game.debug_add_life();
+
+        assert_eq!(game.player.lives, 1, "演出中はライフが増えないはず");
+
+        game.update(Duration::from_millis(
+            crate::constants::CRUSH_ASCEND_MS + 10,
+        ));
+        assert_eq!(game.status, GameStatus::GameOver);
     }
 
     #[test]
