@@ -25,13 +25,14 @@ use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use constants::{
-    ATTRACT_MODE_IDLE_MS, BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN,
-    BOMB_SPAWN_RATE_PERCENT_STEP, CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP,
-    COLOR_CLUSTER_RATE_PERCENT_MIN, COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX,
-    DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX,
-    DEBUG_SHAKE_DURATION_STEP_MS, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX,
-    DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, FRAME_INTERVAL_MS,
-    ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP,
+    ATTRACT_MODE_IDLE_MS, BOMB_FUSE_MS_MAX, BOMB_FUSE_MS_MIN, BOMB_FUSE_MS_STEP,
+    BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN, BOMB_SPAWN_RATE_PERCENT_STEP,
+    CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_STEP, COLOR_CLUSTER_RATE_PERCENT_MIN,
+    COLOR_COUNT_MAX, COLOR_COUNT_MIN, DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN,
+    DEBUG_FALL_TICK_STEP_MS, DEBUG_SHAKE_DURATION_MS_MAX, DEBUG_SHAKE_DURATION_STEP_MS,
+    DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_STEP, FIELD_WIDTH_MAX,
+    FIELD_WIDTH_MIN, FIELD_WIDTH_STEP, FRAME_INTERVAL_MS, ITEM_SPAWN_RATE_PERCENT_MIN,
+    MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_STEP,
     REWIND_STOCK_MAX_SETTING_MAX, REWIND_STOCK_MAX_SETTING_MIN, SOUND_VOLUME_PERCENT_MAX,
     SOUND_VOLUME_PERCENT_MIN, SOUND_VOLUME_PERCENT_STEP, SPAWN_RATE_PERCENT_MAX,
     SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_STEP, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
@@ -374,6 +375,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             | ui::render::SettingsChoice::MoveSpeed
                             | ui::render::SettingsChoice::DodgeRecoveryMs
                             | ui::render::SettingsChoice::BombRate
+                            | ui::render::SettingsChoice::BombFuse
                             | ui::render::SettingsChoice::ChainVanishInterval
                             | ui::render::SettingsChoice::RewindStockMax => {}
                         }
@@ -460,6 +462,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     | ui::render::SettingsChoice::MoveSpeed
                                     | ui::render::SettingsChoice::DodgeRecoveryMs
                                     | ui::render::SettingsChoice::BombRate
+                                    | ui::render::SettingsChoice::BombFuse
                                     | ui::render::SettingsChoice::ChainVanishInterval
                                     | ui::render::SettingsChoice::RewindStockMax
                             ) =>
@@ -497,6 +500,11 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     increase,
                                 );
                                 game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
+                            }
+                            ui::render::SettingsChoice::BombFuse => {
+                                settings.bomb_fuse_ms =
+                                    adjust_bomb_fuse_ms(settings.bomb_fuse_ms, increase);
+                                game.set_bomb_fuse_ms(settings.bomb_fuse_ms);
                             }
                             ui::render::SettingsChoice::ChainVanishInterval => {
                                 settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
@@ -735,6 +743,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                             settings.move_cooldown_ms,
                             settings.dodge_recovery_ms,
                             settings.bomb_spawn_rate_percent,
+                            settings.bomb_fuse_ms,
                             settings.debug_log_enabled,
                             settings.chain_vanish_interval_ms,
                             settings.rewind_stock_max,
@@ -771,6 +780,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                     settings.move_cooldown_ms,
                     settings.dodge_recovery_ms,
                     settings.bomb_spawn_rate_percent,
+                    settings.bomb_fuse_ms,
                     settings.debug_log_enabled,
                     settings.chain_vanish_interval_ms,
                     settings.rewind_stock_max,
@@ -826,6 +836,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                         | ui::render::SettingsChoice::MoveSpeed
                         | ui::render::SettingsChoice::DodgeRecoveryMs
                         | ui::render::SettingsChoice::BombRate
+                        | ui::render::SettingsChoice::BombFuse
                         | ui::render::SettingsChoice::ChainVanishInterval
                         | ui::render::SettingsChoice::RewindStockMax => {}
                     },
@@ -913,6 +924,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                 | ui::render::SettingsChoice::MoveSpeed
                                 | ui::render::SettingsChoice::DodgeRecoveryMs
                                 | ui::render::SettingsChoice::BombRate
+                                | ui::render::SettingsChoice::BombFuse
                                 | ui::render::SettingsChoice::ChainVanishInterval
                                 | ui::render::SettingsChoice::RewindStockMax
                         ) =>
@@ -952,6 +964,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                                     settings.bomb_spawn_rate_percent,
                                     increase,
                                 );
+                            }
+                            ui::render::SettingsChoice::BombFuse => {
+                                settings.bomb_fuse_ms =
+                                    adjust_bomb_fuse_ms(settings.bomb_fuse_ms, increase);
                             }
                             ui::render::SettingsChoice::ChainVanishInterval => {
                                 settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
@@ -1343,6 +1359,20 @@ fn adjust_bomb_rate_percent(current: u32, increase: bool) -> u32 {
         current
             .saturating_sub(BOMB_SPAWN_RATE_PERCENT_STEP)
             .max(BOMB_SPAWN_RATE_PERCENT_MIN)
+    }
+}
+
+/// ボム爆発までの時間設定(ms)を1ステップぶん増減する。
+/// `BOMB_FUSE_MS_MIN`〜`BOMB_FUSE_MS_MAX`の範囲、`BOMB_FUSE_MS_STEP`刻みで調整する。
+fn adjust_bomb_fuse_ms(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(BOMB_FUSE_MS_STEP)
+            .min(BOMB_FUSE_MS_MAX)
+    } else {
+        current
+            .saturating_sub(BOMB_FUSE_MS_STEP)
+            .max(BOMB_FUSE_MS_MIN)
     }
 }
 
@@ -1766,6 +1796,16 @@ mod tests {
             adjust_bomb_rate_percent(0, false),
             BOMB_SPAWN_RATE_PERCENT_MIN
         );
+    }
+
+    #[test]
+    fn adjust_bomb_fuse_ms_saturates_at_max_instead_of_panicking_when_current_is_corrupted() {
+        assert_eq!(adjust_bomb_fuse_ms(u32::MAX, true), BOMB_FUSE_MS_MAX);
+    }
+
+    #[test]
+    fn adjust_bomb_fuse_ms_saturates_at_min_instead_of_underflowing_when_current_is_corrupted() {
+        assert_eq!(adjust_bomb_fuse_ms(0, false), BOMB_FUSE_MS_MIN);
     }
 
     #[test]

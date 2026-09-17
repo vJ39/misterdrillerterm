@@ -426,6 +426,9 @@ pub struct Game {
     bomb_spawn_check_accum_ms: u64,
     /// ボム出現頻度設定(%、100=既定)。設定画面から調整できる。
     bomb_spawn_rate_percent: u32,
+    /// 新規出現ボムの起爆までの時間(ms)。既定`BOMB_FUSE_MS`。設置済みボムの
+    /// `remaining_ms`には影響しない。
+    bomb_fuse_ms: u32,
     /// アイテムブロック3種の出現率設定(%、100=既定)。`reroll_spawn_rates_from`で最新の
     /// 設定値に更新され、`top_up_items_ahead`がtickごとの窓補充で参照する。
     item_clear_above_rate_percent: u32,
@@ -550,6 +553,7 @@ impl Game {
             bombs: Vec::new(),
             bomb_spawn_check_accum_ms: 0,
             bomb_spawn_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
+            bomb_fuse_ms: BOMB_FUSE_MS,
             item_clear_above_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
             item_unify_colors_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
             item_starify_screen_rate_percent: crate::constants::SPAWN_RATE_PERCENT_DEFAULT,
@@ -2098,6 +2102,16 @@ impl Game {
         );
     }
 
+    /// ボム爆発までの時間を直接指定する(起動時、Settingsから読み込んだ値を適用する用途)。
+    /// 範囲外の値は`BOMB_FUSE_MS_MIN`〜`MAX`にクランプする。新規に出現するボムから
+    /// 反映され、設置済みボムの残り時間には影響しない。
+    pub fn set_bomb_fuse_ms(&mut self, ms: u32) {
+        self.bomb_fuse_ms = ms.clamp(
+            crate::constants::BOMB_FUSE_MS_MIN,
+            crate::constants::BOMB_FUSE_MS_MAX,
+        );
+    }
+
     /// 永続化された設定(速度系・出現率系)を、開始したばかりのゲームへまとめて反映する。
     /// main.rsの`start_new_game`とオートプレイのソークテストの両方がここを通ることで、
     /// ソークテストが出現率の再抽選前の盤面(=実機と違う盤面)を測ってしまうのを防ぐ。
@@ -2111,6 +2125,7 @@ impl Game {
         self.set_dodge_recovery_ms(settings.dodge_recovery_ms);
         self.set_move_cooldown_ms(settings.move_cooldown_ms);
         self.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
+        self.set_bomb_fuse_ms(settings.bomb_fuse_ms);
         self.set_chain_vanish_interval_ms(settings.chain_vanish_interval_ms);
         self.set_rewind_stock_max(settings.rewind_stock_max);
         // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
@@ -2657,7 +2672,7 @@ impl Game {
             origin: (pos.0, edge_col),
             phase: BombPhase::Entering,
             phase_elapsed_ms: 0,
-            remaining_ms: BOMB_FUSE_MS,
+            remaining_ms: self.bomb_fuse_ms,
             settle_bounce_dir: 1,
         });
     }
@@ -6850,6 +6865,58 @@ mod tests {
             "登場位置は画面の左端か右端のはず: {:?}",
             game.bombs[0].origin
         );
+    }
+
+    #[test]
+    fn debug_place_bomb_uses_configured_bomb_fuse_ms() {
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        // 画面内(±STAR_VISIBLE_RANGE_ROWS)を全て岩で埋め、1マスだけEmptyにすることで
+        // デバッグ配置先を一意に絞り込む。
+        let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
+        for row in (game.player.row - range)..=(game.player.row + range) {
+            for col in 0..game.board.width() {
+                game.board.rows[row][col] = Cell::Rock { hits: 0 };
+            }
+        }
+        game.board.rows[510][7] = Cell::Empty;
+
+        game.set_bomb_fuse_ms(2000);
+        game.debug_place_bomb();
+
+        assert_eq!(
+            game.bombs.len(),
+            1,
+            "候補が1マスしかないのでボムが1個設置されるはず"
+        );
+        assert_eq!(
+            game.bombs[0].remaining_ms, 2000,
+            "set_bomb_fuse_msで指定した値が新規ボムの残り時間に反映されるはず"
+        );
+    }
+
+    #[test]
+    fn bomb_fuse_ms_constants_are_sane() {
+        // 定数同士の比較のみでコンパイル時に値が確定するため、clippyの提案通り
+        // `const`ブロックで包み`assertions_on_constants`を回避する。
+        const {
+            assert!(
+                crate::constants::BOMB_FUSE_MS_MIN > BOMB_DANGER_MS,
+                "爆発までの時間の下限は危険域突入の閾値(BOMB_DANGER_MS)より大きくなければならない"
+            );
+            assert!(
+                crate::constants::BOMB_FUSE_MS_MIN <= BOMB_FUSE_MS
+                    && BOMB_FUSE_MS <= crate::constants::BOMB_FUSE_MS_MAX,
+                "既定値は設定可能範囲内でなければならない"
+            );
+            assert!(
+                (BOMB_FUSE_MS - crate::constants::BOMB_FUSE_MS_MIN)
+                    .is_multiple_of(crate::constants::BOMB_FUSE_MS_STEP),
+                "既定値は下限からSTEP刻みの倍数になっているはず"
+            );
+        }
     }
 
     #[test]

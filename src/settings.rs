@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::constants::{
-    CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M,
+    BOMB_FUSE_MS, CHAIN_VANISH_INTERVAL_MS_DEFAULT, COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M,
     DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS, FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT,
     REWIND_STOCK_MAX_DEFAULT, REWIND_STOCK_MAX_SETTING_MAX, REWIND_STOCK_MAX_SETTING_MIN,
     SHAKE_DURATION_MS, SOUND_VOLUME_PERCENT_DEFAULT, SOUND_VOLUME_PERCENT_MAX,
@@ -80,6 +80,10 @@ pub struct Settings {
     /// ボム出現頻度(%、100=通常のまま。0=完全に出現させない。TERM独自拡張。#96)。
     /// 設定画面から調整する。
     pub bomb_spawn_rate_percent: u32,
+    /// ボム設置(Ticking開始)から爆発までの時間(ms。既定`BOMB_FUSE_MS`。TERM独自拡張。
+    /// #246)。設定画面から調整する。新規に出現するボムから反映され、設置済みボムの
+    /// 残り時間には影響しない。
+    pub bomb_fuse_ms: u32,
     /// #85調査用のブロック状態遷移ログ(SQLite、`debug_log`モジュール)を記録するか
     /// どうか(TERM独自拡張。#167。ユーザー指摘: 「デバッグ用のDB記録するしない
     /// トグル設定に追加」)。設定画面から切り替える。既定は有効(以前の常時記録の
@@ -123,6 +127,7 @@ impl Default for Settings {
             move_cooldown_ms: MOVE_COOLDOWN_MS_DEFAULT,
             field_width: FIELD_WIDTH_DEFAULT,
             bomb_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            bomb_fuse_ms: BOMB_FUSE_MS,
             debug_log_enabled: true,
             chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
             last_course_depth_m: COURSE_NORMAL_DEPTH_M,
@@ -215,6 +220,9 @@ impl Settings {
             bomb_spawn_rate_percent: parse_u64_field(&text, "bomb_spawn_rate_percent")
                 .map(|v| v as u32)
                 .unwrap_or(default.bomb_spawn_rate_percent),
+            bomb_fuse_ms: parse_u64_field(&text, "bomb_fuse_ms")
+                .map(|v| v as u32)
+                .unwrap_or(default.bomb_fuse_ms),
             debug_log_enabled: parse_bool_field(&text, "debug_log_enabled")
                 .unwrap_or(default.debug_log_enabled),
             chain_vanish_interval_ms: parse_u64_field(&text, "chain_vanish_interval_ms")
@@ -253,7 +261,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"bomb_fuse_ms\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.music_volume_percent,
@@ -274,6 +282,7 @@ impl Settings {
             self.move_cooldown_ms,
             self.field_width,
             self.bomb_spawn_rate_percent,
+            self.bomb_fuse_ms,
             self.debug_log_enabled,
             self.chain_vanish_interval_ms,
             self.last_course_depth_m,
@@ -374,6 +383,7 @@ mod tests {
         assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_DEFAULT);
         assert_eq!(settings.field_width, FIELD_WIDTH_DEFAULT);
         assert_eq!(settings.bomb_spawn_rate_percent, SPAWN_RATE_PERCENT_DEFAULT);
+        assert_eq!(settings.bomb_fuse_ms, BOMB_FUSE_MS);
         assert_eq!(
             settings.chain_vanish_interval_ms,
             CHAIN_VANISH_INTERVAL_MS_DEFAULT
@@ -455,6 +465,7 @@ mod tests {
             move_cooldown_ms: 40,
             field_width: 8,
             bomb_spawn_rate_percent: 60,
+            bomb_fuse_ms: 2500,
             debug_log_enabled: false,
             chain_vanish_interval_ms: 150,
             last_course_depth_m: 500,
@@ -484,6 +495,7 @@ mod tests {
             move_cooldown_ms: 300,
             field_width: 20,
             bomb_spawn_rate_percent: 300,
+            bomb_fuse_ms: 9000,
             debug_log_enabled: true,
             chain_vanish_interval_ms: 1000,
             last_course_depth_m: 1000,

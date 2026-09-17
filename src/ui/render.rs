@@ -47,7 +47,7 @@ const FIELD_VISIBLE_ROWS: usize = 14;
 /// 設定画面・ヘルプ画面のオーバーレイ枠の高さ(`centered_rect`のパーセント指定)。
 /// 内容行数が増えて枠に収まらなくなったら上げる(収まっているかは
 /// `settings_screen_box_is_tall_enough_...` / `help_screen_box_is_tall_enough_...`で確認する)。
-const SETTINGS_OVERLAY_PERCENT_Y: u16 = 95;
+const SETTINGS_OVERLAY_PERCENT_Y: u16 = 97;
 const HELP_OVERLAY_PERCENT_Y: u16 = 95;
 
 /// 巻き戻し中オーバーレイ(#233)の枠の高さ(行数)。内容2行+上下ボーダー2行。
@@ -652,6 +652,8 @@ pub enum SettingsChoice {
     DodgeRecoveryMs,
     /// ボム出現頻度(%、0まで下げられる)。
     BombRate,
+    /// ボム設置(Ticking開始)から爆発までの時間(ms)。
+    BombFuse,
     /// 調査用のブロック状態遷移ログ(SQLite)を記録するかどうか。
     DebugLogEnabled,
     /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=即座に連鎖)。
@@ -683,7 +685,8 @@ impl SettingsChoice {
             SettingsChoice::ShakeDuration => SettingsChoice::MoveSpeed,
             SettingsChoice::MoveSpeed => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::DodgeRecoveryMs => SettingsChoice::BombRate,
-            SettingsChoice::BombRate => SettingsChoice::DebugLogEnabled,
+            SettingsChoice::BombRate => SettingsChoice::BombFuse,
+            SettingsChoice::BombFuse => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::RewindStockMax,
             SettingsChoice::RewindStockMax => SettingsChoice::Music,
@@ -696,7 +699,8 @@ impl SettingsChoice {
             SettingsChoice::Music => SettingsChoice::RewindStockMax,
             SettingsChoice::RewindStockMax => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::DebugLogEnabled,
-            SettingsChoice::DebugLogEnabled => SettingsChoice::BombRate,
+            SettingsChoice::DebugLogEnabled => SettingsChoice::BombFuse,
+            SettingsChoice::BombFuse => SettingsChoice::BombRate,
             SettingsChoice::BombRate => SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::MusicVolume => SettingsChoice::Music,
             SettingsChoice::Se => SettingsChoice::MusicVolume,
@@ -747,6 +751,7 @@ pub fn draw_settings(
     move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
     bomb_spawn_rate_percent: u32,
+    bomb_fuse_ms: u32,
     debug_log_enabled: bool,
     chain_vanish_interval_ms: u64,
     rewind_stock_max: u8,
@@ -765,6 +770,7 @@ pub fn draw_settings(
     // 高さが足りないと下部の行が枠からクリップして見えなくなるため、項目追加を見越して
     // 縦に余裕を持たせる(必要行数はテスト`settings_screen_box_is_tall_enough_...`で確認)。
     // #233で項目が22個になり90%(28行)では1行あふれるため95%(30行)へ広げた。
+    // #246で項目が23個になりさらに1行増えたため97%(31行)へ広げた。
     let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
     frame.render_widget(Clear, settings_area);
 
@@ -922,6 +928,11 @@ pub fn draw_settings(
             "ボム出現頻度",
             bomb_spawn_rate_percent,
             selection == SettingsChoice::BombRate,
+        ),
+        ms_line(
+            "ボム爆発までの時間",
+            u64::from(bomb_fuse_ms),
+            selection == SettingsChoice::BombFuse,
         ),
         toggle_line(
             "DEBUG LOG",
@@ -2914,6 +2925,7 @@ mod tests {
             SettingsChoice::MoveSpeed,
             SettingsChoice::DodgeRecoveryMs,
             SettingsChoice::BombRate,
+            SettingsChoice::BombFuse,
             SettingsChoice::DebugLogEnabled,
             SettingsChoice::ChainVanishInterval,
             SettingsChoice::RewindStockMax,
@@ -3121,10 +3133,11 @@ mod tests {
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
-        // クリップして見えなくなる)。見出し1+空行1+設定項目23(#224でMUSIC音量・SE音量の
-        // 2項目、#233で巻き戻しストック上限、#243で揺れ時間(落下待ち)を追加)+空行1+
-        // 案内2行=28行、枠(上下)2行込みで30行必要。設定を追加したらこの定数も増やすこと。
-        const REQUIRED_CONTENT_LINES: u16 = 28;
+        // クリップして見えなくなる)。見出し1+空行1+設定項目24(#224でMUSIC音量・SE音量の
+        // 2項目、#233で巻き戻しストック上限、#243で揺れ時間(落下待ち)、#246でボム爆発
+        // までの時間を追加)+空行1+案内2行=29行、枠(上下)2行込みで31行必要。設定を
+        // 追加したらこの定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 29;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
         let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
