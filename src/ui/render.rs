@@ -983,28 +983,92 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
         return;
     }
 
-    let player_screen_row = (visible_rows * PLAYER_SCREEN_ROW_RATIO_NUM
-        / PLAYER_SCREEN_ROW_RATIO_DEN)
-        .min(visible_rows.saturating_sub(1));
-    let top_row = game.player.row.saturating_sub(player_screen_row);
-
-    let buf = frame.buffer_mut();
+    let cam = field_camera(game, player_screen_row(visible_rows));
 
     // 直近の重力ティックで落下した(移動後の位置)→(移動前の位置)のマップ。移動後の位置は
     // 静的な通常描画では一旦Emptyとして扱い(まだ到着していない宙にある状態)、実際の内容は
     // このあと`draw_falling_blocks`が移動前→移動後を補間した位置へ重ねて描画する。
     let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
 
-    for screen_row in 0..visible_rows {
-        let y = inner.y + screen_row as u16 * CELL_H;
-        if y + CELL_H > inner.y + inner.height {
+    let buf = frame.buffer_mut();
+
+    draw_static_field(buf, inner, &cam, visible_rows, game, &moved_map);
+    draw_falling_blocks(buf, inner, cam.row_f, visible_rows, game, &moved_map);
+    draw_bombs(buf, inner, cam.row_f, visible_rows, game);
+    draw_player(buf, inner, cam.row_f, game);
+    draw_off_screen_bomb_warnings(buf, inner, cam.row_f, visible_rows, game);
+}
+
+/// プレイヤーを画面内の何行目に固定表示するか(9.1)。
+fn player_screen_row(visible_rows: usize) -> usize {
+    (visible_rows * PLAYER_SCREEN_ROW_RATIO_NUM / PLAYER_SCREEN_ROW_RATIO_DEN)
+        .min(visible_rows.saturating_sub(1))
+}
+
+/// フィールドのスクロール位置(#242)。論理行の整数値でスナップさせると、足元のブロックが
+/// 消えてプレイヤーが自由落下するたびに画面全体がセル1つぶん飛び、落下中の他のブロックが
+/// 一瞬上へ逆走して見えるため、プレイヤーの補間後の位置から小数で求める。
+struct FieldCamera {
+    /// 画面最上段に来る論理行(小数)。
+    row_f: f32,
+    /// `row_f`の整数部。静的セルはこの行から論理行グリッド上に描く。
+    top_row: usize,
+    /// セル内の半端なスクロール量(端末行数、0〜`CELL_H`)。静的セルはこの分だけ上へずらして転写する。
+    dy: u16,
+}
+
+fn field_camera(game: &Game, player_screen_row: usize) -> FieldCamera {
+    let row_f = (interp_player_row(game) - player_screen_row as f32).max(0.0);
+    FieldCamera {
+        row_f,
+        top_row: row_f.floor() as usize,
+        dy: (row_f.fract() * CELL_H as f32).round() as u16,
+    }
+}
+
+/// プレイヤーの補間後の論理行(整数のマス位置ではなく、移動アニメーション進捗を反映した
+/// 小数の位置)。カメラ位置とプレイヤースプライトの描画位置が同じ値を基準にすることで、
+/// スクロールを滑らかにしつつプレイヤーは画面内の固定位置に留まる(spec.md 9.2)。
+fn interp_player_row(game: &Game) -> f32 {
+    let (prev_row, _) = game.render_prev_position();
+    let (cur_row, _) = game.player.position();
+    prev_row as f32 + (cur_row as f32 - prev_row as f32) * game.move_anim_progress()
+}
+
+/// 盤面の静的セル(その場に留まっているマス)を描画する。論理行グリッド上にしか描けない
+/// ため、1論理行ぶん高いオフスクリーンバッファへ描いてから、カメラの半端なスクロール量
+/// (`cam.dy`)だけ上へずらして`inner`へ転写する(#242)。こうすると端末行単位の中間位置でも
+/// 半端なセルが枠線をはみ出して汚さない。
+fn draw_static_field(
+    buf: &mut Buffer,
+    inner: Rect,
+    cam: &FieldCamera,
+    visible_rows: usize,
+    game: &Game,
+    moved_map: &HashMap<Pos, Pos>,
+) {
+    let area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: inner.height + CELL_H,
+    };
+    let mut off = Buffer::empty(area);
+    // セルを描かない領域(縮退表示で盤面が埋まらない場合)が未初期化の色で転写されないよう、
+    // フィールド背景色の下地を敷いておく。
+    off.set_style(area, Style::default().bg(colors::FIELD_EMPTY_BG));
+
+    // 半端なスクロール量ぶん下からせり上がってくるぶん、可視行数より1行多く描く。
+    for screen_row in 0..=visible_rows {
+        let y = area.y + screen_row as u16 * CELL_H;
+        if y + CELL_H > area.y + area.height {
             break; // 縮退表示でinner.heightが可視行数ぶんに満たない場合の防御
         }
 
-        let board_row = top_row + screen_row;
+        let board_row = cam.top_row + screen_row;
         for col in 0..game.board.width() {
-            let x = inner.x + col as u16 * CELL_W;
-            if x + CELL_W > inner.x + inner.width {
+            let x = area.x + col as u16 * CELL_W;
+            if x + CELL_W > area.x + area.width {
                 break;
             }
 
@@ -1021,20 +1085,30 @@ fn draw_field(frame: &mut Frame, area: Rect, visible_rows: usize, game: &Game) {
             let draw_x = if game.is_cell_shaking(board_row, col) {
                 let jitter = shake_jitter_x(game.player.elapsed_seconds, board_row, col);
                 (x as i32 + jitter).clamp(
-                    inner.x as i32,
-                    (inner.x + inner.width).saturating_sub(CELL_W) as i32,
+                    area.x as i32,
+                    (area.x + area.width).saturating_sub(CELL_W) as i32,
                 ) as u16
             } else {
                 x
             };
-            draw_static_cell(buf, draw_x, y, game, (board_row, col), cell, &moved_map);
+            draw_static_cell(&mut off, draw_x, y, game, (board_row, col), cell, moved_map);
         }
     }
 
-    draw_falling_blocks(buf, inner, top_row, visible_rows, game, &moved_map);
-    draw_bombs(buf, inner, top_row, visible_rows, game);
-    draw_player(buf, inner, top_row, game);
-    draw_off_screen_bomb_warnings(buf, inner, top_row, visible_rows, game);
+    // オフスクリーンバッファの[dy, dy+inner.height)行を実際の描画領域へ転写する。
+    for row in 0..inner.height {
+        for col in 0..inner.width {
+            let Some(src) = off
+                .cell(Position::new(area.x + col, area.y + cam.dy + row))
+                .cloned()
+            else {
+                continue;
+            };
+            if let Some(dst) = buf.cell_mut(Position::new(inner.x + col, inner.y + row)) {
+                *dst = src;
+            }
+        }
+    }
 }
 
 /// 盤面のセル1マスぶんを、その場(静止位置)に描画する。落下補間中のブロックは
@@ -1074,7 +1148,7 @@ fn draw_static_cell(
         // 消滅は確定したが、一緒に消える落下ブロックがまだ空中にいる間(TERM独自拡張。
         // #234)。落下してくる側は`draw_falling_blocks`が補間位置へ描くのでここでは
         // 扱わず、その場に留まっている側だけを消滅前の見た目のまま描き続ける。
-        draw_logical_cell(buf, x, y, &game.board, board_row, col, kind);
+        draw_pending_vanish_cell(buf, x, y, game, pos, kind, moved_map);
     } else if cell == BoardCell::Empty && is_checkpoint_safe_zone_row(board_row) {
         fill_bedrock_ground(buf, x, y);
     } else {
@@ -1082,19 +1156,51 @@ fn draw_static_cell(
     }
 }
 
-/// 画面外(まだスクロールインしていない、`top_row`より浅い行)にボムがある場合、
+/// 消滅は確定したがフラッシュ開始待ちのセルを、消滅直前の見た目のまま描く(#242)。
+/// 盤面上は既にEmptyのため`draw_logical_cell`にそのまま任せると接続罫線が「隣もEmpty」
+/// と判定され、繋がって見えるべき塊が1マスずつバラけて見える。ここでは待機中の隣接セルも
+/// 繋がっているとみなしたマスクを与えて描く。
+fn draw_pending_vanish_cell(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    game: &Game,
+    pos: Pos,
+    kind: BoardCell,
+    moved_map: &HashMap<Pos, Pos>,
+) {
+    let (row, col) = pos;
+    match kind {
+        BoardCell::Color(color) => {
+            let mask = conn_mask_pending(game, row, col, moved_map, |cell| {
+                cell == BoardCell::Color(color)
+            });
+            draw_color_block_with_mask(buf, x, y, &mask, color);
+        }
+        BoardCell::Rock { hits } => {
+            let mask = conn_mask_pending(game, row, col, moved_map, |cell| {
+                matches!(cell, BoardCell::Rock { .. })
+            });
+            draw_rock_block_with_mask(buf, x, y, &mask, hits);
+        }
+        // 接続罫線を持たない種類(AIR・スター・アイテム等)はそのまま通常描画でよい。
+        other => draw_logical_cell(buf, x, y, &game.board, row, col, other),
+    }
+}
+
+/// 画面外(まだスクロールインしていない、カメラより浅い行)にボムがある場合、
 /// そのボムがある列全体を赤く点滅させて警告する。
 fn draw_off_screen_bomb_warnings(
     buf: &mut Buffer,
     inner: Rect,
-    top_row: usize,
+    cam_row_f: f32,
     visible_rows: usize,
     game: &Game,
 ) {
     let warning_cols: HashSet<usize> = game
         .bombs()
         .iter()
-        .filter(|b| b.pos.0 < top_row)
+        .filter(|b| (b.pos.0 as f32) < cam_row_f)
         .map(|b| b.pos.1)
         .collect();
     if warning_cols.is_empty() {
@@ -1123,7 +1229,7 @@ fn draw_off_screen_bomb_warnings(
 /// ボムを盤面の上に重ねて描画する(ブロックとは別レイヤーなので通常のセル描画ループとは独立)。
 /// `BombPhase`に応じて 白ボン登場(Entering)→転がり(Rolling、縦にも弾ませる)→落下・バウンド
 /// (Settling)→設置後の点滅カウントダウン(Ticking) を描き分け、起爆が近づくほど点滅を速める。
-fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize, game: &Game) {
+fn draw_bombs(buf: &mut Buffer, inner: Rect, cam_row_f: f32, visible_rows: usize, game: &Game) {
     for bomb in game.bombs() {
         // originとposは常に同じ行で、ボム自体はその行に、白ボンはその1行上に描く。
         let bomb_row = bomb.pos.0;
@@ -1132,7 +1238,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
         match bomb.phase {
             BombPhase::Entering => {
                 let Some((x, y)) =
-                    cell_screen_pos(inner, top_row, visible_rows, shirobon_row, bomb.origin.1)
+                    cell_screen_pos(inner, cam_row_f, visible_rows, shirobon_row, bomb.origin.1)
                 else {
                     continue;
                 };
@@ -1147,7 +1253,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                     bomb_row
                 };
                 let Some((x, y)) =
-                    cell_screen_pos_f32(inner, top_row, visible_rows, display_row, col)
+                    cell_screen_pos_f32(inner, cam_row_f, visible_rows, display_row, col)
                 else {
                     continue;
                 };
@@ -1164,7 +1270,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
                 // 落下・左右バウンド中は現在位置(`bomb.pos`、毎tick更新される)へそのまま描く。
                 // 起爆カウントダウンはまだ始まっていないため、火花は暗い方の色で固定する。
                 let Some((x, y)) =
-                    cell_screen_pos(inner, top_row, visible_rows, bomb.pos.0, bomb.pos.1)
+                    cell_screen_pos(inner, cam_row_f, visible_rows, bomb.pos.0, bomb.pos.1)
                 else {
                     continue;
                 };
@@ -1179,7 +1285,7 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
             }
             BombPhase::Ticking => {
                 let Some((x, y)) =
-                    cell_screen_pos(inner, top_row, visible_rows, bomb_row, bomb.pos.1)
+                    cell_screen_pos(inner, cam_row_f, visible_rows, bomb_row, bomb.pos.1)
                 else {
                     continue;
                 };
@@ -1201,39 +1307,39 @@ fn draw_bombs(buf: &mut Buffer, inner: Rect, top_row: usize, visible_rows: usize
     }
 }
 
-/// フィールド内の論理セル位置(行・列)を、現在のスクロール位置(`top_row`)・
+/// フィールド内の論理セル位置(行・列)を、現在のスクロール位置(`cam_row_f`)・
 /// 可視行数を踏まえて画面座標(x, y)へ変換する。範囲外なら`None`。
 fn cell_screen_pos(
     inner: Rect,
-    top_row: usize,
+    cam_row_f: f32,
     visible_rows: usize,
     row: usize,
     col: usize,
 ) -> Option<(u16, u16)> {
-    cell_screen_pos_f32(inner, top_row, visible_rows, row, col as f32)
+    cell_screen_pos_f32(inner, cam_row_f, visible_rows, row, col as f32)
 }
 
 /// `cell_screen_pos`の列位置を小数(補間中の途中位置)で受け取る版。
 fn cell_screen_pos_f32(
     inner: Rect,
-    top_row: usize,
+    cam_row_f: f32,
     visible_rows: usize,
     row: usize,
     col: f32,
 ) -> Option<(u16, u16)> {
-    if row < top_row {
+    // カメラは小数行で動くため、セル1つぶんに満たないはみ出し(上端で欠ける位置)も
+    // ここでは描画対象外にする。
+    let screen_row = row as f32 - cam_row_f;
+    if screen_row < 0.0 || screen_row >= visible_rows as f32 || col < 0.0 {
         return None;
     }
-    let screen_row = row - top_row;
-    if screen_row >= visible_rows || col < 0.0 {
-        return None;
-    }
-    let y = inner.y + screen_row as u16 * CELL_H;
+    let y = inner.y as f32 + screen_row * CELL_H as f32;
     let x = inner.x as f32 + col * CELL_W as f32;
     if x < inner.x as f32 {
         return None;
     }
     let x = x.round() as u16;
+    let y = y.round() as u16;
     if x + CELL_W > inner.x + inner.width || y + CELL_H > inner.y + inner.height {
         return None;
     }
@@ -1359,7 +1465,7 @@ fn bomb_body_color(remaining_ms: u32) -> Color {
 fn draw_falling_blocks(
     buf: &mut Buffer,
     inner: Rect,
-    top_row: usize,
+    cam_row_f: f32,
     visible_rows: usize,
     game: &Game,
     moved_map: &HashMap<Pos, Pos>,
@@ -1390,14 +1496,14 @@ fn draw_falling_blocks(
 
         let interp_row = from_row as f32 + (to_row as f32 - from_row as f32) * t;
         let interp_col = from_col as f32 + (to_col as f32 - from_col as f32) * t;
-        let screen_row = interp_row - top_row as f32;
+        let screen_row = interp_row - cam_row_f;
         if screen_row < 0.0 || screen_row > visible_rows as f32 {
             continue; // 画面外
         }
 
         let px = inner.x as f32 + interp_col * CELL_W as f32;
         let py = inner.y as f32 + screen_row * CELL_H as f32;
-        if px < 0.0 || py < 0.0 {
+        if px < inner.x as f32 || py < inner.y as f32 {
             continue;
         }
         let x = px.round() as u16;
@@ -1428,15 +1534,15 @@ fn shake_jitter_x(elapsed_secs: f32, row: usize, col: usize) -> i32 {
 
 /// プレイヤーのスプライトを、直前の論理位置から現在位置へ補間した画面座標へ描画する(9章)。
 /// ロジック上の当たり判定・掘削・落下判定は常に整数マス基準のままで、ここで行うのは描画位置の補間のみ。
-fn draw_player(buf: &mut Buffer, inner: Rect, top_row: usize, game: &Game) {
-    let (prev_row, prev_col) = game.render_prev_position();
+fn draw_player(buf: &mut Buffer, inner: Rect, cam_row_f: f32, game: &Game) {
+    let (_, prev_col) = game.render_prev_position();
     let (cur_row, cur_col) = game.player.position();
     let t = game.move_anim_progress();
 
-    let interp_row = prev_row as f32 + (cur_row as f32 - prev_row as f32) * t;
+    let interp_row = interp_player_row(game);
     let interp_col = prev_col as f32 + (cur_col as f32 - prev_col as f32) * t;
 
-    let screen_row = interp_row - top_row as f32;
+    let screen_row = interp_row - cam_row_f;
     if screen_row < 0.0 {
         return; // スクロール範囲外(補間中に上端を跨ぐ極端なケースの防御)
     }
@@ -1647,6 +1753,29 @@ struct ConnMask {
     right: bool,
 }
 
+/// 4方向の隣接位置それぞれについて`connected`(盤面内のその位置と繋がって見せるか)を
+/// 評価してマスクを組み立てる共通処理。盤面の範囲外は常に非接続として扱う。
+fn conn_mask_from(
+    board: &Board,
+    row: usize,
+    col: usize,
+    connected: impl Fn(usize, usize) -> bool,
+) -> ConnMask {
+    let check = |r: isize, c: isize| -> bool {
+        r >= 0
+            && (r as usize) < board.depth_rows()
+            && c >= 0
+            && (c as usize) < board.width()
+            && connected(r as usize, c as usize)
+    };
+    ConnMask {
+        up: check(row as isize - 1, col as isize),
+        down: check(row as isize + 1, col as isize),
+        left: check(row as isize, col as isize - 1),
+        right: check(row as isize, col as isize + 1),
+    }
+}
+
 /// `same`(隣接セルが自分と同種と言えるか)を基準に4方向の接続有無を求める共通処理。
 /// 色ブロック(同色判定)・岩ブロック(hitsを問わずRockかどうかの判定)の両方で使う。
 fn conn_mask_by(
@@ -1655,19 +1784,25 @@ fn conn_mask_by(
     col: usize,
     same: impl Fn(BoardCell) -> bool,
 ) -> ConnMask {
-    let check = |r: isize, c: isize| -> bool {
-        r >= 0
-            && (r as usize) < board.depth_rows()
-            && c >= 0
-            && (c as usize) < board.width()
-            && same(board.cell(r as usize, c as usize))
-    };
-    ConnMask {
-        up: check(row as isize - 1, col as isize),
-        down: check(row as isize + 1, col as isize),
-        left: check(row as isize, col as isize - 1),
-        right: check(row as isize, col as isize + 1),
-    }
+    conn_mask_from(board, row, col, |r, c| same(board.cell(r, c)))
+}
+
+/// 消滅は確定したがフラッシュ開始待ちのセル(`pending_vanish_kind`)を描くための接続判定
+/// (#242)。盤面上は既にEmptyなので現在の盤面だけで判定すると塊がバラけて見えるため、
+/// 同じく待機中の隣接セルも接続しているとみなす。ただし落下中(=まだ到着しておらず
+/// `draw_falling_blocks`が別途単独で描く)側は繋げない。
+fn conn_mask_pending(
+    game: &Game,
+    row: usize,
+    col: usize,
+    moved_map: &HashMap<Pos, Pos>,
+    same: impl Fn(BoardCell) -> bool,
+) -> ConnMask {
+    conn_mask_from(&game.board, row, col, |r, c| {
+        same(game.board.cell(r, c))
+            || (!moved_map.contains_key(&(r, c))
+                && game.pending_vanish_kind((r, c)).is_some_and(&same))
+    })
 }
 
 fn conn_mask(board: &Board, row: usize, col: usize, kind: ColorKind) -> ConnMask {
@@ -1698,6 +1833,12 @@ fn draw_color_block(
     kind: ColorKind,
 ) {
     let mask = conn_mask(board, row, col, kind);
+    draw_color_block_with_mask(buf, x, y, &mask, kind);
+}
+
+/// `draw_color_block`の、接続マスクを呼び出し側から与える版。現在の盤面からは正しい
+/// 接続を導けない場面(消滅待機中のセル、#242)のために分離している。
+fn draw_color_block_with_mask(buf: &mut Buffer, x: u16, y: u16, mask: &ConnMask, kind: ColorKind) {
     let bg = colors::fill_color(kind);
     let border_fg = colors::highlight_color(kind);
 
@@ -1792,6 +1933,12 @@ fn draw_rock_block(
     hits: u8,
 ) {
     let mask = conn_mask_rock(board, row, col);
+    draw_rock_block_with_mask(buf, x, y, &mask, hits);
+}
+
+/// `draw_rock_block`の、接続マスクを呼び出し側から与える版(用途は
+/// `draw_color_block_with_mask`と同じ)。
+fn draw_rock_block_with_mask(buf: &mut Buffer, x: u16, y: u16, mask: &ConnMask, hits: u8) {
     let bg = colors::rock_bg(hits);
     let fg = colors::ROCK_X_FG;
 
@@ -2426,12 +2573,12 @@ mod tests {
         );
 
         let inner = Rect::new(0, 0, 20, 20);
-        let top_row = 495;
+        let cam_row_f = 495.0;
         let visible_rows = 10;
 
         game.player.elapsed_seconds = 0.0;
         let mut buf_on = Buffer::empty(inner);
-        draw_off_screen_bomb_warnings(&mut buf_on, inner, top_row, visible_rows, &game);
+        draw_off_screen_bomb_warnings(&mut buf_on, inner, cam_row_f, visible_rows, &game);
         assert!(
             buf_on
                 .content
@@ -2442,7 +2589,7 @@ mod tests {
 
         game.player.elapsed_seconds = OFF_SCREEN_BOMB_WARNING_ON_MS as f32 / 1000.0;
         let mut buf_off = Buffer::empty(inner);
-        draw_off_screen_bomb_warnings(&mut buf_off, inner, top_row, visible_rows, &game);
+        draw_off_screen_bomb_warnings(&mut buf_off, inner, cam_row_f, visible_rows, &game);
         assert!(
             !buf_off
                 .content
@@ -2468,7 +2615,7 @@ mod tests {
 
         let inner = Rect::new(0, 0, 20, 20);
         let mut buf = Buffer::empty(inner);
-        draw_off_screen_bomb_warnings(&mut buf, inner, 495, 10, &game);
+        draw_off_screen_bomb_warnings(&mut buf, inner, 495.0, 10, &game);
 
         assert!(
             !buf.content
@@ -2590,7 +2737,7 @@ mod tests {
 
         let inner = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(inner);
-        draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
+        draw_falling_blocks(&mut buf, inner, 0.0, 10, &game, &moved_map);
 
         let has_diamond_glyph = buf.content.iter().any(|cell| cell.symbol() == "◆");
         assert!(
@@ -2642,7 +2789,7 @@ mod tests {
 
         let inner = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(inner);
-        draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
+        draw_falling_blocks(&mut buf, inner, 0.0, 10, &game, &moved_map);
 
         let red_bg = colors::fill_color(ColorKind::Red);
         let has_red_fill = buf
@@ -3159,12 +3306,10 @@ mod tests {
     // 落下tick間隔を遅くした際の「落下→消滅」演出(#234)
     // -----------------------------------------------------------------------
 
-    /// テスト用ヘルパー: 「(0,0)の赤ブロックが2マス落下し、着地先(2,0)で(2,1)(2,2)(2,3)と
-    /// 4連結して消滅する」3行の盤面を、指定した落下tick間隔で作り、着地・消滅した直後の
-    /// フレームまで1フレーム(33ms)ずつ進める。
-    fn landed_and_vanished_game(block_fall_tick_ms: u64) -> Game {
+    /// テスト用ヘルパー: 最深行(row2)の列1〜3に赤ブロックが横一列で並ぶだけの3行の盤面。
+    /// 最深行なので常に支持され、これらのブロック自身は落下しない。
+    fn three_red_cells_in_a_row_game() -> Game {
         let mut game = Game::new(1);
-        game.set_block_fall_tick_ms(block_fall_tick_ms);
         game.board.rows.truncate(3);
         for row in game.board.rows.iter_mut() {
             for cell in row.iter_mut() {
@@ -3173,10 +3318,33 @@ mod tests {
         }
         game.player.row = 0;
         game.player.col = 5;
-        game.board.rows[0][0] = BoardCell::Color(ColorKind::Red);
         for col in 1..=3 {
             game.board.rows[2][col] = BoardCell::Color(ColorKind::Red);
         }
+        game
+    }
+
+    /// テスト用ヘルパー: バッファの各行を、そのまま1つの文字列として取り出す。
+    fn buffer_symbol_rows(buf: &Buffer) -> Vec<String> {
+        let area = *buf.area();
+        (area.y..area.y + area.height)
+            .map(|y| {
+                (area.x..area.x + area.width)
+                    .map(|x| buf.cell(Position::new(x, y)).unwrap().symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// テスト用ヘルパー: 「(0,0)の赤ブロックが2マス落下し、着地先(2,0)で(2,1)(2,2)(2,3)と
+    /// 4連結して消滅する」3行の盤面を、指定した落下tick間隔で作り、着地・消滅した直後の
+    /// フレームまで1フレーム(33ms)ずつ進める。
+    fn landed_and_vanished_game(block_fall_tick_ms: u64) -> Game {
+        let mut game = three_red_cells_in_a_row_game();
+        game.set_block_fall_tick_ms(block_fall_tick_ms);
+        // 列0: 落下してくる赤ブロック(row0から最深行row2まで2マス落下し、着地先(2,0)で
+        // (2,1)(2,2)(2,3)と4連結して消滅する)。
+        game.board.rows[0][0] = BoardCell::Color(ColorKind::Red);
 
         let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
         for _ in 0..400 {
@@ -3211,7 +3379,7 @@ mod tests {
 
         let inner = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(inner);
-        draw_falling_blocks(&mut buf, inner, 0, 10, &game, &moved_map);
+        draw_falling_blocks(&mut buf, inner, 0.0, 10, &game, &moved_map);
 
         let red_bg = colors::fill_color(ColorKind::Red);
         assert!(
@@ -3262,5 +3430,323 @@ mod tests {
             buf.content.iter().all(|cell| cell.bg == flash_bg),
             "到着後は消滅フラッシュの背景色で塗られるはず"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 消滅待機中の連結罫線(#242 修正1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pending_vanish_cells_keep_their_connected_border_until_the_flash_begins() {
+        // #242。消滅待機中の接続罫線を現在の盤面(既にEmpty)だけで判定すると、隣も自分も
+        // Emptyと見なされ、1つの塊だったはずの3マスがバラバラの単独ブロックに見えていた。
+        // 待機中も消滅直前と同じ1つの塊として描かれることを確認する。
+        let game = landed_and_vanished_game(600);
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+        assert!(
+            moved_map.contains_key(&(2, 0)),
+            "テスト前提: (2,0)はまだ落下補間中(到着していない)であること"
+        );
+        for col in 1..=3 {
+            assert!(
+                game.pending_vanish_kind((2, col)).is_some(),
+                "テスト前提: (2,{col})がフラッシュ開始待ちであること"
+            );
+        }
+
+        let area = Rect::new(0, 0, CELL_W * 3, CELL_H);
+        let mut pending_buf = Buffer::empty(area);
+        for col in 1..=3u16 {
+            let x = (col - 1) * CELL_W;
+            draw_static_cell(
+                &mut pending_buf,
+                x,
+                0,
+                &game,
+                (2, col as usize),
+                BoardCell::Empty,
+                &moved_map,
+            );
+        }
+
+        // 消滅直前(まだ3マスが盤面上に並んでいた頃)の見た目。
+        let before = three_red_cells_in_a_row_game();
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+        let mut before_buf = Buffer::empty(area);
+        for col in 1..=3u16 {
+            let x = (col - 1) * CELL_W;
+            draw_static_cell(
+                &mut before_buf,
+                x,
+                0,
+                &before,
+                (2, col as usize),
+                before.board.cell(2, col as usize),
+                &no_moves,
+            );
+        }
+
+        assert_eq!(
+            buffer_symbol_rows(&pending_buf),
+            buffer_symbol_rows(&before_buf),
+            "消滅待機中も消滅直前と同じ罫線で描かれるはず"
+        );
+        assert_eq!(
+            buffer_symbol_rows(&pending_buf),
+            vec!["╭──────────╮".to_string(), "╰──────────╯".to_string()],
+            "3マスが継ぎ目のない1つの塊として描かれるはず"
+        );
+    }
+
+    #[test]
+    fn pending_vanish_cells_switch_to_the_flash_color_once_the_flash_begins() {
+        // 落下ブロックが到着してフラッシュが始まったら、連結罫線ではなくフラッシュ色に
+        // 切り替わることを確認する(待機中の見た目を残し続けない)。
+        let mut game = landed_and_vanished_game(600);
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+        for _ in 0..40 {
+            if game.vanish_flash_progress((2, 1)).is_some() {
+                break;
+            }
+            game.update(frame);
+        }
+        let t = game
+            .vanish_flash_progress((2, 1))
+            .expect("到着後はフラッシュに入っているはず");
+        let moved_map: HashMap<Pos, Pos> = game.recently_moved_blocks().iter().copied().collect();
+
+        let area = Rect::new(0, 0, CELL_W * 3, CELL_H);
+        let mut buf = Buffer::empty(area);
+        for col in 1..=3u16 {
+            draw_static_cell(
+                &mut buf,
+                (col - 1) * CELL_W,
+                0,
+                &game,
+                (2, col as usize),
+                BoardCell::Empty,
+                &moved_map,
+            );
+        }
+        let flash_bg = colors::vanish_flash_bg(t);
+        assert!(
+            buf.content.iter().all(|cell| cell.bg == flash_bg),
+            "フラッシュ開始後は3マスともフラッシュ色で塗られるはず"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // カメラの小数スクロール(#242 修正2)
+    // -----------------------------------------------------------------------
+
+    /// テスト用ヘルパー: プレイヤーが(11,2)から連続で自由落下する、全Emptyの深い盤面。
+    /// `extra`で落下の様子を観測するためのブロックを追加で置ける。
+    fn free_falling_game() -> Game {
+        let mut game = Game::new(1);
+        for row in game.board.rows.iter_mut() {
+            for cell in row.iter_mut() {
+                *cell = BoardCell::Empty;
+            }
+        }
+        game.player.row = 11;
+        game.player.col = 2;
+        game
+    }
+
+    /// テスト用ヘルパー: 自由落下の描画検証で使う可視領域(枠線の内側を模して原点をずらす)。
+    fn field_inner_rect(visible_rows: usize) -> Rect {
+        Rect::new(
+            1,
+            1,
+            FIELD_WIDTH as u16 * CELL_W,
+            visible_rows as u16 * CELL_H,
+        )
+    }
+
+    /// テスト用ヘルパー: バッファ内で`pred`を満たすセルを含む最初の行(端末行)。
+    fn first_row_matching(
+        buf: &Buffer,
+        pred: impl Fn(&ratatui::buffer::Cell) -> bool,
+    ) -> Option<u16> {
+        let area = *buf.area();
+        (area.y..area.y + area.height).find(|&y| {
+            (area.x..area.x + area.width).any(|x| pred(buf.cell(Position::new(x, y)).unwrap()))
+        })
+    }
+
+    #[test]
+    fn player_sprite_stays_on_its_fixed_screen_row_while_free_falling() {
+        // #242。カメラをプレイヤーの補間後の位置から求めるようにしても、プレイヤー自身は
+        // 常に画面内の固定行に留まること(spec.md 9.2)を、落下補間の全進捗で確認する。
+        let mut game = free_falling_game();
+        let visible_rows = 14;
+        let psr = player_screen_row(visible_rows);
+        let inner = field_inner_rect(visible_rows);
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+
+        let mut seen_progress = Vec::new();
+        for _ in 0..40 {
+            game.update(frame);
+            if game.render_prev_position().0 == game.player.row {
+                continue; // 落下補間中のフレームだけを見る
+            }
+            let cam = field_camera(&game, psr);
+            let mut buf = Buffer::empty(inner);
+            draw_player(&mut buf, inner, cam.row_f, &game);
+            let sprite_row = first_row_matching(&buf, |cell| cell.fg == colors::PLAYER_FG)
+                .expect("プレイヤースプライトが描かれているはず");
+            assert_eq!(
+                sprite_row,
+                inner.y + psr as u16 * CELL_H,
+                "落下補間の進捗{:.2}でもプレイヤーは固定行に留まるはず",
+                game.move_anim_progress()
+            );
+            seen_progress.push(game.move_anim_progress());
+        }
+        assert!(
+            seen_progress.iter().any(|&t| (0.4..0.6).contains(&t)),
+            "テスト前提: 補間が半分ほど進んだフレームも観測できていること: {seen_progress:?}"
+        );
+    }
+
+    #[test]
+    fn field_scrolls_by_one_terminal_row_at_the_half_cell_camera_position() {
+        // #242。カメラが論理行の途中(進捗0.5)にいるとき、静止しているブロックは端末で
+        // 1行ぶん上へずれて描かれる(=セル単位でスナップせず滑らかにスクロールする)。
+        let mut game = free_falling_game();
+        game.board.rows.truncate(20);
+        let rock_row = 19; // 最深行なので落下せず、その場に留まる
+        game.board.rows[rock_row][5] = BoardCell::Rock { hits: 0 };
+
+        let visible_rows = 14;
+        let psr = player_screen_row(visible_rows);
+        let inner = field_inner_rect(visible_rows);
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+
+        // (top_row, dy) ごとの岩ブロックの描画行を集める。
+        let mut samples: Vec<(usize, u16, u16)> = Vec::new();
+        for _ in 0..40 {
+            game.update(frame);
+            let cam = field_camera(&game, psr);
+            let mut buf = Buffer::empty(inner);
+            draw_static_field(&mut buf, inner, &cam, visible_rows, &game, &no_moves);
+            if let Some(row) = first_row_matching(&buf, |cell| cell.fg == colors::ROCK_X_FG) {
+                samples.push((cam.top_row, cam.dy, row));
+            }
+        }
+
+        let base = samples
+            .iter()
+            .find(|&&(_, dy, _)| dy == 0)
+            .copied()
+            .expect("カメラがちょうど論理行に乗るフレームがあるはず");
+        let half = samples
+            .iter()
+            .find(|&&(top, dy, _)| top == base.0 && dy == 1)
+            .copied()
+            .expect("同じ論理行のままセルの半分だけスクロールしたフレームがあるはず");
+        assert_eq!(
+            half.2 + 1,
+            base.2,
+            "進捗が半分のフレームでは静止ブロックが端末1行ぶん上にずれているはず: {samples:?}"
+        );
+    }
+
+    #[test]
+    fn falling_blocks_never_jump_upward_across_a_player_fall_tick() {
+        // #242。修正前はプレイヤーが1マス自由落下するたびにカメラが端末2行ぶん一気に
+        // スナップし、落下中の他のブロックが1フレームで2行上へ飛んで(逆走して)見えた。
+        // カメラは1フレームあたり最大1行ずつしか進まず、落下ブロックの描画行も
+        // 1フレームで2行以上動かないことを確認する。
+        let mut game = free_falling_game();
+        game.board.rows[16][5] = BoardCell::Diamond; // プレイヤーの下方で一緒に落ちるブロック
+
+        let visible_rows = 14;
+        let psr = player_screen_row(visible_rows);
+        let inner = field_inner_rect(visible_rows);
+        let frame = std::time::Duration::from_millis(crate::constants::FRAME_INTERVAL_MS);
+
+        let mut cam_offsets: Vec<i32> = Vec::new();
+        let mut diamond_rows: Vec<i32> = Vec::new();
+        let mut player_fall_ticks = 0;
+        let mut prev_player_row = game.player.row;
+        for _ in 0..60 {
+            game.update(frame);
+            if game.player.row != prev_player_row {
+                player_fall_ticks += 1;
+                prev_player_row = game.player.row;
+            }
+            let cam = field_camera(&game, psr);
+            cam_offsets.push(cam.top_row as i32 * CELL_H as i32 + cam.dy as i32);
+
+            let moved_map: HashMap<Pos, Pos> =
+                game.recently_moved_blocks().iter().copied().collect();
+            let mut buf = Buffer::empty(inner);
+            draw_falling_blocks(&mut buf, inner, cam.row_f, visible_rows, &game, &moved_map);
+            if let Some(row) = first_row_matching(&buf, |cell| cell.symbol() == "◆") {
+                diamond_rows.push(row as i32);
+            }
+        }
+
+        assert!(
+            player_fall_ticks >= 3,
+            "テスト前提: プレイヤーの自由落下tickを何度かまたいでいること({player_fall_ticks}回)"
+        );
+        for pair in cam_offsets.windows(2) {
+            let step = pair[1] - pair[0];
+            assert!(
+                (0..=1).contains(&step),
+                "カメラは逆走せず端末1行ずつ進むはず: {cam_offsets:?}"
+            );
+        }
+        assert!(
+            cam_offsets.last() > cam_offsets.first(),
+            "テスト前提: 落下に伴いカメラが実際に進んでいること: {cam_offsets:?}"
+        );
+        assert!(
+            diamond_rows.len() >= 10,
+            "テスト前提: 落下中のブロックを十分な数のフレームで観測できていること"
+        );
+        for pair in diamond_rows.windows(2) {
+            assert!(
+                (pair[1] - pair[0]).abs() <= 1,
+                "落下中のブロックが1フレームで2行以上飛ぶ(逆走して見える)ことはないはず: {diamond_rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn camera_near_the_surface_never_underflows() {
+        // #242。プレイヤーが画面上の固定行より浅い位置(地表付近)にいる間は、カメラが
+        // 負へ回り込まず先頭行で止まること。描画側でパニックしないことも合わせて確認する。
+        let visible_rows = 14;
+        let psr = player_screen_row(visible_rows);
+        let inner = field_inner_rect(visible_rows);
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+
+        for player_row in 0..=(psr + 2) {
+            let mut game = free_falling_game();
+            game.player.row = player_row;
+            let cam = field_camera(&game, psr);
+            if player_row <= psr {
+                assert_eq!(cam.top_row, 0, "row={player_row}では先頭行で止まるはず");
+                assert_eq!(
+                    cam.dy, 0,
+                    "row={player_row}では半端なスクロールも起きないはず"
+                );
+            }
+            assert!(
+                cam.row_f >= 0.0,
+                "row={player_row}でカメラが負にならないはず"
+            );
+
+            let mut buf = Buffer::empty(inner);
+            draw_static_field(&mut buf, inner, &cam, visible_rows, &game, &no_moves);
+            draw_falling_blocks(&mut buf, inner, cam.row_f, visible_rows, &game, &no_moves);
+            draw_bombs(&mut buf, inner, cam.row_f, visible_rows, &game);
+            draw_player(&mut buf, inner, cam.row_f, &game);
+            draw_off_screen_bomb_warnings(&mut buf, inner, cam.row_f, visible_rows, &game);
+        }
     }
 }
