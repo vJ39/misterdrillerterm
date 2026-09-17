@@ -35,7 +35,7 @@ use crate::constants::{
     STAR_VISIBLE_RANGE_ROWS, depth_fraction,
 };
 use board::{
-    BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, Pos, bomb_blast_cells,
+    BlockMove, Board, Cell, ColorKind, GravityState, ItemEffect, Pickup, Pos, bomb_blast_cells,
     connected_same_color, tick_star_melting,
 };
 use physics::{DrillOutcome, FreeFallOutcome, LateralOutcome};
@@ -77,7 +77,8 @@ enum BombInTheWay {
     /// ボムが無い、または押し出しに成功した。通常の物理判定(physics::move_lateral)へ進む。
     ClearToMove,
     /// 押し出せず、段差登り判定を自分で行った(呼び出し側は通常の物理判定を呼ばない)。
-    HandledAsClimb,
+    /// 登れた場合、道中(自分の真上→登り先の順)で取得したAIR・アイテムを伴う。
+    HandledAsClimb([Option<Pickup>; 2]),
 }
 
 /// 白ボンがランダムに投げ込むボム。移動する敵キャラは持たず、盤面上に設置された
@@ -628,10 +629,10 @@ impl Game {
             // 受け付けない。デバッグで自由落下tickを遅くしていても同じ。
             return Vec::new();
         }
-        if matches!(self.push_bomb_in_the_way(dir), BombInTheWay::HandledAsClimb) {
+        if let BombInTheWay::HandledAsClimb(pickups) = self.push_bomb_in_the_way(dir) {
             // 押し出せなかった場合は段差登り判定を自分で処理済みなので、
             // 通常の物理判定(physics::move_lateral)は呼ばない。
-            return Vec::new();
+            return self.events_for_climb_pickups(pickups);
         }
 
         let before = self.player.position();
@@ -639,18 +640,37 @@ impl Game {
         self.note_possible_move(before);
 
         match outcome {
-            LateralOutcome::MovedLevelAndCollectedOxygen
-            | LateralOutcome::ClimbedStepAndCollectedOxygen => {
+            LateralOutcome::MovedLevelAndCollectedOxygen => {
                 vec![GameEvent::OxygenCollected]
             }
-            LateralOutcome::MovedLevelAndCollectedItem(effect)
-            | LateralOutcome::ClimbedStepAndCollectedItem(effect) => {
+            LateralOutcome::MovedLevelAndCollectedItem(effect) => {
                 let mut events = Vec::new();
                 self.apply_item_effect(effect, &mut events);
                 events
             }
+            LateralOutcome::ClimbedStep { overhead, landing } => {
+                self.events_for_climb_pickups([overhead, landing])
+            }
             _ => Vec::new(),
         }
+    }
+
+    /// 段差登りの道中で取得したAIR・アイテム(自分の真上→登り先の順)を`GameEvent`へ
+    /// 変換する。AIRを2マスまとめて取得しても`OxygenCollected`は1回だけにまとめ(重力
+    /// ティック経路の`oxygen_collected > 0`と同じ畳み込み)、アイテムは取得した数だけ
+    /// 効果を発動してそれぞれ`ItemCollected`を発火する。
+    fn events_for_climb_pickups(&mut self, pickups: [Option<Pickup>; 2]) -> Vec<GameEvent> {
+        let mut events = Vec::new();
+        let pickups: Vec<Pickup> = pickups.into_iter().flatten().collect();
+        if pickups.iter().any(|p| matches!(p, Pickup::Oxygen)) {
+            events.push(GameEvent::OxygenCollected);
+        }
+        for pickup in pickups {
+            if let Pickup::Item(effect) = pickup {
+                self.apply_item_effect(effect, &mut events);
+            }
+        }
+        events
     }
 
     /// 移動先セルに静止中(Settling/Ticking)のボムがあれば、進行方向へさらに1マス押し
@@ -688,8 +708,7 @@ impl Game {
         };
 
         let Some(push_pos) = push_pos else {
-            self.climb_over_unpushable_bomb(dir, nc);
-            return BombInTheWay::HandledAsClimb;
+            return BombInTheWay::HandledAsClimb(self.climb_over_unpushable_bomb(dir, nc));
         };
 
         let bomb = &mut self.bombs[bomb_index];
@@ -703,27 +722,35 @@ impl Game {
     /// 押し出せない静止中のボムに対し、岩ブロックと同じ「ぶつかって停止→同方向2回目で
     /// 1段登る」段差登り判定を行う。`physics::move_lateral`と同じ判定式を踏襲しつつ、ボムは
     /// Cellグリッド外のオーバーレイのため、判定対象をボムの有無に置き換える。
-    fn climb_over_unpushable_bomb(&mut self, dir: Direction, nc: usize) {
+    ///
+    /// 戻り値は道中(自分の真上→登り先の順)で取得したAIR・アイテムで、登れなかった場合は
+    /// どちらも`None`になる。`move_lateral`と同様、頭上・登り先の両方が通過可能だと
+    /// 確かめてから取得する(登れないのに頭上だけ取得してしまうのを防ぐ)。
+    fn climb_over_unpushable_bomb(&mut self, dir: Direction, nc: usize) -> [Option<Pickup>; 2] {
         let was_bumped_same_dir = self.player.bumped_direction == Some(dir);
         self.player.facing = dir;
 
-        if was_bumped_same_dir
-            && self.player.row > 0
-            && self.board.cell(self.player.row - 1, self.player.col) == Cell::Empty
-            && !self.settled_bomb_at(self.player.row - 1, self.player.col)
-        {
+        if was_bumped_same_dir && self.player.row > 0 {
+            let overhead = (self.player.row - 1, self.player.col);
             let landing = (self.player.row - 1, nc);
-            if self.board.cell(landing.0, landing.1) == Cell::Empty
+            if physics::is_climb_passable(self.board.cell(overhead.0, overhead.1))
+                && !self.settled_bomb_at(overhead.0, overhead.1)
+                && physics::is_climb_passable(self.board.cell(landing.0, landing.1))
                 && !self.settled_bomb_at(landing.0, landing.1)
             {
+                let overhead_pickup =
+                    physics::take_climb_pickup(&mut self.board, &mut self.player, overhead);
+                let landing_pickup =
+                    physics::take_climb_pickup(&mut self.board, &mut self.player, landing);
                 self.player.row -= 1;
                 self.player.col = nc;
                 self.player.bumped_direction = None;
-                return;
+                return [overhead_pickup, landing_pickup];
             }
         }
 
         self.player.bumped_direction = Some(dir);
+        [None, None]
     }
 
     /// 指定セルに静止中(Settling/Ticking)のボムがあるかどうか。
@@ -4214,6 +4241,77 @@ mod tests {
     }
 
     #[test]
+    fn try_move_right_climbing_under_an_overhead_item_applies_its_effect_and_emits_the_event() {
+        // #244: 自分の真上のアイテムは段差登りを妨げず、登る際に取得して効果も発動する。
+        let mut game = Game::new(74);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場(横移動には支持が必要)
+        game.board.rows[500][6] = Cell::Color(ColorKind::Red); // ぶつかる壁
+        game.board.rows[499][5] = Cell::Item(ItemEffect::ClearAbove); // 自分の真上
+        game.board.rows[200][4] = Cell::Color(ColorKind::Red); // 効果の確認用
+
+        let first_events = game.try_move_right(); // 1回目: ぶつかって停止
+
+        assert_eq!(game.player.row, 500, "1回目では登らない");
+        assert!(first_events.is_empty());
+        assert_eq!(
+            game.board.cell(499, 5),
+            Cell::Item(ItemEffect::ClearAbove),
+            "登っていないのでアイテムも取得しない"
+        );
+
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        let second_events = game.try_move_right(); // 2回目: 取得しながら登る
+
+        assert_eq!(game.player.row, 499, "1段登った");
+        assert_eq!(game.player.col, 6);
+        assert_eq!(game.board.cell(499, 5), Cell::Empty); // アイテムは消費された
+        assert!(
+            second_events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::ClearAbove)))
+        );
+        assert!(
+            matches!(game.board.cell(200, 4), Cell::Empty),
+            "ショートカットRと同じく頭上のブロックが全クリアされるはず"
+        );
+    }
+
+    #[test]
+    fn try_move_right_climbing_through_two_oxygen_capsules_emits_a_single_oxygen_event() {
+        // 頭上と登り先の2マスぶんAIRを取得しても、SEは重力ティック経路と同じく
+        // 1回にまとめる(#244)。
+        let mut game = Game::new(74);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.oxygen = 40.0;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][6] = Cell::Rock { hits: 0 }; // ぶつかる壁
+        game.board.rows[499][5] = Cell::Oxygen; // 自分の真上
+        game.board.rows[499][6] = Cell::Oxygen; // 登り先
+
+        game.try_move_right(); // 1回目: ぶつかって停止
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        let events = game.try_move_right(); // 2回目: 2個取得しながら登る
+
+        assert_eq!(game.player.row, 499);
+        assert_eq!(game.player.col, 6);
+        assert_eq!(game.player.oxygen_capsules_collected, 2);
+        assert_eq!(game.player.score, 300); // 100(1個目)+200(2個目)
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::OxygenCollected))
+                .count(),
+            1,
+            "2個まとめて取得してもOxygenCollectedは1回だけ"
+        );
+    }
+
+    #[test]
     fn move_right_stays_put_when_both_the_adjacent_and_upper_cell_are_blocked() {
         let mut game = Game::new(7);
         game.player.row = 1;
@@ -6567,6 +6665,87 @@ mod tests {
             "登った先がボムで塞がっているので登れないはず"
         );
         assert_eq!(game.player.col, 5, "移動しないはず");
+    }
+
+    #[test]
+    fn climbing_over_a_bomb_collects_an_overhead_item_and_a_capsule_on_the_landing_cell() {
+        // ボム越えの登りも`move_lateral`と同じく、頭上・登り先のAIR・アイテムに
+        // 妨げられず、通過しながら取得する(#244)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.player.oxygen = 40.0;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][7] = Cell::Rock { hits: 0 }; // 押し出し先を塞ぐ壁
+        game.board.rows[499][5] = Cell::Item(ItemEffect::ClearAbove); // 自分の真上
+        game.board.rows[499][6] = Cell::Oxygen; // 登り先
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right(); // 1回目: ぶつかって停止
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        let events = game.try_move_right(); // 2回目: 取得しながら登る
+
+        assert_eq!(game.player.row, 499, "1段登った");
+        assert_eq!(game.player.col, 6);
+        assert_eq!(game.board.cell(499, 5), Cell::Empty); // アイテムは消費された
+        assert_eq!(game.board.cell(499, 6), Cell::Empty); // カプセルも消費された
+        assert_eq!(
+            game.player.oxygen,
+            40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::OxygenCollected))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ItemCollected(ItemEffect::ClearAbove)))
+        );
+        assert_eq!(game.bombs[0].pos, (500, 6), "ボムは押し出されず残ったまま");
+    }
+
+    #[test]
+    fn climbing_over_a_bomb_leaves_the_overhead_item_when_the_landing_cell_is_blocked() {
+        // 登り先が塞がっていて登れない場合、頭上のアイテムも取得せず残る(#244)。
+        let mut game = Game::new(1);
+        clear_board(&mut game);
+        game.player.row = 500;
+        game.player.col = 5;
+        game.board.rows[501][5] = Cell::Rock { hits: 0 }; // 足場
+        game.board.rows[500][7] = Cell::Rock { hits: 0 }; // 押し出し先を塞ぐ壁
+        game.board.rows[499][5] = Cell::Item(ItemEffect::ClearAbove); // 自分の真上
+        game.board.rows[499][6] = Cell::Rock { hits: 0 }; // 登り先を塞ぐ
+        game.bombs.push(Bomb {
+            pos: (500, 6),
+            origin: (500, 0),
+            phase: BombPhase::Ticking,
+            phase_elapsed_ms: 0,
+            remaining_ms: BOMB_FUSE_MS,
+            settle_bounce_dir: 1,
+        });
+
+        game.try_move_right(); // 1回目
+        game.move_cooldown_accum = Duration::from_millis(INPUT_COOLDOWN_MS);
+        let events = game.try_move_right(); // 2回目でも登れない
+
+        assert_eq!(game.player.row, 500, "登れていないはず");
+        assert_eq!(game.player.col, 5, "移動しないはず");
+        assert_eq!(
+            game.board.cell(499, 5),
+            Cell::Item(ItemEffect::ClearAbove),
+            "登れていないので頭上のアイテムは取得されない"
+        );
+        assert!(events.is_empty());
     }
 
     #[test]

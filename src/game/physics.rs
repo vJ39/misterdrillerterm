@@ -5,9 +5,9 @@
 
 use crate::constants::OXYGEN_DECAY_PER_SEC;
 use crate::game::board::{
-    BlockMove, Board, Cell, GravityState, ItemEffect, Pos, RockHitResult, apply_gravity_tick,
-    connected_rock_group, connected_same_color, drill_color_block, hit_rock, is_group_supported,
-    is_supported,
+    BlockMove, Board, Cell, GravityState, ItemEffect, Pickup, Pos, RockHitResult,
+    apply_gravity_tick, connected_rock_group, connected_same_color, drill_color_block, hit_rock,
+    is_group_supported, is_supported,
 };
 use crate::game::player::{Direction, Player};
 
@@ -98,14 +98,16 @@ pub enum LateralOutcome {
     /// 出し側)が行う
     MovedLevelAndCollectedItem(ItemEffect),
     /// 直前に同じ方向へぶつかって停止していた状態で、再度同じ方向キーが入力され、
-    /// かつその1段上(row-1)のマスがEmptyだったため、1段登って斜め上のマスへ移動した
-    ClimbedStep,
-    /// 上記と同様に1段登ったが、登った先(row-1)が酸素カプセルだったため取得も行った
-    /// (TERM独自拡張、下記参照)
-    ClimbedStepAndCollectedOxygen,
-    /// 上記と同様に1段登ったが、登った先(row-1)がアイテムブロックだったため取得も
-    /// 行った(TERM独自拡張)
-    ClimbedStepAndCollectedItem(ItemEffect),
+    /// かつ自分の真上と登り先(どちらもrow-1)が物理ブロックで塞がっていなかったため、
+    /// 1段登って斜め上のマスへ移動した。
+    ///
+    /// 道中で通過した2マス(`overhead`=自分の真上だったマス、`landing`=登った先の
+    /// マス)にAIR・アイテムブロックがあれば、触れた時点で取得しその内容を持つ
+    /// (TERM独自拡張、下記参照)。何も無かったマスは`None`になる。
+    ClimbedStep {
+        overhead: Option<Pickup>,
+        landing: Option<Pickup>,
+    },
     /// 隣接マスが塞がっていたため、その場に留まった(facingの変更のみ反映され、
     /// ブロックは一切破壊されない)。1段上が空いていても、まだ「同じ方向への
     /// 2回目の入力」でなければ登らない(下記move_lateralの2ステップ仕様を参照)
@@ -129,13 +131,19 @@ pub enum LateralOutcome {
 ///   「その方向にぶつかって止まっている」ことを`player.bumped_direction`に記憶する
 /// - 直前のフレーム/入力で同じ方向にぶつかって停止していた状態で、再度同じ方向キーが
 ///   入力され、かつ1段上のマスが空いていれば、そこで初めて1段登って斜め上へ移動する
-///   (1段上が酸素カプセルの場合も同様に登りながら取得する)
+///   (1段上が酸素カプセル・アイテムブロックの場合も同様に登りながら取得する)
 /// - 方向を変えずに同じ方向へ2回連続で入力しないと登れない。別の方向キーを挟んだ場合は
 ///   `bumped_direction`が新しい方向で上書きされ、また1回目からやり直しになる
-/// - **キャラ自身の真上(player.row-1, player.col)がブロックで塞がっている場合は、
-///   登り先(1段上・隣の列)が空いていても一切登れない**(TERM独自拡張。ユーザー指摘:
-///   「キャラの上にブロックがある場合は1段登ることはできないものとする」。頭上が
-///   塞がっている状態で斜めに登り抜けるのは不自然なため)
+/// - **キャラ自身の真上(player.row-1, player.col)が物理ブロック(色・岩・ダイヤ・
+///   スター)で塞がっている場合は、登り先(1段上・隣の列)が空いていても一切登れない**
+///   (TERM独自拡張。ユーザー指摘: 「キャラの上にブロックがある場合は1段登ることは
+///   できないものとする」。頭上が塞がっている状態で斜めに登り抜けるのは不自然なため)。
+///   AIR・アイテムブロックは「触れるだけで取得できる」通過可能なマスなので頭上を
+///   塞がず、通り抜けながら取得して登る(ユーザー指摘: 「登りたいブロック状に
+///   アイテムがあるとのぼれないバグ」「登ったらアイテムとってほしい」)
+/// - 取得は「実際にそのマスへ踏み込んだ」時のみ発生する。頭上が通過可能でも登り先が
+///   物理ブロックで塞がっていれば登り自体が成立しないため、頭上のAIR・アイテムも
+///   取得しないまま残る
 ///
 /// どちらのマスも塞がっていれば、何度入力してもその場に留まる(ブロックは一切破壊されず、
 /// そのまま残る)。フィールド端(列0の左、列11の右)へ向けた入力は何も起きない
@@ -179,33 +187,21 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
         _ => {}
     }
 
-    if was_bumped_same_dir
-        && player.row > 0
-        && board.cell(player.row - 1, player.col) == Cell::Empty
-    {
-        match board.cell(player.row - 1, nc) {
-            Cell::Empty => {
-                player.row -= 1;
-                player.col = nc;
-                player.bumped_direction = None;
-                return LateralOutcome::ClimbedStep;
-            }
-            Cell::Oxygen => {
-                board.set(player.row - 1, nc, Cell::Empty);
-                player.collect_oxygen_capsule();
-                player.row -= 1;
-                player.col = nc;
-                player.bumped_direction = None;
-                return LateralOutcome::ClimbedStepAndCollectedOxygen;
-            }
-            Cell::Item(effect) => {
-                board.set(player.row - 1, nc, Cell::Empty);
-                player.row -= 1;
-                player.col = nc;
-                player.bumped_direction = None;
-                return LateralOutcome::ClimbedStepAndCollectedItem(effect);
-            }
-            _ => {}
+    if was_bumped_same_dir && player.row > 0 {
+        let overhead_pos = (player.row - 1, player.col);
+        let landing_pos = (player.row - 1, nc);
+        // 取得(セルの消費)より先に、頭上・登り先の両方が通過可能かを確かめる。
+        // 登り先が塞がっていて登れない場合に頭上だけ取得してしまうのを防ぐ。
+        if is_climb_passable(board.cell(overhead_pos.0, overhead_pos.1))
+            && is_climb_passable(board.cell(landing_pos.0, landing_pos.1))
+        {
+            // 物理的に通過する順(頭上→登り先)で取得する。
+            let overhead = take_climb_pickup(board, player, overhead_pos);
+            let landing = take_climb_pickup(board, player, landing_pos);
+            player.row -= 1;
+            player.col = nc;
+            player.bumped_direction = None;
+            return LateralOutcome::ClimbedStep { overhead, landing };
         }
     }
 
@@ -213,6 +209,42 @@ pub fn move_lateral(board: &mut Board, player: &mut Player, dir: Direction) -> L
     // 「この方向にぶつかって止まっている」ことを記憶し、次の同方向入力で登れるようにする。
     player.bumped_direction = Some(dir);
     LateralOutcome::Blocked
+}
+
+/// 段差登りの道中(自分の真上・登り先)として通過できるセルかどうか(TERM独自拡張)。
+///
+/// 物理ブロック(色・岩・ダイヤ・スター)は通過できない。AIR・アイテムブロックは
+/// 「触れるだけで取得できる」ため通過でき、通り抜ける際に`take_climb_pickup`で取得する。
+/// ボムは`Cell`グリッド外のオーバーレイなので、この判定には含まれない(ゲーム側で
+/// 別途チェックする)。段差登りを扱う全経路(`move_lateral`・押し出せないボムの
+/// 登り越え・オートプレイの登り可否判定)で同じ基準を使うため公開している。
+pub fn is_climb_passable(cell: Cell) -> bool {
+    matches!(cell, Cell::Empty | Cell::Oxygen | Cell::Item(_))
+}
+
+/// 段差登りで通過するマス`at`の中身を取得する(TERM独自拡張)。AIR・アイテムブロックが
+/// あればそのマスをEmptyにして取得内容を返し、Emptyなら`None`を返す。AIRのスコア・酸素
+/// 回復はこの呼び出し内で適用し、アイテム効果の発動だけは呼び出し側(`Game`)に委ねる。
+///
+/// 通過可能かの確認(`is_climb_passable`)は呼び出し側で済ませている前提で、物理ブロック
+/// が来た場合は何もせず`None`を返す(セルは壊さない)。
+pub fn take_climb_pickup(
+    board: &mut Board,
+    player: &mut Player,
+    at: (usize, usize),
+) -> Option<Pickup> {
+    match board.cell(at.0, at.1) {
+        Cell::Oxygen => {
+            board.set(at.0, at.1, Cell::Empty);
+            player.collect_oxygen_capsule();
+            Some(Pickup::Oxygen)
+        }
+        Cell::Item(effect) => {
+            board.set(at.0, at.1, Cell::Empty);
+            Some(Pickup::Item(effect))
+        }
+        _ => None,
+    }
 }
 
 /// facingがUpの掘削対象セル`target`が「不安定」(支えを失い、かつ揺れの猶予期間も
@@ -572,7 +604,13 @@ mod tests {
         let second = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登る
 
         assert_eq!(first, LateralOutcome::Blocked);
-        assert_eq!(second, LateralOutcome::ClimbedStep);
+        assert_eq!(
+            second,
+            LateralOutcome::ClimbedStep {
+                overhead: None,
+                landing: None,
+            }
+        );
         assert_eq!(player.row, 0); // 1段登った
         assert_eq!(player.col, target_col);
         assert_eq!(player.facing, Direction::Right);
@@ -593,7 +631,13 @@ mod tests {
         move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
         let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登る
 
-        assert_eq!(outcome, LateralOutcome::ClimbedStep);
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: None,
+                landing: None,
+            }
+        );
         assert_eq!(player.row, 0);
         assert_eq!(player.col, target_col);
         // 岩ブロックはヒットを受けず、そのまま残る
@@ -704,7 +748,13 @@ mod tests {
         move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
         let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登りながら取得
 
-        assert_eq!(outcome, LateralOutcome::ClimbedStepAndCollectedOxygen);
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: None,
+                landing: Some(Pickup::Oxygen),
+            }
+        );
         assert_eq!(player.row, 0);
         assert_eq!(player.col, target_col);
         assert_eq!(player.oxygen, crate::constants::OXYGEN_MAX); // 既に満タンなのでクランプされる
@@ -734,6 +784,235 @@ mod tests {
         );
         assert_eq!(player.score, 100);
         assert_eq!(board.cell(0, target_col), Cell::Empty);
+    }
+
+    #[test]
+    fn move_lateral_climbs_when_an_item_is_directly_above_the_player_and_collects_it() {
+        // #244(ユーザー報告: 「登りたいブロック状にアイテムがあるとのぼれないバグ」
+        // 「登ったらアイテムとってほしい」): 自分の真上がアイテムブロックでも、AIRと
+        // 同じ通過可能なマスなので登れる。通り抜ける際に取得もする。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Color(ColorKind::Red); // 隣は塞がっている
+        board.rows[player.row - 1][player.col] = Cell::Item(ItemEffect::ClearAbove); // 頭上のアイテム
+        // 登り先(row-1, target_col)はEmptyのまま
+
+        move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登りながら取得
+
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: Some(Pickup::Item(ItemEffect::ClearAbove)),
+                landing: None,
+            }
+        );
+        assert_eq!(player.row, 0);
+        assert_eq!(player.col, target_col);
+        assert_eq!(player.bumped_direction, None);
+        assert_eq!(board.cell(0, target_col - 1), Cell::Empty); // 頭上のアイテムは消費された
+        // 隣の色ブロックは破壊されずそのまま残る
+        assert_eq!(board.cell(1, target_col), Cell::Color(ColorKind::Red));
+        assert_eq!(player.score, 0); // アイテムは得点対象ではない
+    }
+
+    #[test]
+    fn move_lateral_climbs_when_oxygen_is_directly_above_the_player_and_collects_it() {
+        // 頭上がAIRカプセルの場合も同様に登れて、通り抜ける際に取得する(#244)。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        player.oxygen = 40.0;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Color(ColorKind::Red);
+        board.rows[player.row - 1][player.col] = Cell::Oxygen; // 頭上のAIR
+
+        move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登りながら取得
+
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: Some(Pickup::Oxygen),
+                landing: None,
+            }
+        );
+        assert_eq!(player.row, 0);
+        assert_eq!(player.col, target_col);
+        assert_eq!(
+            player.oxygen,
+            40.0 + crate::constants::OXYGEN_CAPSULE_RESTORE
+        );
+        assert_eq!(player.score, 100); // 1個目の取得スコア(spec.md 7章)
+        assert_eq!(board.cell(0, target_col - 1), Cell::Empty); // カプセルは消費された
+    }
+
+    #[test]
+    fn move_lateral_collects_both_overhead_and_landing_items_when_climbing() {
+        // 頭上と登り先の両方にアイテムがある場合、通過する順(頭上→登り先)で
+        // 両方取得する(#244)。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Rock { hits: 0 }; // 隣は塞がっている
+        board.rows[player.row - 1][player.col] = Cell::Item(ItemEffect::UnifyColors); // 頭上
+        board.rows[player.row - 1][target_col] = Cell::Item(ItemEffect::StarifyScreen); // 登り先
+
+        move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登る
+
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: Some(Pickup::Item(ItemEffect::UnifyColors)),
+                landing: Some(Pickup::Item(ItemEffect::StarifyScreen)),
+            }
+        );
+        assert_eq!(player.row, 0);
+        assert_eq!(player.col, target_col);
+        assert_eq!(board.cell(0, target_col - 1), Cell::Empty); // 頭上のアイテムは消費された
+        assert_eq!(board.cell(0, target_col), Cell::Empty); // 登り先のアイテムも消費された
+        assert!(matches!(board.cell(1, target_col), Cell::Rock { hits: 0 })); // 岩は残る
+    }
+
+    #[test]
+    fn move_lateral_collects_two_oxygen_capsules_when_both_overhead_and_landing_hold_one() {
+        // 頭上・登り先の両方がAIRなら2個ぶん取得する(スコアは1個目100+2個目200=300、
+        // 酸素は上限でクランプされる。#244)。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        player.oxygen = 40.0;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Rock { hits: 0 };
+        board.rows[player.row - 1][player.col] = Cell::Oxygen; // 頭上
+        board.rows[player.row - 1][target_col] = Cell::Oxygen; // 登り先
+
+        move_lateral(&mut board, &mut player, Direction::Right); // 1回目: ぶつかって停止
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目: 登る
+
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: Some(Pickup::Oxygen),
+                landing: Some(Pickup::Oxygen),
+            }
+        );
+        assert_eq!(player.oxygen, OXYGEN_MAX); // 40+50+50は上限でクランプされる
+        assert_eq!(player.score, 300); // 100(1個目)+200(2個目)
+        assert_eq!(player.oxygen_capsules_collected, 2);
+        assert_eq!(board.cell(0, target_col - 1), Cell::Empty);
+        assert_eq!(board.cell(0, target_col), Cell::Empty);
+    }
+
+    #[test]
+    fn move_lateral_first_press_does_not_collect_the_overhead_item() {
+        // 2ステップ仕様は維持する: 1回目の入力では登らないので、頭上のアイテムも
+        // 取得せずそのまま残る(#244)。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Color(ColorKind::Red);
+        board.rows[player.row - 1][player.col] = Cell::Item(ItemEffect::ClearAbove);
+
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right);
+
+        assert_eq!(outcome, LateralOutcome::Blocked);
+        assert_eq!(player.row, 1); // 登っていない
+        assert_eq!(player.col, target_col - 1); // 移動していない
+        assert_eq!(player.bumped_direction, Some(Direction::Right));
+        assert_eq!(
+            board.cell(0, target_col - 1),
+            Cell::Item(ItemEffect::ClearAbove),
+            "登っていないので頭上のアイテムは取得されない"
+        );
+    }
+
+    #[test]
+    fn move_lateral_does_not_collect_the_overhead_item_when_the_landing_cell_is_blocked() {
+        // 登り先が物理ブロックで塞がっていれば登り自体が成立しないため、頭上の
+        // アイテムも取得せず残る(取得は実際に踏み込んだ時のみ。#244)。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        let target_col = player.col + 1;
+        board.rows[player.row][target_col] = Cell::Rock { hits: 0 }; // 隣
+        board.rows[player.row - 1][player.col] = Cell::Item(ItemEffect::ClearAbove); // 頭上
+        board.rows[player.row - 1][target_col] = Cell::Color(ColorKind::Blue); // 登り先を塞ぐ
+
+        move_lateral(&mut board, &mut player, Direction::Right); // 1回目
+        let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目でも登れない
+
+        assert_eq!(outcome, LateralOutcome::Blocked);
+        assert_eq!(player.row, 1);
+        assert_eq!(player.col, target_col - 1);
+        assert_eq!(
+            board.cell(0, target_col - 1),
+            Cell::Item(ItemEffect::ClearAbove),
+            "登れていないので頭上のアイテムは取得されない"
+        );
+        assert_eq!(board.cell(0, target_col), Cell::Color(ColorKind::Blue));
+    }
+
+    #[test]
+    fn move_lateral_still_refuses_to_climb_under_a_physical_block() {
+        // 「キャラの上にブロックがある場合は1段登ることはできない」という元の仕様は
+        // 維持する。物理ブロック4種いずれでも登れない。
+        for overhead in [
+            Cell::Color(ColorKind::Red),
+            Cell::Rock { hits: 0 },
+            Cell::Diamond,
+            Cell::Star { visible_ms: 0 },
+        ] {
+            let mut board = empty_board(3);
+            let mut player = Player::new();
+            player.row = 1;
+            let target_col = player.col + 1;
+            board.rows[player.row][target_col] = Cell::Color(ColorKind::Red);
+            board.rows[player.row - 1][player.col] = overhead;
+
+            move_lateral(&mut board, &mut player, Direction::Right); // 1回目
+            let outcome = move_lateral(&mut board, &mut player, Direction::Right); // 2回目
+
+            assert_eq!(
+                outcome,
+                LateralOutcome::Blocked,
+                "頭上が{overhead:?}なら登れないはず"
+            );
+            assert_eq!(player.row, 1);
+            assert_eq!(player.col, target_col - 1);
+            assert_eq!(board.cell(0, target_col - 1), overhead); // 頭上のブロックも残る
+        }
+    }
+
+    #[test]
+    fn move_lateral_left_climbs_under_an_overhead_item_too() {
+        // #244の左右対称性: Left方向でも頭上のアイテムを取得しながら登れる。
+        let mut board = empty_board(3);
+        let mut player = Player::new();
+        player.row = 1;
+        let target_col = player.col - 1;
+        board.rows[player.row][target_col] = Cell::Color(ColorKind::Red);
+        board.rows[player.row - 1][player.col] = Cell::Item(ItemEffect::ClearAbove);
+
+        move_lateral(&mut board, &mut player, Direction::Left); // 1回目: ぶつかって停止
+        let outcome = move_lateral(&mut board, &mut player, Direction::Left); // 2回目: 登る
+
+        assert_eq!(
+            outcome,
+            LateralOutcome::ClimbedStep {
+                overhead: Some(Pickup::Item(ItemEffect::ClearAbove)),
+                landing: None,
+            }
+        );
+        assert_eq!(player.row, 0);
+        assert_eq!(player.col, target_col);
+        assert_eq!(board.cell(0, target_col + 1), Cell::Empty); // 頭上のアイテムは消費された
+        assert_eq!(board.cell(1, target_col), Cell::Color(ColorKind::Red));
     }
 
     // --- Drill(Space): 移動せず掘削、facing=Downの時だけ降下 ---

@@ -48,6 +48,17 @@ pub enum ItemEffect {
     StarifyScreen,
 }
 
+/// 「触れるだけで取得できる」セル(AIR・アイテムブロック)を実際に取得した内容
+/// (TERM独自拡張)。段差登りのように1回の入力で複数マスを通過しうる経路では、
+/// どのマスで何を取得したかを取りまとめて呼び出し側へ返すために使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pickup {
+    /// 酸素カプセル(酸素+50・スコア加算は取得時点で適用済み)
+    Oxygen,
+    /// アイテムブロック。効果の発動自体は`Game`(呼び出し側)が行う
+    Item(ItemEffect),
+}
+
 /// 色ブロックの色種別。初代は4色(赤・青・緑・黄)。紫は存在しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorKind {

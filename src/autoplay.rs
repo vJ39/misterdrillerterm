@@ -194,6 +194,7 @@ use crate::constants::{
     ROCK_HITS_TO_BREAK, depth_fraction,
 };
 use crate::game::board::{Cell, ItemEffect, connected_same_color};
+use crate::game::physics;
 use crate::game::player::Direction;
 use crate::game::{BombPhase, Game, GameStatus, InputAction};
 
@@ -1421,25 +1422,23 @@ impl Autopilot {
     }
 
     /// `dir`へ段差登り(`physics::move_lateral`)が実際に成立するか。`move_lateral`の
-    /// 成立条件をそのまま写したもの: 接地していること・自分の頭上が空いていること・
-    /// 隣が固体(=ぶつかれる)であること・登り先の1マス斜め上が入れるマスであること。
-    /// 静止ボムは押し出し/登り判定がゲーム側の別経路になるため、どちらの位置でも
-    /// 「登れない」として扱う。
+    /// 成立条件をそのまま写したもの: 接地していること・自分の頭上が通過可能である
+    /// こと(物理ブロックで塞がっていないこと。AIR・アイテムは通り抜けながら取得
+    /// できるため塞がっているとは扱わない)・隣が固体(=ぶつかれる)であること・
+    /// 登り先の1マス斜め上が入れるマスであること。静止ボムは押し出し/登り判定が
+    /// ゲーム側の別経路になるため、どちらの位置でも「登れない」として扱う。
     fn can_climb_step(&self, game: &Game, dir: Direction) -> bool {
         let (row, col) = game.player.position();
         if row == 0 || !game.player_is_grounded() {
             return false;
         }
-        if game.board.cell(row - 1, col) != Cell::Empty {
+        if !physics::is_climb_passable(game.board.cell(row - 1, col)) {
             return false;
         }
         let Some(side) = neighbor(game, (row, col), dir) else {
             return false;
         };
-        let side_is_solid = !matches!(
-            game.board.cell(side.0, side.1),
-            Cell::Empty | Cell::Oxygen | Cell::Item(_)
-        );
+        let side_is_solid = !physics::is_climb_passable(game.board.cell(side.0, side.1));
         if !side_is_solid || settled_bomb_at(game, side) {
             return false;
         }
@@ -3022,6 +3021,43 @@ mod tests {
             game.board.rows[499][col] = Cell::Rock { hits: 0 }; // 斜め上も塞がる=棚が無い
         }
         game
+    }
+
+    #[test]
+    fn can_climb_step_allows_air_or_an_item_directly_above_the_player() {
+        // #244で`move_lateral`が「頭上のAIR・アイテムは通過して取得しながら登る」に
+        // 変わったため、登り可否の判定もそれに揃える(揃っていないと、実際には登れる
+        // のにAIだけが登れないと判断して手が食い違う)。
+        let pilot = Autopilot::new(false);
+        for overhead in [
+            Cell::Empty,
+            Cell::Oxygen,
+            Cell::Item(ItemEffect::ClearAbove),
+        ] {
+            let mut game = grounded_game_at(70, 500, 5);
+            game.board.rows[500][6] = Cell::Rock { hits: 0 }; // ぶつかれる壁
+            game.board.rows[499][5] = overhead;
+
+            assert!(
+                pilot.can_climb_step(&game, Direction::Right),
+                "頭上が{overhead:?}なら登れると判断するはず"
+            );
+        }
+        for overhead in [
+            Cell::Color(ColorKind::Red),
+            Cell::Rock { hits: 0 },
+            Cell::Diamond,
+            Cell::Star { visible_ms: 0 },
+        ] {
+            let mut game = grounded_game_at(70, 500, 5);
+            game.board.rows[500][6] = Cell::Rock { hits: 0 };
+            game.board.rows[499][5] = overhead;
+
+            assert!(
+                !pilot.can_climb_step(&game, Direction::Right),
+                "頭上が{overhead:?}なら登れないと判断するはず"
+            );
+        }
     }
 
     /// 棚が無い壁に対しては段差登りを出さない(#229 F1)。以前は`side_preference`側に
