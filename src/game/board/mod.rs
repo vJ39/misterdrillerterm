@@ -13,6 +13,12 @@ use crate::constants::{
     STAR_MELT_DURATION_MS, STAR_VISIBLE_GRACE_MS, depth_fraction,
 };
 
+mod connect;
+mod star;
+
+pub use connect::*;
+pub use star::*;
+
 /// フィールド1マスの内容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
@@ -814,106 +820,6 @@ impl Board {
     }
 }
 
-/// 盤面上の`start`を起点に、4方向で`same_kind`を満たすセルに連結している全セルを求める
-/// 汎用BFS(spec.md 4章)。色ブロックの同色連結・岩ブロックの連結(hitsに関わらず全て
-/// 同種とみなす)の両方がこの1つの実装を共有する。
-fn connected_group(
-    board: &Board,
-    start: (usize, usize),
-    same_kind: impl Fn(Cell) -> bool,
-) -> Vec<(usize, usize)> {
-    let depth_rows = board.depth_rows();
-    let mut visited: HashSet<(usize, usize)> = HashSet::new();
-    let mut stack = vec![start];
-    visited.insert(start);
-    let mut group = Vec::new();
-
-    while let Some((r, c)) = stack.pop() {
-        group.push((r, c));
-
-        let neighbors = [
-            (r.wrapping_sub(1), c),
-            (r + 1, c),
-            (r, c.wrapping_sub(1)),
-            (r, c + 1),
-        ];
-        for (nr, nc) in neighbors {
-            if nr >= depth_rows || nc >= board.width() {
-                continue;
-            }
-            if visited.contains(&(nr, nc)) {
-                continue;
-            }
-            if same_kind(board.cell(nr, nc)) {
-                visited.insert((nr, nc));
-                stack.push((nr, nc));
-            }
-        }
-    }
-
-    group
-}
-
-/// 盤面上の`start`を起点に、4方向で`color`に連結している全セルを求める(spec.md 4章)。
-/// サイズに関わらず(1個の孤立ブロックでも)全て列挙する。呼び出し側が
-/// 「即時消滅(4.6、サイズ問わず)」「自動消滅(4.5、サイズ4以上のみ)」を使い分ける。
-pub fn connected_same_color(
-    board: &Board,
-    start: (usize, usize),
-    color: ColorKind,
-) -> Vec<(usize, usize)> {
-    connected_group(board, start, |cell| cell == Cell::Color(color))
-}
-
-/// 盤面上の`start`を起点に、4方向で連結している岩ブロック(Xブロック)を全て求める
-/// (spec.md 4.1・4.9)。個々のセルの`hits`値に関わらず、岩ブロックであれば全て同種として
-/// 連結対象になる(色ブロックの「同色」に相当する条件が岩ブロックでは「岩であること」)。
-pub fn connected_rock_group(board: &Board, start: (usize, usize)) -> Vec<(usize, usize)> {
-    connected_group(board, start, |cell| matches!(cell, Cell::Rock { .. }))
-}
-
-/// プレイヤーが色ブロックを直接掘削した際の即時消滅処理(spec.md 4.6)。掘削セルを起点に
-/// 4方向連結の同色グループをサイズに関わらず全体消滅させる。色ブロック以外なら0を返す。
-/// 戻り値は消滅させたブロック数(呼び出し側が「消滅数 × 10点」を加算する。spec.md 7章)。
-pub fn drill_color_block(board: &mut Board, target: (usize, usize)) -> usize {
-    let Cell::Color(color) = board.cell(target.0, target.1) else {
-        return 0;
-    };
-    let group = connected_same_color(board, target, color);
-    for &(r, c) in &group {
-        board.set(r, c, Cell::Empty);
-    }
-    group.len()
-}
-
-/// 岩ブロックへの1ヒットの結果(spec.md 2章・4章・6章)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RockHitResult {
-    /// 5回未満のヒットで、まだ破壊に至らない(セルの内容はそのまま、ヒット数だけ進む)
-    StillIntact,
-    /// 累積5回目のヒットで破壊された。連結していても消えるのはヒットした1ブロックのみ。
-    /// `blocks`は消滅した総数(現仕様では常に1)
-    Destroyed { blocks: usize },
-}
-
-/// 岩ブロックへ1ヒット加える。`target`が岩ブロックでない場合はNoneを返す。
-/// 5回目のヒットで破壊されるのはヒットしたそのセル1個のみ(連結した岩は巻き込まれない)。
-/// 酸素ペナルティは呼び出し側が1回だけ適用する。
-pub fn hit_rock(board: &mut Board, target: (usize, usize)) -> Option<RockHitResult> {
-    let Cell::Rock { hits } = board.cell(target.0, target.1) else {
-        return None;
-    };
-    let hits = hits + 1;
-    if hits >= ROCK_HITS_TO_BREAK {
-        // 岩ブロックは色ブロックと異なり、連結していても消えるのはヒットした1ブロックのみ。
-        board.set(target.0, target.1, Cell::Empty);
-        Some(RockHitResult::Destroyed { blocks: 1 })
-    } else {
-        board.set(target.0, target.1, Cell::Rock { hits });
-        Some(RockHitResult::StillIntact)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 4章 落下・連結・消滅ロジック
 // ---------------------------------------------------------------------------
@@ -1368,45 +1274,6 @@ pub fn apply_gravity_tick(
     outcome
 }
 
-/// 画面内(行±`STAR_VISIBLE_RANGE_ROWS`)のスターブロックの表示経過時間を実時間`delta_ms`
-/// ぶん進める。`STAR_VISIBLE_GRACE_MS`までは無傷、以後`STAR_MELT_DURATION_MS`かけて溶けて
-/// 消える。画面外は進まない。戻り値は消滅したスターの座標と直前のセル内容(デバッグログ用)。
-pub fn tick_star_melting(board: &mut Board, player_row: usize, delta_ms: u32) -> Vec<(Pos, Cell)> {
-    let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
-    let row_start = player_row.saturating_sub(range);
-    let row_end = (player_row + range).min(board.depth_rows().saturating_sub(1));
-    let mut melted = Vec::new();
-    let vanish_at_ms = STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS;
-
-    let width = board.width();
-    for r in row_start..=row_end {
-        for c in 0..width {
-            if let Cell::Star { visible_ms } = board.cell(r, c) {
-                let updated = visible_ms.saturating_add(delta_ms);
-                if updated >= vanish_at_ms {
-                    board.set(r, c, Cell::Empty);
-                    melted.push((
-                        (r, c),
-                        Cell::Star {
-                            visible_ms: updated,
-                        },
-                    ));
-                } else {
-                    board.set(
-                        r,
-                        c,
-                        Cell::Star {
-                            visible_ms: updated,
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    melted
-}
-
 /// ボムの爆風が届くセル(原点を含む)を計算する。上下へ`row_range`・左右へ`col_range`マス
 /// ずつ伸ばす(軸ごとに画面内全域の大きさが異なるため距離を分離)。盤面外へは伸びない。
 /// 途中の岩・ダイヤで遮蔽されず、range・盤面境界まで届く(ショートカットKと同じ挙動)。
@@ -1444,7 +1311,7 @@ mod tests {
     use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
     use crate::constants::SHAKE_TICKS;
 
-    fn empty_board(rows: usize) -> Board {
+    pub(super) fn empty_board(rows: usize) -> Board {
         Board {
             rows: vec![vec![Cell::Empty; FIELD_WIDTH]; rows],
             width: FIELD_WIDTH,
@@ -2063,72 +1930,6 @@ mod tests {
         assert_eq!(
             diamond_count, 0,
             "ダイヤ配分率0%ならダイヤブロックは一切出現しないはず"
-        );
-    }
-
-    // --- スターブロックの実時間溶解 ---
-
-    #[test]
-    fn tick_star_melting_leaves_the_star_intact_within_the_grace_period() {
-        // 猶予時間(STAR_VISIBLE_GRACE_MS)未満しか経過していなければ、画面内であっても
-        // 溶解が始まらない(セルが残る)ことを確認する。
-        let mut board = empty_board(1);
-        board.rows[0][0] = Cell::Star { visible_ms: 0 };
-
-        let melted = tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS - 1);
-
-        assert_eq!(melted.len(), 0, "猶予時間未満では消滅しないはず");
-        assert!(
-            matches!(board.cell(0, 0), Cell::Star { .. }),
-            "猶予時間未満ではまだスターのままのはず"
-        );
-    }
-
-    #[test]
-    fn tick_star_melting_vanishes_after_grace_period_plus_melt_duration_elapses() {
-        let mut board = empty_board(1);
-        board.rows[0][0] = Cell::Star { visible_ms: 0 };
-
-        let melted =
-            tick_star_melting(&mut board, 0, STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS);
-
-        assert_eq!(
-            melted,
-            vec![(
-                (0, 0),
-                Cell::Star {
-                    visible_ms: STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS
-                }
-            )],
-            "猶予時間+溶解時間が経過すれば1個消えるはず"
-        );
-        assert_eq!(
-            board.cell(0, 0),
-            Cell::Empty,
-            "溶け切ったスターは消えているはず"
-        );
-    }
-
-    #[test]
-    fn tick_star_melting_ignores_stars_outside_the_visible_range() {
-        // プレイヤーの画面外(行±STAR_VISIBLE_RANGE_ROWS)にあるスターブロックは
-        // 経過時間が進まないことを確認する。
-        let range = crate::constants::STAR_VISIBLE_RANGE_ROWS;
-        let far_row = range + 10;
-        let mut board = empty_board(far_row + 1);
-        board.rows[far_row][0] = Cell::Star { visible_ms: 0 };
-
-        let melted = tick_star_melting(
-            &mut board,
-            0,
-            STAR_VISIBLE_GRACE_MS + STAR_MELT_DURATION_MS + 1000,
-        );
-
-        assert_eq!(melted.len(), 0, "画面外のスターは溶解が進まないはず");
-        assert_eq!(
-            board.cell(far_row, 0),
-            Cell::Star { visible_ms: 0 },
-            "経過時間が進んでいないはず"
         );
     }
 
@@ -3064,118 +2865,6 @@ mod tests {
             ColorKind::Red,
             "色数1では代替色が無いため候補のまま返るはず"
         );
-    }
-
-    // --- 直接掘削による即時消滅(4.6、サイズ問わず) ---
-
-    #[test]
-    fn drill_color_block_removes_whole_connected_group_regardless_of_size() {
-        let mut board = empty_board(3);
-        board.rows[0][0] = Cell::Color(ColorKind::Red);
-        board.rows[0][1] = Cell::Color(ColorKind::Red);
-        board.rows[1][0] = Cell::Color(ColorKind::Red);
-        board.rows[0][2] = Cell::Color(ColorKind::Blue); // 別グループ
-
-        let removed = drill_color_block(&mut board, (0, 0));
-
-        assert_eq!(removed, 3);
-        assert_eq!(board.cell(0, 0), Cell::Empty);
-        assert_eq!(board.cell(0, 1), Cell::Empty);
-        assert_eq!(board.cell(1, 0), Cell::Empty);
-        assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Blue)); // 別グループは影響なし
-    }
-
-    #[test]
-    fn drill_color_block_removes_a_single_isolated_block_alone() {
-        // 孤立ブロック(4方向に同色隣接なし)を掘削すると、自分1個だけが消える(spec.md 4.6)。
-        let mut board = empty_board(3);
-        board.rows[1][1] = Cell::Color(ColorKind::Red); // 孤立
-        board.rows[0][1] = Cell::Color(ColorKind::Blue);
-        board.rows[2][1] = Cell::Color(ColorKind::Green);
-        board.rows[1][0] = Cell::Color(ColorKind::Yellow);
-        // rows[1][2] はEmptyのまま
-
-        let removed = drill_color_block(&mut board, (1, 1));
-
-        assert_eq!(removed, 1);
-        assert_eq!(board.cell(1, 1), Cell::Empty);
-        // 別色の隣接ブロックは影響を受けない
-        assert_eq!(board.cell(0, 1), Cell::Color(ColorKind::Blue));
-        assert_eq!(board.cell(2, 1), Cell::Color(ColorKind::Green));
-        assert_eq!(board.cell(1, 0), Cell::Color(ColorKind::Yellow));
-    }
-
-    #[test]
-    fn drill_color_block_on_non_color_cell_does_nothing() {
-        let mut board = empty_board(3);
-        board.rows[0][0] = Cell::Rock { hits: 0 };
-
-        let removed = drill_color_block(&mut board, (0, 0));
-
-        assert_eq!(removed, 0);
-        assert_eq!(board.cell(0, 0), Cell::Rock { hits: 0 });
-    }
-
-    // --- 岩ブロック: 5回目のヒットで破壊(spec.md 2章・4.9) ---
-
-    #[test]
-    fn rock_breaks_on_fifth_hit() {
-        let mut board = empty_board(1);
-        board.rows[0][0] = Cell::Rock { hits: 0 };
-
-        for _ in 0..4 {
-            let result = hit_rock(&mut board, (0, 0)).unwrap();
-            assert_eq!(result, RockHitResult::StillIntact);
-        }
-        assert!(matches!(board.cell(0, 0), Cell::Rock { hits: 4 }));
-
-        let result = hit_rock(&mut board, (0, 0)).unwrap();
-        assert_eq!(result, RockHitResult::Destroyed { blocks: 1 }); // 単独なので1個だけ消える
-        assert_eq!(board.cell(0, 0), Cell::Empty);
-    }
-
-    #[test]
-    fn rock_break_on_fifth_hit_vanishes_only_the_hit_block() {
-        // ユーザー指摘: 「Xブロックは結合してても全体が消えるのではなく1ブロックしか
-        // 消せないものとする」。連結している他の岩ブロックは、hitsに関わらず影響を
-        // 受けずそのまま残る(色ブロックとは違うルール)。
-        let mut board = empty_board(2);
-        board.rows[0][0] = Cell::Rock {
-            hits: ROCK_HITS_TO_BREAK - 1,
-        }; // あと1発で破壊
-        board.rows[0][1] = Cell::Rock { hits: 0 }; // 連結していても巻き込まれない
-        board.rows[1][0] = Cell::Rock { hits: 2 }; // 同上
-        board.rows[0][2] = Cell::Color(ColorKind::Red); // 別種、巻き込まれない
-
-        let result = hit_rock(&mut board, (0, 0)).unwrap();
-
-        assert_eq!(result, RockHitResult::Destroyed { blocks: 1 });
-        assert_eq!(board.cell(0, 0), Cell::Empty);
-        assert_eq!(
-            board.cell(0, 1),
-            Cell::Rock { hits: 0 },
-            "連結していた岩は影響を受けない"
-        );
-        assert_eq!(
-            board.cell(1, 0),
-            Cell::Rock { hits: 2 },
-            "連結していた岩は影響を受けない"
-        );
-        assert_eq!(board.cell(0, 2), Cell::Color(ColorKind::Red)); // 色ブロックは無関係
-    }
-
-    #[test]
-    fn connected_rock_group_ignores_hit_count_differences() {
-        let mut board = empty_board(1);
-        board.rows[0][0] = Cell::Rock { hits: 0 };
-        board.rows[0][1] = Cell::Rock { hits: 3 };
-        board.rows[0][2] = Cell::Color(ColorKind::Blue); // ここで途切れる
-
-        let group = connected_rock_group(&board, (0, 0));
-
-        assert_eq!(group.len(), 2);
-        assert!(group.contains(&(0, 0)));
-        assert!(group.contains(&(0, 1)));
     }
 
     // --- 重力: 揺れてから落下する(4.3) ---
