@@ -4,6 +4,7 @@
 mod app;
 mod audio;
 mod autoplay;
+mod battle;
 mod constants;
 mod debug_log;
 mod game;
@@ -29,8 +30,10 @@ use app::audio::{
     effective_gameplay_bgm_enabled, effective_title_bgm_enabled, play_se, should_restart_title_bgm,
 };
 use app::screens::{
-    tick_help_screen, tick_mode_select, tick_playing, tick_rewind, tick_settings_screen, tick_title,
+    tick_battle, tick_help_screen, tick_mode_select, tick_playing, tick_rewind,
+    tick_settings_screen, tick_title,
 };
+use battle::BattleState;
 use game::{Game, InputAction};
 use settings::Settings;
 
@@ -226,6 +229,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
                 None
             }
             Screen::Playing(game) => tick_playing(&mut app, game, terminal)?,
+            // 対戦中(#252)。通常プレイとは扱う入力もtickの刻み方も異なるため、
+            // `tick_playing`に分岐を混ぜず独立した関数へ渡す。
+            Screen::Battle(state) => tick_battle(&mut app, state, terminal)?,
             Screen::Settings => tick_settings_screen(&mut app, terminal)?,
             Screen::Help => tick_help_screen(&mut app, terminal)?,
             Screen::ModeSelect => tick_mode_select(&mut app, terminal)?,
@@ -319,6 +325,11 @@ enum Screen {
     Settings,
     Help,
     Playing(Box<Game>),
+    /// 対戦中(#252。spec.md 12章)。タイトルからの入口はUDP探索・ロビーUI(#256)で
+    /// 作るため、この段階ではどこからも構築されない(dead_code警告を抑止しているのは
+    /// そのため)。
+    #[allow(dead_code)]
+    Battle(Box<BattleState>),
 }
 
 /// 一時停止中にオーバーレイ表示する画面。`Screen::Playing`のまま

@@ -9,6 +9,11 @@ impl Game {
         self.game_over_selection
     }
 
+    /// 現在のコースのゴール深度(m)。対戦画面(#252)の相手の進捗バーが分母に使う。
+    pub fn depth_goal_m(&self) -> usize {
+        self.depth_goal_m
+    }
+
     /// 現在、無敵(ミス無効)かどうか。
     pub fn is_invincible(&self) -> bool {
         self.invincible

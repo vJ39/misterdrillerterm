@@ -18,6 +18,7 @@ use crate::app::settings_menu::{
     adjust_fall_speed_ms, adjust_field_width, adjust_move_cooldown_ms, adjust_rewind_stock_max,
     adjust_shake_duration_ms, adjust_sound_volume_percent, adjust_spawn_rate_setting,
 };
+use crate::battle::BattleState;
 use crate::constants::{
     ATTRACT_MODE_IDLE_MS, FRAME_INTERVAL_MS, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
 };
@@ -652,6 +653,109 @@ pub fn tick_playing(
     Ok(None)
 }
 
+/// 対戦中(`Screen::Battle`)に受け付ける入力の分類(#252。spec.md 12.5)。
+///
+/// 対戦中に使えない操作のための個別の無効化フラグは持たず、ここに挙げたもの以外を
+/// `Ignored`にすることで無効化を表す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BattleInput {
+    /// 対戦を中断してタイトルへ戻る。
+    Quit,
+    /// このtickの自分の入力として`lockstep::run_tick`へ渡す5操作。
+    Local(InputAction),
+    /// MUSICのトグル。音声はローカル専用でシミュレーションに影響しないため、
+    /// 通常プレイのPaused限定と異なり対戦中は常時受け付ける。
+    ToggleMusic,
+    /// SEのトグル。扱いは`ToggleMusic`と同じ。
+    ToggleSe,
+    /// 対戦中は無視する操作(一時停止・巻き戻し・設定/ヘルプ・デバッグ系等)。
+    Ignored,
+}
+
+/// 入力を対戦中の扱い(`BattleInput`)へ振り分ける。
+fn classify_battle_input(action: InputAction) -> BattleInput {
+    match action {
+        InputAction::MoveLeft
+        | InputAction::MoveRight
+        | InputAction::FaceUp
+        | InputAction::FaceDown
+        | InputAction::Drill => BattleInput::Local(action),
+        InputAction::ToggleMusic => BattleInput::ToggleMusic,
+        InputAction::ToggleSe => BattleInput::ToggleSe,
+        InputAction::Quit => BattleInput::Quit,
+        _ => BattleInput::Ignored,
+    }
+}
+
+/// このフレームにキューされた入力列から、このtickで自分の入力として採用する1つを選ぶ。
+/// 2つ目以降は次tickへ持ち越さず捨てる(1tickにつき高々1アクション。spec.md 12.2)。
+fn first_local_action(actions: &[InputAction]) -> Option<InputAction> {
+    actions
+        .iter()
+        .find_map(|&action| match classify_battle_input(action) {
+            BattleInput::Local(local) => Some(local),
+            _ => None,
+        })
+}
+
+/// 対戦中(`Screen::Battle`)の1フレーム(#252。spec.md 12章)。
+///
+/// 通常プレイの`tick_playing`とは独立した関数にしている(あちらへ対戦用の分岐を混ぜると
+/// さらに肥大化し、通常プレイ側の挙動を壊すリスクも生むため)。ゲームの進行は実測フレーム
+/// 時間を150ms固定tickへ量子化して`BattleState::advance`へ任せ、ここは入力の仕分けと
+/// 描画だけを行う。
+pub fn tick_battle(
+    app: &mut App,
+    state: &mut BattleState,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> io::Result<Option<ScreenTransition>> {
+    let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
+
+    for &action in &actions {
+        match classify_battle_input(action) {
+            // 対戦を中断してタイトルへ戻る。#254では「切断通知を送ってから戻る」処理を
+            // ここへ追加する。
+            BattleInput::Quit => return Ok(Some(ScreenTransition::ToTitleDiscardingGame)),
+            BattleInput::ToggleMusic => {
+                app.settings.music_enabled = !app.settings.music_enabled;
+                // 対戦画面ではタイトル用BGMは鳴らないため、プレイ中BGMのみ即時反映する。
+                app.gameplay_music_enabled
+                    .store(app.settings.music_enabled, Ordering::Relaxed);
+                app.settings.save();
+            }
+            BattleInput::ToggleSe => {
+                app.settings.se_enabled = !app.settings.se_enabled;
+                app.se_enabled
+                    .store(app.settings.se_enabled, Ordering::Relaxed);
+                app.settings.save();
+            }
+            // 自分の操作は1tickにつき高々1つのため、`first_local_action`でまとめて選ぶ。
+            BattleInput::Local(_) | BattleInput::Ignored => {}
+        }
+    }
+
+    // 決着後は`advance`が何もしないため、自分の入力もそこで受け付けられなくなる。
+    let now = Instant::now();
+    let delta = now.duration_since(app.last_tick);
+    app.last_tick = now;
+    state.advance(delta, first_local_action(&actions));
+
+    let music_on = app.gameplay_music_enabled.load(Ordering::Relaxed);
+    let se_on = app.se_enabled.load(Ordering::Relaxed);
+    terminal.draw(|frame| {
+        ui::render::draw_battle(
+            frame,
+            &state.game_local,
+            &state.game_remote,
+            &state.opponent_name,
+            music_on,
+            se_on,
+        )
+    })?;
+
+    Ok(None)
+}
+
 /// 設定画面(タイトルから開く独立画面)の1フレーム。
 ///
 /// 元の実装はループ内で`screen`へ直接代入しており、タイトルへ戻ると決めた後も同じ
@@ -1087,4 +1191,98 @@ pub fn tick_title(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn battle_takes_the_five_gameplay_actions_as_the_local_input() {
+        // 移動・向き変更・掘削の5操作だけがそのtickの自分の入力になる。
+        for action in [
+            InputAction::MoveLeft,
+            InputAction::MoveRight,
+            InputAction::FaceUp,
+            InputAction::FaceDown,
+            InputAction::Drill,
+        ] {
+            assert_eq!(
+                classify_battle_input(action),
+                BattleInput::Local(action),
+                "{action:?}は対戦中の自分の入力として扱うはず"
+            );
+        }
+    }
+
+    #[test]
+    fn battle_accepts_the_audio_toggles_and_the_quit_action() {
+        // 音声トグルはローカル専用でシミュレーションに影響しないため常時受け付ける。
+        // Escは対戦の中断(タイトルへ戻る)として扱う。
+        assert_eq!(
+            classify_battle_input(InputAction::ToggleMusic),
+            BattleInput::ToggleMusic
+        );
+        assert_eq!(
+            classify_battle_input(InputAction::ToggleSe),
+            BattleInput::ToggleSe
+        );
+        assert_eq!(classify_battle_input(InputAction::Quit), BattleInput::Quit);
+    }
+
+    #[test]
+    fn battle_ignores_pause_rewind_overlay_and_debug_actions() {
+        // spec.md 12.5の無効化は、これらを握りつぶすことで実現する。
+        for action in [
+            InputAction::TogglePause,
+            InputAction::Rewind,
+            InputAction::OpenSettings,
+            InputAction::OpenHelp,
+            InputAction::Confirm,
+            InputAction::UnboundKey,
+            InputAction::DebugUnifyNearbyColors,
+            InputAction::DebugAddLife,
+            InputAction::DebugFillAir,
+            InputAction::DebugClearAbovePlayer,
+            InputAction::DebugStarifyVisibleScreen,
+            InputAction::DebugPlaceBomb,
+            InputAction::DebugReceiveOpponentAttack,
+            InputAction::DebugToggleAutopilot,
+            InputAction::DebugToggleInvincible,
+            InputAction::DebugBlockFallSlower,
+            InputAction::DebugBlockFallFaster,
+            InputAction::DebugPlayerFallSlower,
+            InputAction::DebugPlayerFallFaster,
+            InputAction::DebugShakeDurationLonger,
+            InputAction::DebugShakeDurationShorter,
+        ] {
+            assert_eq!(
+                classify_battle_input(action),
+                BattleInput::Ignored,
+                "{action:?}は対戦中には無視するはず"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_first_gameplay_action_queued_in_a_frame_is_used() {
+        // 1フレームに複数キーが届いても、採用するのは最初の1つだけ(1tick高々1アクション)。
+        // 途中に挟まる無視対象・音声トグルは選択に影響しない。
+        let actions = [
+            InputAction::ToggleMusic,
+            InputAction::TogglePause,
+            InputAction::MoveRight,
+            InputAction::Drill,
+        ];
+        assert_eq!(first_local_action(&actions), Some(InputAction::MoveRight));
+    }
+
+    #[test]
+    fn a_frame_without_any_gameplay_action_produces_no_local_input() {
+        assert_eq!(first_local_action(&[]), None);
+        assert_eq!(
+            first_local_action(&[InputAction::TogglePause, InputAction::DebugAddLife]),
+            None
+        );
+    }
 }

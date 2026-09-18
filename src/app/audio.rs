@@ -31,6 +31,9 @@ pub fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Scr
     match screen {
         Screen::Title | Screen::ModeSelect => false,
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
+        // 対戦中(#252)は自分の盤面の進行状態で判断する。対戦には一時停止が無く、
+        // 決着(クリア/脱落)後はプレイ中BGMを止める点は通常プレイと同じ。
+        Screen::Battle(state) => state.game_local.status == GameStatus::Playing,
         Screen::Settings => true,
         // 独立画面としてのヘルプはジュークボックス試聴の置き場のため、プレイ中BGMを
         // 流すと試聴と二重に聞こえてしまう。常に無音にし、聞こえる音は選んだ曲のプレビュー
@@ -203,6 +206,44 @@ mod tests {
         assert!(!effective_gameplay_bgm_enabled(
             true,
             &Screen::Playing(Box::new(game))
+        ));
+    }
+
+    #[test]
+    fn effective_gameplay_bgm_enabled_follows_the_local_game_while_battling() {
+        // 対戦中(#252)は自分の盤面がプレイ中の間だけプレイ中BGMを鳴らし、決着後は止める。
+        use crate::battle::BattleState;
+
+        let battling = |local_status: GameStatus| {
+            let mut game_local = Game::new(1);
+            game_local.status = local_status;
+            Screen::Battle(Box::new(BattleState::new(
+                game_local,
+                Game::new(1),
+                "opponent".to_string(),
+            )))
+        };
+
+        assert!(effective_gameplay_bgm_enabled(
+            true,
+            &battling(GameStatus::Playing)
+        ));
+        assert!(!effective_gameplay_bgm_enabled(
+            false,
+            &battling(GameStatus::Playing)
+        ));
+        assert!(!effective_gameplay_bgm_enabled(
+            true,
+            &battling(GameStatus::Cleared)
+        ));
+        assert!(!effective_gameplay_bgm_enabled(
+            true,
+            &battling(GameStatus::GameOver)
+        ));
+        // 対戦画面はタイトル画面ではないため、タイトルBGM側は常に無音。
+        assert!(!effective_title_bgm_enabled(
+            true,
+            &battling(GameStatus::Playing)
         ));
     }
 

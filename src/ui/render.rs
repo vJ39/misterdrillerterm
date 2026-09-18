@@ -56,6 +56,10 @@ const HELP_OVERLAY_PERCENT_Y: u16 = 95;
 /// ダイアログ等、中央に出る他のオーバーレイと重ならないようにするため)。
 const REWIND_OVERLAY_H: u16 = 4;
 
+/// 対戦画面(#252)の相手パネルの高さ(行数)。内容3行(名前・深度/ライフ・進捗バー)+
+/// 上下ボーダー2行。巻き戻し中オーバーレイと同じく画面下端に寄せる。
+const BATTLE_OPPONENT_PANEL_H: u16 = 5;
+
 /// 1論理セルの文字グリッドサイズ(9.2)。
 const CELL_W: u16 = 4;
 const CELL_H: u16 = 2;
@@ -277,6 +281,78 @@ pub fn draw(
 /// ON/OFF状態を短いラベルにする(spec.md 10章)。
 fn on_off_label(enabled: bool) -> &'static str {
     if enabled { "ON" } else { "OFF" }
+}
+
+/// 対戦画面(#252)の1フレーム。自分の盤面は通常プレイと同じ`draw`で描き、相手の盤面は
+/// フル描画せず深度・ライフ・進捗バーの3値だけをパネルに重ねる(spec.md 12.3)。
+pub fn draw_battle(
+    frame: &mut Frame,
+    game_local: &Game,
+    game_remote: &Game,
+    opponent_name: &str,
+    music_enabled: bool,
+    se_enabled: bool,
+) {
+    // オートプレイは対戦では使わないため常にfalseを渡す。
+    draw(frame, game_local, music_enabled, se_enabled, false);
+
+    let area = frame.area();
+    if area.width < MIN_TERMINAL_W || area.height < MIN_TERMINAL_H {
+        return;
+    }
+
+    let plan = compute_layout(area, game_local.board.width());
+    let panel_area = bottom_anchored_rect(90, BATTLE_OPPONENT_PANEL_H, plan.game_frame);
+    frame.render_widget(Clear, panel_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default()
+        .fg(colors::STAR_FG)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let depth_m = game_remote.player.depth_m();
+    let ratio = battle_progress_ratio(depth_m, game_remote.depth_goal_m());
+    let paragraph = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!("OPPONENT: {opponent_name}"),
+            heading_style,
+        )),
+        Line::from(Span::styled(
+            format!(
+                "DEPTH {depth_m} m   LIVES \u{2665} \u{d7}{}",
+                game_remote.player.lives
+            ),
+            text_style,
+        )),
+        // 進捗バーは酸素ゲージ(9.7)と同じ`[####░░░░░░] 42%`の書式を使う。
+        Line::from(Span::styled(
+            air_gauge_string(ratio, (ratio * 100.0).round() as u32),
+            text_style,
+        )),
+    ])
+    .block(block)
+    .style(Style::default().bg(colors::LETTERBOX_BG))
+    .alignment(Alignment::Center);
+    frame.render_widget(paragraph, panel_area);
+}
+
+/// 相手の進捗(深度÷ゴール深度)を0.0〜1.0で返す。ゴール深度0の盤面は存在しないが、
+/// 0除算を避けるため0.0として扱う。
+fn battle_progress_ratio(depth_m: usize, depth_goal_m: usize) -> f32 {
+    if depth_goal_m == 0 {
+        return 0.0;
+    }
+    (depth_m as f32 / depth_goal_m as f32).clamp(0.0, 1.0)
 }
 
 // ---------------------------------------------------------------------------
