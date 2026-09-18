@@ -7,8 +7,10 @@ mod autoplay;
 mod battle;
 mod constants;
 mod debug_log;
+mod discovery;
 mod game;
 mod input;
+mod lobby;
 mod lockstep;
 mod net;
 mod rewind;
@@ -31,11 +33,12 @@ use app::audio::{
     effective_gameplay_bgm_enabled, effective_title_bgm_enabled, play_se, should_restart_title_bgm,
 };
 use app::screens::{
-    tick_battle, tick_help_screen, tick_mode_select, tick_playing, tick_rewind,
+    tick_battle, tick_help_screen, tick_mode_select, tick_network_lobby, tick_playing, tick_rewind,
     tick_settings_screen, tick_title,
 };
 use battle::BattleState;
 use game::{Game, InputAction};
+use lobby::LobbyState;
 use settings::Settings;
 
 fn main() -> io::Result<()> {
@@ -139,6 +142,11 @@ enum ScreenTransition {
     ToSettings,
     ToHelp,
     ToPlaying(Box<Game>),
+    /// 対戦相手を探すロビー画面へ(#256)。タイトルでNキーを押すと、探索用の
+    /// ソケットを確保済みの`LobbyState`がここに載って渡ってくる。
+    ToNetworkLobby(Box<LobbyState>),
+    /// ロビーで対戦が成立した(#256)。ハンドシェイク済みの状態をそのまま対戦画面へ渡す。
+    ToBattle(Box<BattleState>),
 }
 
 fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
@@ -233,6 +241,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             // 対戦中(#252)。通常プレイとは扱う入力もtickの刻み方も異なるため、
             // `tick_playing`に分岐を混ぜず独立した関数へ渡す。
             Screen::Battle(state) => tick_battle(&mut app, state, terminal)?,
+            // 対戦相手を探すロビー(#256)。
+            Screen::NetworkLobby(state) => tick_network_lobby(&mut app, state, terminal)?,
             Screen::Settings => tick_settings_screen(&mut app, terminal)?,
             Screen::Help => tick_help_screen(&mut app, terminal)?,
             Screen::ModeSelect => tick_mode_select(&mut app, terminal)?,
@@ -262,6 +272,13 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Some(ScreenTransition::ToHelp) => screen = Screen::Help,
             Some(ScreenTransition::ToPlaying(game)) => {
                 screen = Screen::Playing(game);
+                app.last_tick = Instant::now();
+            }
+            Some(ScreenTransition::ToNetworkLobby(state)) => screen = Screen::NetworkLobby(state),
+            Some(ScreenTransition::ToBattle(state)) => {
+                screen = Screen::Battle(state);
+                // ロビーでの待ち時間(招待の応答待ち・ハンドシェイク)がそのまま
+                // 1フレーム目のdeltaにならないよう、対戦開始時に計り直す。
                 app.last_tick = Instant::now();
             }
             None => {}
@@ -326,11 +343,10 @@ enum Screen {
     Settings,
     Help,
     Playing(Box<Game>),
-    /// 対戦中(#252。spec.md 12章)。タイトルからの入口はUDP探索・ロビーUI(#256)で
-    /// 作るため、この段階ではどこからも構築されない(dead_code警告を抑止しているのは
-    /// そのため)。
-    #[allow(dead_code)]
+    /// 対戦中(#252。spec.md 12章)。ロビー(#256)で対戦が成立するとここへ移る。
     Battle(Box<BattleState>),
+    /// 対戦相手を探すロビー画面(#256。spec.md 12.1)。タイトルでNキーを押すと移る。
+    NetworkLobby(Box<LobbyState>),
 }
 
 /// 一時停止中にオーバーレイ表示する画面。`Screen::Playing`のまま

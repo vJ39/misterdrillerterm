@@ -3,9 +3,9 @@
 //! 「自分の盤面と相手の盤面を150ms固定tickでlockstep実行し、決着を確定する」状態遷移を
 //! 持つ。#252では通信を伴わない状態遷移だけだったが、#254で実際のTCP通信(#253)と繋ぎ、
 //! 通信スレッドとのInput交換・切断検知・`Result`の交換を追加し、#255で定期的な
-//! `StateHash`の照合(デシンク検出)を追加した。UDP探索とロビーUI(#256)は対象外で、
-//! この段階ではタイトルから`Screen::Battle`へ到達する入口も無いため、検証はループバック
-//! TCPを使ったユニットテストで行う。
+//! `StateHash`の照合(デシンク検出)を追加した。#256でロビー(`lobby.rs`)から
+//! `Screen::Battle`へ到達する入口ができたが、2台での実プレイを自動テストでは回せない
+//! ため、検証は引き続きループバックTCPを使ったユニットテストで行う。
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -121,10 +121,8 @@ impl BattleState {
     /// 組み立てる(#254)。`stream`は呼び出し元がハンドシェイクに使ったものをそのまま渡す
     /// (内部で`try_clone`して読み書き用に分ける)。
     ///
-    /// `Screen::Battle`への実際の遷移(この関数をどこから呼ぶか)は#256(ロビーUI)の範囲の
-    /// ため、この段階ではテストからのみ呼ばれる(`BattleState::new`と同じ理由で
-    /// dead_code警告を抑止する)。
-    #[allow(dead_code)]
+    /// 呼び出し元はロビー(`lobby.rs`)で、招待の成立後にホスト役・クライアント役の
+    /// どちらの経路からもここへ合流する(#256)。
     pub fn from_handshake(handshake: net::HandshakeResult, stream: TcpStream) -> io::Result<Self> {
         let game_local = new_game_from_battle_config(handshake.seed, &handshake.config);
         let game_remote = new_game_from_battle_config(handshake.seed, &handshake.config);
@@ -158,6 +156,21 @@ impl BattleState {
                 pending_remote_state_hashes: HashMap::new(),
             }),
         })
+    }
+
+    /// 決着(#256)。`Some`なら対戦は終わっており、画面側は結果表示へ切り替える。
+    pub fn outcome(&self) -> Option<BattleOutcome> {
+        self.outcome
+    }
+
+    /// 対戦から抜けることを相手へ伝える(#256)。通信なし(#252のローカル専用)の場合や
+    /// 既に切断されている場合は何も起きない。届かなくても相手側はHeartbeatの途絶で
+    /// 切断を検知するため、送信失敗は無視する。
+    pub fn notify_bye(&mut self) {
+        let Some(link) = &mut self.network else {
+            return;
+        };
+        let _ = net::write_message(&mut link.writer, &GameMessage::Bye);
     }
 
     /// 実測の経過時間`delta`を150ms固定tickへ量子化し、溜まったぶんだけlockstepを進める。
@@ -472,10 +485,6 @@ fn reconcile_state_hash(link: &mut NetworkLink, outcome: &mut Option<BattleOutco
 /// 巻き戻しストック・ブロック状態遷移ログは対戦では設定として共有しない(前者は対戦中
 /// 無効、後者はシミュレーションに影響しないローカル専用。spec.md 12.5)ため、
 /// `BattleConfig`にも含まれず、ここでも触らない。
-///
-/// `Screen::Battle`への実際の遷移は#254/#256で作るため、この段階ではテストからのみ
-/// 呼ばれる(`BattleState::new`と同じ理由でdead_code警告を抑止する)。
-#[allow(dead_code)]
 pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
     let mut game = Game::new_with_width(
         seed,

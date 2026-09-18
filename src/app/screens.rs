@@ -23,6 +23,8 @@ use crate::constants::{
     ATTRACT_MODE_IDLE_MS, FRAME_INTERVAL_MS, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
 };
 use crate::game::{Game, GameOverChoice, GameStatus, InputAction};
+use crate::lobby::{LobbyOutcome, LobbyState};
+use crate::net::BattleConfig;
 use crate::{
     App, PauseOverlay, ScreenTransition, advance_rewind_session, audio, autoplay,
     cycle_jukebox_selection, input, rewind, start_new_game, ui,
@@ -711,11 +713,21 @@ pub fn tick_battle(
 ) -> io::Result<Option<ScreenTransition>> {
     let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
 
+    // 決着後は結果表示だけの画面になる(#256)。ここを抜ける操作は「タイトルへ戻る」
+    // のみで、盤面の操作・音声トグルはもう意味を持たない。
+    if state.outcome().is_some() && actions.iter().any(|&action| leaves_battle_result(action)) {
+        state.notify_bye();
+        return Ok(Some(ScreenTransition::ToTitleDiscardingGame));
+    }
+
     for &action in &actions {
         match classify_battle_input(action) {
-            // 対戦を中断してタイトルへ戻る。#254では「切断通知を送ってから戻る」処理を
-            // ここへ追加する。
-            BattleInput::Quit => return Ok(Some(ScreenTransition::ToTitleDiscardingGame)),
+            // 対戦を中断してタイトルへ戻る。相手を待たせないよう、抜けることを
+            // 伝えてから戻る(#256。相手側は不戦勝として決着する)。
+            BattleInput::Quit => {
+                state.notify_bye();
+                return Ok(Some(ScreenTransition::ToTitleDiscardingGame));
+            }
             BattleInput::ToggleMusic => {
                 app.settings.music_enabled = !app.settings.music_enabled;
                 // 対戦画面ではタイトル用BGMは鳴らないため、プレイ中BGMのみ即時反映する。
@@ -742,6 +754,7 @@ pub fn tick_battle(
 
     let music_on = app.gameplay_music_enabled.load(Ordering::Relaxed);
     let se_on = app.se_enabled.load(Ordering::Relaxed);
+    let outcome = state.outcome();
     terminal.draw(|frame| {
         ui::render::draw_battle(
             frame,
@@ -750,8 +763,45 @@ pub fn tick_battle(
             &state.opponent_name,
             music_on,
             se_on,
+            outcome,
         )
     })?;
+
+    Ok(None)
+}
+
+/// 決着後の結果表示から抜ける操作か(#256。設計書6節「Confirm(EnterまたはSpace)
+/// またはQuitキー」)。Spaceは通常プレイでは一時停止だが、対戦には一時停止が無いため
+/// ここでは確定の意味で受け付ける。
+fn leaves_battle_result(action: InputAction) -> bool {
+    matches!(
+        action,
+        InputAction::Confirm | InputAction::TogglePause | InputAction::Quit
+    )
+}
+
+/// 対戦相手を探すロビー(`Screen::NetworkLobby`)の1フレーム(#256。spec.md 12.1)。
+///
+/// 探索・招待・接続の状態遷移は`LobbyState::update`が持ち、ここは入力の取り込みと
+/// 描画、遷移結果の受け渡しだけを行う。
+pub fn tick_network_lobby(
+    app: &mut App,
+    state: &mut LobbyState,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> io::Result<Option<ScreenTransition>> {
+    let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
+
+    // 自分がホスト役になった場合に相手へ強制適用する設定(spec.md 12.2)。コースは
+    // 前回選んだもの(モードセレクトの初期選択と同じ)を使う。
+    let config = BattleConfig::from_settings(&app.settings, app.settings.last_course_depth_m);
+
+    match state.update(&actions, config) {
+        LobbyOutcome::Leave => return Ok(Some(ScreenTransition::ToTitle)),
+        LobbyOutcome::Battle(battle) => return Ok(Some(ScreenTransition::ToBattle(battle))),
+        LobbyOutcome::Stay => {}
+    }
+
+    terminal.draw(|frame| ui::render::draw_network_lobby(frame, state))?;
 
     Ok(None)
 }
@@ -1161,6 +1211,15 @@ pub fn tick_title(
             input::AnyKeyAction::Quit => return Ok(Some(ScreenTransition::Quit)),
             input::AnyKeyAction::OpenSettings => return Ok(Some(ScreenTransition::ToSettings)),
             input::AnyKeyAction::OpenHelp => return Ok(Some(ScreenTransition::ToHelp)),
+            // 対戦相手を探すロビーへ(#256)。表示名の入力UIは作らず、毎回生成した
+            // 名前をそのまま使う。探索用ソケットを確保できなかった場合(ポート使用中等)は
+            // タイトルに留まる。
+            input::AnyKeyAction::OpenNetworkLobby => {
+                let my_name = format!("Player-{}", &uuid::Uuid::new_v4().to_string()[..4]);
+                if let Ok(state) = LobbyState::new(my_name) {
+                    return Ok(Some(ScreenTransition::ToNetworkLobby(Box::new(state))));
+                }
+            }
             input::AnyKeyAction::Advance => {
                 app.mode_select_choice =
                     ui::render::CourseChoice::from_depth_goal_m(app.settings.last_course_depth_m);
@@ -1284,5 +1343,44 @@ mod tests {
             first_local_action(&[InputAction::TogglePause, InputAction::DebugAddLife]),
             None
         );
+    }
+
+    #[test]
+    fn the_battle_result_screen_is_left_with_enter_space_or_escape() {
+        // #256: 決着後はEnter(Confirm)・Space(TogglePause)・Escのいずれでもタイトルへ戻る。
+        for action in [
+            InputAction::Confirm,
+            InputAction::TogglePause,
+            InputAction::Quit,
+        ] {
+            assert!(
+                leaves_battle_result(action),
+                "{action:?}は結果表示から抜ける操作のはず"
+            );
+        }
+    }
+
+    #[test]
+    fn the_battle_result_screen_ignores_the_gameplay_and_debug_keys() {
+        // 決着後に盤面操作・デバッグ操作で誤ってタイトルへ戻らないことを確認する。
+        for action in [
+            InputAction::MoveLeft,
+            InputAction::MoveRight,
+            InputAction::FaceUp,
+            InputAction::FaceDown,
+            InputAction::Drill,
+            InputAction::Rewind,
+            InputAction::ToggleMusic,
+            InputAction::ToggleSe,
+            InputAction::OpenSettings,
+            InputAction::OpenHelp,
+            InputAction::UnboundKey,
+            InputAction::DebugAddLife,
+        ] {
+            assert!(
+                !leaves_battle_result(action),
+                "{action:?}では結果表示から抜けないはず"
+            );
+        }
     }
 }

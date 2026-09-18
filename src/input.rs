@@ -117,13 +117,22 @@ pub fn poll_any_key(poll_ms: u64) -> std::io::Result<Option<AnyKeyAction>> {
         return Ok(None);
     }
 
-    Ok(Some(match key.code {
+    Ok(Some(any_key_action_from_key_code(key.code)))
+}
+
+/// キーコードを`AnyKeyAction`へ変換する(`poll_any_key`の実装本体)。キーイベントの
+/// 取得はターミナルが要るためテストできないが、この対応表だけは単体で確認できるよう
+/// 分けている。
+fn any_key_action_from_key_code(code: KeyCode) -> AnyKeyAction {
+    match code {
         KeyCode::Esc => AnyKeyAction::Quit,
         KeyCode::Char('s') | KeyCode::Char('S') => AnyKeyAction::OpenSettings,
         KeyCode::Char('h') | KeyCode::Char('H') => AnyKeyAction::OpenHelp,
+        // N=Network。タイトルから対戦相手を探すロビーへ入る(#256)。
+        KeyCode::Char('n') | KeyCode::Char('N') => AnyKeyAction::OpenNetworkLobby,
         KeyCode::Enter => AnyKeyAction::Advance,
         _ => AnyKeyAction::Ignored,
-    }))
+    }
 }
 
 /// `poll_any_key`の戻り値。
@@ -139,6 +148,8 @@ pub enum AnyKeyAction {
     /// Hキー。タイトル画面でのショートカット一覧ヘルプ画面オープンとして扱う
     /// (TERM独自拡張。ユーザー指摘: 「ショートカットのヘルプページも必要」)。
     OpenHelp,
+    /// Nキー。タイトル画面から対戦相手を探すロビーを開く(#256。spec.md 12.1)。
+    OpenNetworkLobby,
     /// 上記いずれにも当てはまらないキー(TERM独自拡張。#218)。画面遷移は起こさないが、
     /// アトラクトモードのアイドルタイマーはリセットする。
     Ignored,
@@ -326,6 +337,44 @@ mod tests {
                 "{key:?}が巻き戻しに奪われている"
             );
         }
+    }
+
+    #[test]
+    fn the_title_screen_maps_n_to_the_network_lobby() {
+        // #256: タイトルからNキーで対戦相手を探すロビーへ入る。
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Char('n')),
+            AnyKeyAction::OpenNetworkLobby
+        );
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Char('N')),
+            AnyKeyAction::OpenNetworkLobby
+        );
+    }
+
+    #[test]
+    fn the_network_lobby_key_does_not_take_over_the_other_title_screen_keys() {
+        // Nキーの追加で、タイトル画面の既存のキー割り当てを奪っていないことを確認する。
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Enter),
+            AnyKeyAction::Advance
+        );
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Esc),
+            AnyKeyAction::Quit
+        );
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Char('s')),
+            AnyKeyAction::OpenSettings
+        );
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Char('h')),
+            AnyKeyAction::OpenHelp
+        );
+        assert_eq!(
+            any_key_action_from_key_code(KeyCode::Char('y')),
+            AnyKeyAction::Ignored
+        );
     }
 
     #[test]

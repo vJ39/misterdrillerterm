@@ -1,19 +1,14 @@
-//! 対戦のTCP層(#253。spec.md 12.2)。
+//! 対戦の通信層(#253。spec.md 12.1・12.2)。
 //!
 //! TCP接続が確立済みの2ホストが、メッセージのフレーミングを介してハンドシェイク
 //! (Hello交換 → StartConfig → SeedAgree → StartCountdown)を行うところと、対戦中の
-//! 受信専用スレッド(#254)までを担う。UDP探索・招待ダイアログ(#256)は対象外。
+//! 受信専用スレッド(#254)、およびUDP探索のパケット形式(#256)を担う。
 //! 受信したメッセージをlockstepの進行としてどう解釈するか(#254)・`StateHash`の照合
 //! (#255)はゲームロジック側の責務のため`battle.rs`に置く。ハンドシェイクの結果から
 //! `Game`を組み立てるのも同じ理由で`battle::new_game_from_battle_config`に置く。
 //!
-//! タイトルからの入口はまだ無く(#256)、検証はループバックTCP(`127.0.0.1:0`)を使った
-//! ユニットテストで行う。
-
-// このモジュールは#254で対戦画面へ配線するまでバイナリ側からは一切呼ばれず、ほぼ全ての
-// 項目がdead_code警告の対象になる(`BattleState::new`等と同じ事情)。項目ごとに属性を
-// 並べると読みづらいため、モジュール単位で抑止し、配線時にこの1行を外す。
-#![allow(dead_code)]
+//! #256でUDP探索(spec.md 12.1)のパケット定義も加えた。探索の状態管理そのものは
+//! `discovery.rs`、招待のやり取りとタイトルからの入口は`lobby.rs`が持つ。
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -23,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::game::InputAction;
 use crate::settings::Settings;
@@ -347,6 +343,147 @@ pub fn spawn_receiver_thread(
             }
         }
     })
+}
+
+// ---------------------------------------------------------------------------
+// UDPブロードキャストによる自動探索(#256。spec.md 12.1)
+// ---------------------------------------------------------------------------
+
+/// 対戦相手探索(HELLO/INVITE/ACCEPT/DECLINE/BYE)に使うUDPポート。
+pub const DISCOVERY_PORT: u16 = 39393;
+/// ゲーム開始後の本接続に使うTCPポートの既定値。使用中なら1つずつ上へ空きを探す。
+pub const DEFAULT_TCP_PORT: u16 = 39394;
+/// 候補リストから自動的に除去するまでの、最終受信からの経過時間(ms)。
+pub const DISCOVERY_TIMEOUT_MS: u64 = 5000;
+/// INVITEを送ってから応答を待つ上限(ms)。
+pub const INVITE_TIMEOUT_MS: u64 = 10000;
+/// TCP接続の確立を待つ上限(ms)。
+pub const TCP_CONNECT_TIMEOUT_MS: u64 = 3000;
+/// HELLOを再送する間隔(ms)。
+pub const HELLO_BROADCAST_INTERVAL_MS: u64 = 1000;
+
+/// 探索パケットの固定長(バイト)。受信バッファの大きさとしても使うため、
+/// 探索側(`discovery.rs`)から参照できるようにしている。
+pub(crate) const DISCOVERY_PACKET_LEN: usize = 60;
+
+/// プロトコル識別子(spec.md 12.1のmagic)。
+const DISCOVERY_MAGIC: [u8; 4] = *b"MDT1";
+/// 探索プロトコルの版。旧版の実装は存在しないため現在は1固定。
+const PROTOCOL_VERSION: u8 = 1;
+/// 表示名フィールドの長さ(バイト)。超える場合は切り詰め、余りは0でパディングする。
+const PLAYER_NAME_LEN: usize = 16;
+
+/// 探索パケットの種別(spec.md 12.1)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketType {
+    /// 生存/募集アナウンス。1秒間隔で送信し続ける。
+    Hello,
+    /// 対戦招待。
+    Invite,
+    /// 招待受諾。
+    Accept,
+    /// 招待拒否。
+    Decline,
+    /// 探索/募集からの離脱通知。
+    Bye,
+}
+
+impl PacketType {
+    fn to_byte(self) -> u8 {
+        match self {
+            PacketType::Hello => 0x01,
+            PacketType::Invite => 0x02,
+            PacketType::Accept => 0x03,
+            PacketType::Decline => 0x04,
+            PacketType::Bye => 0x05,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0x01 => Some(PacketType::Hello),
+            0x02 => Some(PacketType::Invite),
+            0x03 => Some(PacketType::Accept),
+            0x04 => Some(PacketType::Decline),
+            0x05 => Some(PacketType::Bye),
+            _ => None,
+        }
+    }
+}
+
+/// UDPでやり取りする探索パケット(spec.md 12.1)。
+///
+/// `GameMessage`(TCP)は`bincode`でシリアライズするが、こちらは仕様のテーブル通りの
+/// 固定長60バイト・リトルエンディアンで手書きエンコードする(相手の実装が起動直後の
+/// 段階でやり取りするため、シリアライザの型表現に依存させない)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryPacket {
+    pub packet_type: PacketType,
+    pub sender_id: Uuid,
+    /// HELLO/BYEでは全ゼロ(`Uuid::nil()`)。INVITE/ACCEPT/DECLINEでは相手の`sender_id`。
+    pub target_id: Uuid,
+    pub player_name: String,
+    /// このホストが対戦開始後にlistenするTCPポート。
+    pub tcp_port: u16,
+}
+
+impl DiscoveryPacket {
+    pub fn encode(&self) -> [u8; DISCOVERY_PACKET_LEN] {
+        let mut bytes = [0u8; DISCOVERY_PACKET_LEN];
+        bytes[0..4].copy_from_slice(&DISCOVERY_MAGIC);
+        bytes[4] = self.packet_type.to_byte();
+        bytes[5] = PROTOCOL_VERSION;
+        bytes[6..22].copy_from_slice(self.sender_id.as_bytes());
+        bytes[22..38].copy_from_slice(self.target_id.as_bytes());
+        // 表示名は16バイトに収め、余りは0のまま(パディング)にする。
+        let name = truncate_on_char_boundary(&self.player_name, PLAYER_NAME_LEN);
+        bytes[38..38 + name.len()].copy_from_slice(name.as_bytes());
+        bytes[54..56].copy_from_slice(&self.tcp_port.to_le_bytes());
+        // reserved(56..60)は送信時は全0。
+        bytes
+    }
+
+    /// 長さ不足・magic不一致・不明なpacket_typeなら`None`。`protocol_version`と
+    /// `reserved`は受信時には見ない(spec.md 12.1「受信時は無視する」)。
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < DISCOVERY_PACKET_LEN || bytes[0..4] != DISCOVERY_MAGIC {
+            return None;
+        }
+        let packet_type = PacketType::from_byte(bytes[4])?;
+        let sender_id = Uuid::from_bytes(bytes[6..22].try_into().ok()?);
+        let target_id = Uuid::from_bytes(bytes[22..38].try_into().ok()?);
+
+        Some(Self {
+            packet_type,
+            sender_id,
+            target_id,
+            player_name: decode_player_name(&bytes[38..54]),
+            tcp_port: u16::from_le_bytes([bytes[54], bytes[55]]),
+        })
+    }
+}
+
+/// UTF-8のchar境界を壊さずに`max_bytes`以内へ切り詰める(spec.md 12.7)。
+/// 収まらない場合は、収まる最後の文字の手前までを返す。
+fn truncate_on_char_boundary(name: &str, max_bytes: usize) -> &str {
+    if name.len() <= max_bytes {
+        return name;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
+}
+
+/// 表示名フィールド(0パディング済み)を文字列へ戻す。相手の実装が壊れたバイト列を
+/// 送ってきても落ちないよう、不正なUTF-8は置換文字にする。
+fn decode_player_name(bytes: &[u8]) -> String {
+    let end = bytes
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 /// 現在のUNIX時刻(ms)。システム時計がUNIXエポックより前を指している場合は0を返す
@@ -775,5 +912,136 @@ mod tests {
             BattleConfig::from_settings(&settings, 500).depth_goal_m,
             500
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // UDP探索パケット(#256。spec.md 12.1)。
+    // -----------------------------------------------------------------------
+
+    /// 指定した種別のテスト用パケット。
+    fn discovery_packet(packet_type: PacketType, target_id: Uuid) -> DiscoveryPacket {
+        DiscoveryPacket {
+            packet_type,
+            sender_id: Uuid::from_u128(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
+            target_id,
+            player_name: "Player-1a2b".to_string(),
+            tcp_port: 39395,
+        }
+    }
+
+    #[test]
+    fn every_discovery_packet_kind_round_trips_through_the_fixed_layout() {
+        for packet_type in [
+            PacketType::Hello,
+            PacketType::Invite,
+            PacketType::Accept,
+            PacketType::Decline,
+            PacketType::Bye,
+        ] {
+            // HELLO/BYEは全ゼロ、招待系は相手のIDを載せる。
+            let target_id = match packet_type {
+                PacketType::Hello | PacketType::Bye => Uuid::nil(),
+                _ => Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10),
+            };
+            let packet = discovery_packet(packet_type, target_id);
+
+            let restored = DiscoveryPacket::decode(&packet.encode()).unwrap();
+
+            assert_eq!(restored, packet, "{packet_type:?}が復元できていない");
+        }
+    }
+
+    #[test]
+    fn the_encoded_packet_follows_the_byte_layout_in_the_spec() {
+        // 相手の実装が変わってもこの並びだけは崩せない(spec.md 12.1のテーブル)。
+        let packet = discovery_packet(PacketType::Invite, Uuid::from_u128(1));
+        let bytes = packet.encode();
+
+        assert_eq!(bytes.len(), 60);
+        assert_eq!(&bytes[0..4], b"MDT1");
+        assert_eq!(bytes[4], 0x02, "INVITEのpacket_typeは0x02");
+        assert_eq!(bytes[5], 1, "protocol_versionは1固定");
+        assert_eq!(&bytes[6..22], packet.sender_id.as_bytes());
+        assert_eq!(&bytes[22..38], packet.target_id.as_bytes());
+        assert_eq!(&bytes[38..49], b"Player-1a2b");
+        assert_eq!(
+            &bytes[49..54],
+            &[0, 0, 0, 0, 0],
+            "表示名の余りは0パディング"
+        );
+        assert_eq!(
+            &bytes[54..56],
+            &39395u16.to_le_bytes(),
+            "tcp_portはリトルエンディアン"
+        );
+        assert_eq!(&bytes[56..60], &[0, 0, 0, 0], "reservedは送信時全0");
+    }
+
+    #[test]
+    fn a_player_name_longer_than_the_field_is_truncated_at_a_char_boundary() {
+        // 日本語(1文字3バイト)の表示名は16バイトに収まる5文字までで切れる。
+        // 途中のバイトで切ると不正なUTF-8になるため、文字単位で切り詰める(spec.md 12.7)。
+        let packet = DiscoveryPacket {
+            player_name: "あいうえおかきくけこ".to_string(),
+            ..discovery_packet(PacketType::Hello, Uuid::nil())
+        };
+
+        let restored = DiscoveryPacket::decode(&packet.encode()).unwrap();
+
+        assert_eq!(restored.player_name, "あいうえお");
+        assert_eq!(
+            packet.encode()[53],
+            0,
+            "15バイトぶんしか使わないので末尾1バイトはパディングのはず"
+        );
+    }
+
+    #[test]
+    fn a_player_name_that_exactly_fills_the_field_is_kept_whole() {
+        let packet = DiscoveryPacket {
+            player_name: "0123456789abcdef".to_string(),
+            ..discovery_packet(PacketType::Hello, Uuid::nil())
+        };
+
+        assert_eq!(
+            DiscoveryPacket::decode(&packet.encode())
+                .unwrap()
+                .player_name,
+            "0123456789abcdef"
+        );
+    }
+
+    #[test]
+    fn decoding_rejects_short_foreign_and_unknown_packets() {
+        let packet = discovery_packet(PacketType::Hello, Uuid::nil());
+
+        assert_eq!(
+            DiscoveryPacket::decode(&packet.encode()[..59]),
+            None,
+            "60バイトに満たないパケットは受け付けない"
+        );
+
+        let mut foreign = packet.encode();
+        foreign[0] = b'X';
+        assert_eq!(
+            DiscoveryPacket::decode(&foreign),
+            None,
+            "magicが違うパケットは他アプリのものとして無視する"
+        );
+
+        let mut unknown_kind = packet.encode();
+        unknown_kind[4] = 0x09;
+        assert_eq!(DiscoveryPacket::decode(&unknown_kind), None);
+    }
+
+    #[test]
+    fn decoding_ignores_the_protocol_version_and_the_reserved_bytes() {
+        // 受信時は無視する(spec.md 12.1)。将来の版のパケットでも候補として扱える。
+        let packet = discovery_packet(PacketType::Hello, Uuid::nil());
+        let mut bytes = packet.encode();
+        bytes[5] = 9;
+        bytes[56..60].copy_from_slice(&[1, 2, 3, 4]);
+
+        assert_eq!(DiscoveryPacket::decode(&bytes), Some(packet));
     }
 }

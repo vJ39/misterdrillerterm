@@ -13,6 +13,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
+use crate::battle::BattleOutcome;
 use crate::constants::{
     BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
     DEBUG_INCOMING_ATTACK_POWER, INCOMING_ROCK_WARNING_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS,
@@ -21,6 +22,7 @@ use crate::constants::{
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
 use crate::game::{BombPhase, Game, GameOverChoice, GameStatus};
+use crate::lobby::{LobbyPhase, LobbyState};
 use crate::ui::colors;
 
 use super::intro;
@@ -50,6 +52,10 @@ const FIELD_VISIBLE_ROWS: usize = 14;
 /// `settings_screen_box_is_tall_enough_...` / `help_screen_box_is_tall_enough_...`で確認する)。
 const SETTINGS_OVERLAY_PERCENT_Y: u16 = 97;
 const HELP_OVERLAY_PERCENT_Y: u16 = 95;
+
+/// 対戦ロビー画面(#256)の枠の高さ(`centered_rect`のパーセント指定)。候補リストが
+/// 伸びても収まるよう、ヘルプ画面と同程度に取る。
+const LOBBY_OVERLAY_PERCENT_Y: u16 = 60;
 
 /// 巻き戻し中オーバーレイ(#233)の枠の高さ(行数)。内容2行+上下ボーダー2行。
 /// 中央ではなく画面下端に寄せるため、割合ではなく固定行数で指定する(GameOver
@@ -285,6 +291,7 @@ fn on_off_label(enabled: bool) -> &'static str {
 
 /// 対戦画面(#252)の1フレーム。自分の盤面は通常プレイと同じ`draw`で描き、相手の盤面は
 /// フル描画せず深度・ライフ・進捗バーの3値だけをパネルに重ねる(spec.md 12.3)。
+/// `outcome`が`Some`なら決着しているので、結果を中央に重ねる(#256)。
 pub fn draw_battle(
     frame: &mut Frame,
     game_local: &Game,
@@ -292,6 +299,7 @@ pub fn draw_battle(
     opponent_name: &str,
     music_enabled: bool,
     se_enabled: bool,
+    outcome: Option<BattleOutcome>,
 ) {
     // オートプレイは対戦では使わないため常にfalseを渡す。
     draw(frame, game_local, music_enabled, se_enabled, false);
@@ -344,6 +352,17 @@ pub fn draw_battle(
     .style(Style::default().bg(colors::LETTERBOX_BG))
     .alignment(Alignment::Center);
     frame.render_widget(paragraph, panel_area);
+
+    // 決着していれば結果を中央に重ねる(#256)。盤面・相手パネルはそのまま残し、
+    // 最後の状態を見ながら結果を確認できるようにする。
+    if let Some(outcome) = outcome {
+        draw_overlay(
+            frame,
+            plan.game_frame,
+            battle_outcome_message(outcome),
+            &["Enter/Escキーでタイトルへ"],
+        );
+    }
 }
 
 /// 相手の進捗(深度÷ゴール深度)を0.0〜1.0で返す。ゴール深度0の盤面は存在しないが、
@@ -353,6 +372,119 @@ fn battle_progress_ratio(depth_m: usize, depth_goal_m: usize) -> f32 {
         return 0.0;
     }
     (depth_m as f32 / depth_goal_m as f32).clamp(0.0, 1.0)
+}
+
+/// 決着の表示文字列(#256)。デシンクは引き分け扱いだが、原因が異なることが分かるよう
+/// 別の文言にする(spec.md 12.3「TUIにはデシンク終了である旨を表示する」)。
+fn battle_outcome_message(outcome: BattleOutcome) -> &'static str {
+    match outcome {
+        BattleOutcome::Win => "YOU WIN",
+        BattleOutcome::Lose => "YOU LOSE",
+        BattleOutcome::Draw => "DRAW",
+        BattleOutcome::Desync => "DESYNC - DRAW",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 対戦ロビー画面(#256。spec.md 12.1)
+// ---------------------------------------------------------------------------
+
+/// ロビー画面(`Screen::NetworkLobby`)を描画する。候補リスト・招待ダイアログ・接続中・
+/// 通知をフェーズごとに出し分ける。
+pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
+    let area = frame.area();
+
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
+
+    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+    let lobby_area = centered_rect(90, LOBBY_OVERLAY_PERCENT_Y, frame_rect);
+    frame.render_widget(Clear, lobby_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default()
+        .fg(colors::PANEL_BORDER)
+        .bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default()
+        .fg(colors::STAR_FG)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let line = |text: String| Line::from(Span::styled(text, text_style));
+    let heading = |text: &str| Line::from(Span::styled(text.to_string(), heading_style));
+
+    let mut lines = vec![
+        heading("== 対戦相手をさがす =="),
+        line(format!("自分: {}", lobby.my_name())),
+        Line::from(""),
+    ];
+
+    match lobby.phase() {
+        LobbyPhase::Discovering => {
+            lines.push(heading("== 見つかった相手 =="));
+            if lobby.peers().is_empty() {
+                lines.push(line("さがしています...".to_string()));
+            } else {
+                for (index, peer) in lobby.peers().iter().enumerate() {
+                    let selected = index == lobby.selection();
+                    let marker = if selected { "> " } else { "  " };
+                    let style = if selected { selected_style } else { text_style };
+                    lines.push(Line::from(Span::styled(
+                        format!("{marker}{} ({})", peer.player_name, peer.addr),
+                        style,
+                    )));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(line(
+                "↑↓: 選択 / Enter: 対戦を申し込む / Esc: タイトルへ".to_string(),
+            ));
+        }
+        LobbyPhase::AwaitingInviteResponse { target, .. } => {
+            lines.push(line(format!(
+                "「{}」に対戦を申し込みました。返事を待っています...",
+                target.player_name
+            )));
+            lines.push(Line::from(""));
+            lines.push(line("Esc: 取り消す".to_string()));
+        }
+        LobbyPhase::IncomingInvite { from } => {
+            lines.push(line(format!(
+                "「{}」から対戦を申し込まれました",
+                from.player_name
+            )));
+            lines.push(Line::from(""));
+            lines.push(line("Enter: 受ける / Esc: ことわる".to_string()));
+        }
+        LobbyPhase::ConnectingAsHost { opponent_name, .. } => {
+            lines.push(line(format!("「{opponent_name}」の接続を待っています...")));
+        }
+        LobbyPhase::ConnectingAsClient { opponent_name, .. } => {
+            lines.push(line(format!("「{opponent_name}」へ接続しています...")));
+        }
+        LobbyPhase::Notice { message, .. } => {
+            lines.push(line(message.clone()));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, lobby_area);
 }
 
 // ---------------------------------------------------------------------------
@@ -463,7 +595,12 @@ pub fn draw_title(frame: &mut Frame) {
         Line::from(""),
         Line::from(Span::styled("Enterキーを押してスタート", text_style)),
         Line::from(Span::styled("(Escキーで終了)", text_style)),
-        Line::from(Span::styled("(Sキーで設定 / Hキーでヘルプ)", text_style)),
+        // 対戦(#256)はNキー。押せることが分からないと入口として機能しないため、
+        // 設定・ヘルプと同じ行に並べる。
+        Line::from(Span::styled(
+            "(Sキーで設定 / Hキーでヘルプ / Nキーで対戦)",
+            text_style,
+        )),
     ]);
     let text_rows = text_lines.len() as u16;
 
@@ -2571,6 +2708,20 @@ pub fn draw_rewind_overlay(
 mod tests {
     use super::*;
     use crate::constants::FIELD_WIDTH_DEFAULT as FIELD_WIDTH;
+    use crate::discovery::DiscoveredPeer;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn every_battle_outcome_has_its_own_result_message() {
+        // 勝敗と、引き分けでも原因がデシンクである場合(spec.md 12.3)を表示し分ける。
+        assert_eq!(battle_outcome_message(BattleOutcome::Win), "YOU WIN");
+        assert_eq!(battle_outcome_message(BattleOutcome::Lose), "YOU LOSE");
+        assert_eq!(battle_outcome_message(BattleOutcome::Draw), "DRAW");
+        assert_eq!(
+            battle_outcome_message(BattleOutcome::Desync),
+            "DESYNC - DRAW"
+        );
+    }
 
     #[test]
     fn player_sprite_lines_are_always_exactly_one_logical_cell_wide() {
@@ -3557,6 +3708,122 @@ mod tests {
         assert!(
             screen_shows(&text, "> 対戦: 岩1個に必要な攻撃力"),
             "選択中の項目にカーソル(>)が付いていない:\n{text}"
+        );
+    }
+
+    // --- 対戦ロビー画面(#256) ---
+
+    /// ロビー画面を実描画して、画面に見えている文字を返す。
+    fn render_network_lobby(lobby: &LobbyState) -> String {
+        rendered_screen_text(|frame| draw_network_lobby(frame, lobby))
+    }
+
+    #[test]
+    fn the_lobby_shows_the_candidates_and_the_key_hints_while_discovering() {
+        // 候補リストの行と操作案内が枠に収まって見えることを実描画で確認する。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+        let text = render_network_lobby(&lobby);
+        assert!(
+            screen_shows(&text, "さがしています"),
+            "候補が0件のときの案内が出ていない:\n{text}"
+        );
+
+        lobby.add_peer(DiscoveredPeer::for_test(
+            "Player-1a2b",
+            IpAddr::from(Ipv4Addr::new(192, 168, 0, 2)),
+            39394,
+        ));
+        let text = render_network_lobby(&lobby);
+        assert!(
+            screen_shows(&text, "> Player-1a2b (192.168.0.2)"),
+            "候補の行とカーソルが出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Enter: 対戦を申し込む"),
+            "操作案内がクリップされている:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "自分: me"),
+            "自分の表示名が出ていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_lobby_shows_what_to_press_for_an_incoming_invite() {
+        let mut lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+        lobby.set_phase(LobbyPhase::IncomingInvite {
+            from: DiscoveredPeer::for_test("Player-1a2b", IpAddr::from(Ipv4Addr::LOCALHOST), 39394),
+        });
+
+        let text = render_network_lobby(&lobby);
+
+        assert!(
+            screen_shows(&text, "「Player-1a2b」から対戦を申し込まれました"),
+            "招待の文面が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Enter: 受ける / Esc: ことわる"),
+            "承諾/拒否の案内が出ていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_lobby_shows_the_notice_message_as_it_is() {
+        let mut lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+        lobby.set_phase(LobbyPhase::Notice {
+            message: "相手に断られました".to_string(),
+            shown_at: std::time::Instant::now(),
+        });
+
+        assert!(screen_shows(
+            &render_network_lobby(&lobby),
+            "相手に断られました"
+        ));
+    }
+
+    #[test]
+    fn the_battle_screen_shows_the_result_overlay_once_the_outcome_is_decided() {
+        // 決着後は結果と抜け方が盤面の上に重なって見える(#256)。
+        let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let text = rendered_screen_text(|frame| {
+            draw_battle(
+                frame,
+                &game,
+                &game,
+                "opponent",
+                true,
+                true,
+                Some(BattleOutcome::Desync),
+            )
+        });
+
+        assert!(
+            screen_shows(&text, "DESYNC - DRAW"),
+            "決着の結果が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Enter/Escキーでタイトルへ"),
+            "抜け方の案内が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "OPPONENT: opponent"),
+            "相手パネルは結果表示中も残るはず:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_battle_screen_shows_no_result_overlay_before_the_outcome() {
+        let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &game, &game, "opponent", true, true, None)
+        });
+
+        assert!(
+            !screen_shows(&text, "Enter/Escキーでタイトルへ"),
+            "決着前に結果オーバーレイが出てしまっている:\n{text}"
         );
     }
 
