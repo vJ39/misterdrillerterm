@@ -1,11 +1,11 @@
 //! 対戦のTCP層(#253。spec.md 12.2)。
 //!
 //! TCP接続が確立済みの2ホストが、メッセージのフレーミングを介してハンドシェイク
-//! (Hello交換 → StartConfig → SeedAgree → StartCountdown)を行うところまでを担う。
-//! UDP探索・招待ダイアログ(#256)、lockstepループ中の`Input`/`Heartbeat`/`StateHash`/
-//! `Result`の継続送受信(#254/#255)は対象外で、それらのメッセージは型として定義だけして
-//! おく。ハンドシェイクの結果から`Game`を組み立てるのはゲームロジック側の責務のため
-//! `battle::new_game_from_battle_config`に置く。
+//! (Hello交換 → StartConfig → SeedAgree → StartCountdown)を行うところと、対戦中の
+//! 受信専用スレッド(#254)までを担う。UDP探索・招待ダイアログ(#256)は対象外。
+//! 受信したメッセージをlockstepの進行としてどう解釈するか(#254)・`StateHash`の照合
+//! (#255)はゲームロジック側の責務のため`battle.rs`に置く。ハンドシェイクの結果から
+//! `Game`を組み立てるのも同じ理由で`battle::new_game_from_battle_config`に置く。
 //!
 //! タイトルからの入口はまだ無く(#256)、検証はループバックTCP(`127.0.0.1:0`)を使った
 //! ユニットテストで行う。
@@ -17,6 +17,8 @@
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
@@ -307,9 +309,50 @@ fn unexpected_message(expected: &str, actual: &GameMessage) -> io::Error {
     )
 }
 
+/// 通信スレッドがメインループへ届けるイベント(#254)。
+pub enum NetworkEvent {
+    Message(GameMessage),
+    /// 受信ループがエラー(相手の切断・デコード失敗等)で終了した。
+    Disconnected,
+}
+
+/// 受信専用スレッドを立て、`stream`から届いたメッセージを`tx`へ流し続ける
+/// (spec.md 12.7「専用スレッド+mpscでメインのゲームループをブロックしない」)。
+///
+/// `GameMessage::Bye`を受信した場合、そのメッセージ自体を`tx`へ送ってからスレッドを
+/// 終了する(呼び出し側がBye受信を扱えるように)。読み込みエラーの場合は
+/// `NetworkEvent::Disconnected`を送って終了する。受け手(`BattleState`)が先に落ちて
+/// チャネルが閉じた場合も、送信できなくなった時点で終了する。
+pub fn spawn_receiver_thread(
+    mut stream: TcpStream,
+    tx: mpsc::Sender<NetworkEvent>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            match read_message(&mut stream) {
+                Ok(msg) => {
+                    let is_bye = msg == GameMessage::Bye;
+                    if tx.send(NetworkEvent::Message(msg)).is_err() {
+                        // 受け手(対戦状態)が先に落ちた。届け先が無いため終了する。
+                        return;
+                    }
+                    if is_bye {
+                        return;
+                    }
+                }
+                Err(_) => {
+                    let _ = tx.send(NetworkEvent::Disconnected);
+                    return;
+                }
+            }
+        }
+    })
+}
+
 /// 現在のUNIX時刻(ms)。システム時計がUNIXエポックより前を指している場合は0を返す
 /// (対戦開始時刻の共有はNTP的な厳密同期を前提にしていないため、ここでは失敗させない)。
-fn unix_time_ms() -> u64 {
+/// 対戦中の`Result`送信(#254)でも経過時間の算出に使うため`pub(crate)`にしている。
+pub(crate) fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
@@ -652,6 +695,71 @@ mod tests {
                 chain_vanish_interval_ms: 150,
             }
         );
+    }
+
+    /// ループバックTCPで1組の接続を作り、`(受信スレッドへ渡す側, 送りつける側)`を返す。
+    fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (server, client)
+    }
+
+    /// 受信スレッドからのイベントを1件、上限時間まで待って取り出す。
+    fn recv_event(rx: &mpsc::Receiver<NetworkEvent>) -> NetworkEvent {
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn the_receiver_thread_forwards_messages_in_order_and_stops_after_bye() {
+        let (server, mut client) = loopback_pair();
+        let (tx, rx) = mpsc::channel();
+        let handle = spawn_receiver_thread(server, tx);
+
+        write_message(&mut client, &GameMessage::Heartbeat { tick: 1 }).unwrap();
+        write_message(
+            &mut client,
+            &GameMessage::Input {
+                tick: 1,
+                action: NetAction::Drill,
+            },
+        )
+        .unwrap();
+        write_message(&mut client, &GameMessage::Bye).unwrap();
+
+        assert!(matches!(
+            recv_event(&rx),
+            NetworkEvent::Message(GameMessage::Heartbeat { tick: 1 })
+        ));
+        assert!(matches!(
+            recv_event(&rx),
+            NetworkEvent::Message(GameMessage::Input {
+                tick: 1,
+                action: NetAction::Drill
+            })
+        ));
+        assert!(
+            matches!(recv_event(&rx), NetworkEvent::Message(GameMessage::Bye)),
+            "Bye自体も呼び出し側へ届けてから終了するはず"
+        );
+
+        // Bye受信でスレッドが終わるため、以降のメッセージは届かない。
+        handle.join().unwrap();
+        write_message(&mut client, &GameMessage::Heartbeat { tick: 2 }).unwrap();
+        assert!(rx.recv().is_err(), "スレッド終了で送信側が閉じているはず");
+    }
+
+    #[test]
+    fn the_receiver_thread_reports_a_closed_connection_as_disconnected() {
+        let (server, client) = loopback_pair();
+        let (tx, rx) = mpsc::channel();
+        let handle = spawn_receiver_thread(server, tx);
+
+        drop(client);
+
+        assert!(matches!(recv_event(&rx), NetworkEvent::Disconnected));
+        handle.join().unwrap();
     }
 
     #[test]

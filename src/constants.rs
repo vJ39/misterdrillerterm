@@ -610,3 +610,17 @@ pub const REWIND_STOCK_MAX_SETTING_MAX: u8 = 5;
 /// テストからしか使われないため、`state_hash`等と同じ理由でdead_code警告を抑止する。
 #[allow(dead_code)]
 pub const NET_TICK_MS: u64 = 150;
+
+/// 次のtickに必要な相手の入力を待つ上限(ms)。超えたら相手の切断とみなし対戦を
+/// 中断する(不戦敗にする側は検知した側の相手が勝つ。spec.md 12.3)。
+pub const LOCKSTEP_WAIT_TIMEOUT_MS: u64 = 500;
+
+/// InputまたはHeartbeatのいずれも届かない状態がこの時間続いたら切断とみなす
+/// (spec.md 12.4)。`LOCKSTEP_WAIT_TIMEOUT_MS`より大きい値にする
+/// (tick待ちタイムアウトの方が先に発火するのが通常経路のため)。
+pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
+
+/// Heartbeatを送る間隔(ms)。Inputは自分のtickが進むたびに送られるため、
+/// Heartbeatは「自分のtickも相手のtickも動いていない」状況で生存を示すための
+/// 補助メッセージとして、この間隔で定期的に送る。
+pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;

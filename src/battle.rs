@@ -1,17 +1,24 @@
-//! 対戦用の状態(#252。spec.md 12章)。
+//! 対戦用の状態(#252/#254。spec.md 12章)。
 //!
-//! 通信を伴わない「画面・状態」だけを扱う。TCP層(#253)・通信スレッドとのInput交換
-//! (#254)・StateHash配線(#255)・UDP探索とロビーUI(#256)はいずれも対象外で、この段階では
-//! タイトルから`Screen::Battle`へ到達する入口も無い。ここでは「自分の盤面と相手の盤面を
-//! 150ms固定tickでlockstep実行し、決着を確定する」状態遷移だけを持ち、検証はユニット
-//! テストで行う。
+//! 「自分の盤面と相手の盤面を150ms固定tickでlockstep実行し、決着を確定する」状態遷移を
+//! 持つ。#252では通信を伴わない状態遷移だけだったが、#254で実際のTCP通信(#253)と繋ぎ、
+//! 通信スレッドとのInput交換・切断検知・`Result`の交換を追加した。StateHash配線(#255)・
+//! UDP探索とロビーUI(#256)は対象外で、この段階ではタイトルから`Screen::Battle`へ到達する
+//! 入口も無いため、検証はループバックTCPを使ったユニットテストで行う。
 
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::io;
+use std::net::TcpStream;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use crate::constants::NET_TICK_MS;
+use crate::constants::{
+    HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS, LOCKSTEP_WAIT_TIMEOUT_MS, NET_TICK_MS,
+};
 use crate::game::{Game, GameStatus, InputAction};
 use crate::lockstep;
-use crate::net::BattleConfig;
+use crate::net::{self, BattleConfig, GameMessage, NetAction, NetworkEvent};
 
 /// 1フレームの実測時間としてtickへ繰り入れる上限(ms)。通常プレイ(`tick_playing`)が
 /// `Game::update`へ渡すdeltaに掛けているクランプと同じ値で、ウィンドウ非アクティブ等で
@@ -43,6 +50,45 @@ pub struct BattleState {
     net_tick_accum: Duration,
     /// 決着。`Some`になった以後はtickを進めず、自分の入力も受け付けない。
     outcome: Option<BattleOutcome>,
+    /// `Some`なら実際の通信で相手の入力を得る(#254)。`None`なら#252までと同じ、
+    /// 相手の入力は常に`None`として扱うローカル専用の動作(既存テストの前提)。
+    network: Option<NetworkLink>,
+}
+
+/// 対戦相手との通信路(#254)。`BattleState`が対戦中ずっと保持する。
+struct NetworkLink {
+    /// 送信用のストリーム。送信はメインループから直接行い、専用スレッドは立てない
+    /// (TCPの送信バッファへ書くだけで通常は即座に返るため)。
+    writer: TcpStream,
+    /// 受信専用スレッドからのイベントキュー。
+    event_rx: mpsc::Receiver<NetworkEvent>,
+    /// Dropさせない目的だけで保持する(スレッド自体は`writer`と無関係に動く)。
+    _receiver_thread: thread::JoinHandle<()>,
+    /// 次に処理するtick番号。`Input`メッセージの`tick`と突き合わせるのに使う。
+    next_tick: u32,
+    /// `next_tick`のぶんとして既に送信済みの自分の入力。相手の入力を待っている間に
+    /// 自分の入力だけ先に確定・送信するため、tickが揃うまでここに控える
+    /// (`None`なら`next_tick`ぶんの自分の入力はまだ確定していない)。
+    committed_local_action: Option<NetAction>,
+    /// 通信の遅延で自分のtickより先に届いた相手の`Input`を、tick番号付きで
+    /// 一時保持する。
+    pending_remote_inputs: VecDeque<(u32, NetAction)>,
+    /// 次のtickの相手の入力を待ち始めた時刻。`None`なら待機していない
+    /// (前のtickまでは順調に揃っていた)。
+    awaiting_since: Option<Instant>,
+    /// InputまたはHeartbeatを最後に受信した時刻(`HEARTBEAT_TIMEOUT_MS`の判定に使う)。
+    last_remote_activity: Instant,
+    /// 最後にHeartbeatを送信した時刻。
+    last_heartbeat_sent: Instant,
+    /// 対戦開始時刻(ハンドシェイクの`StartCountdown`の値)。Result送信時の
+    /// `time_ms`(経過時間)の算出に使う。
+    start_at_unix_ms: u64,
+    /// 自分のResultは送信済みか。決着直後に一度だけ送るためのフラグ。
+    result_sent: bool,
+    /// 相手のResultを受信済みか。受信後は自分のシミュレーション結果と照合する。
+    remote_result: Option<(bool, u32)>,
+    /// 相手の切断を検知済みか(Bye受信・ソケットエラー・各種タイムアウト)。
+    disconnected: bool,
 }
 
 impl BattleState {
@@ -56,7 +102,49 @@ impl BattleState {
             opponent_name,
             net_tick_accum: Duration::ZERO,
             outcome: None,
+            network: None,
         }
+    }
+
+    /// #253のハンドシェイク結果と確立済みのTCPストリームから、通信ありの対戦状態を
+    /// 組み立てる(#254)。`stream`は呼び出し元がハンドシェイクに使ったものをそのまま渡す
+    /// (内部で`try_clone`して読み書き用に分ける)。
+    ///
+    /// `Screen::Battle`への実際の遷移(この関数をどこから呼ぶか)は#256(ロビーUI)の範囲の
+    /// ため、この段階ではテストからのみ呼ばれる(`BattleState::new`と同じ理由で
+    /// dead_code警告を抑止する)。
+    #[allow(dead_code)]
+    pub fn from_handshake(handshake: net::HandshakeResult, stream: TcpStream) -> io::Result<Self> {
+        let game_local = new_game_from_battle_config(handshake.seed, &handshake.config);
+        let game_remote = new_game_from_battle_config(handshake.seed, &handshake.config);
+
+        let reader_stream = stream.try_clone()?;
+        let (tx, event_rx) = mpsc::channel();
+        let receiver_thread = net::spawn_receiver_thread(reader_stream, tx);
+
+        let now = Instant::now();
+        Ok(Self {
+            game_local,
+            game_remote,
+            opponent_name: handshake.opponent_name,
+            net_tick_accum: Duration::ZERO,
+            outcome: None,
+            network: Some(NetworkLink {
+                writer: stream,
+                event_rx,
+                _receiver_thread: receiver_thread,
+                next_tick: 0,
+                committed_local_action: None,
+                pending_remote_inputs: VecDeque::new(),
+                awaiting_since: None,
+                last_remote_activity: now,
+                last_heartbeat_sent: now,
+                start_at_unix_ms: handshake.start_at_unix_ms,
+                result_sent: false,
+                remote_result: None,
+                disconnected: false,
+            }),
+        })
     }
 
     /// 実測の経過時間`delta`を150ms固定tickへ量子化し、溜まったぶんだけlockstepを進める。
@@ -64,7 +152,15 @@ impl BattleState {
     /// `local_action`はこのフレームで確定した自分の入力(無ければ`None`)。1tickにつき
     /// 高々1アクション(12.2)のため、1フレームで複数tick進む場合も最初のtickだけが消費し、
     /// 残りのtickは`None`で進む。決着後(`outcome`が`Some`)は何もしない。
+    ///
+    /// 通信あり(`network`が`Some`)の場合は`advance_networked`へ委ねる。相手の入力が
+    /// 揃ったtickしか進められないため、時間の扱いがローカル専用の場合と異なる。
     pub fn advance(&mut self, delta: Duration, local_action: Option<InputAction>) {
+        if self.network.is_some() {
+            self.advance_networked(delta, local_action);
+            return;
+        }
+
         // 決着後は結果表示に専念し、盤面も入力も進めない(12.4)。
         if self.outcome.is_some() {
             return;
@@ -83,13 +179,195 @@ impl BattleState {
         }
     }
 
-    /// lockstepの1tickぶんを進め、その結果から決着を確定する。
+    /// 通信ありの1フレーム(#254)。相手の入力が揃ったtickだけを進める。
+    ///
+    /// 相手を待っている間は`net_tick_accum`へ時間を足さない(自分だけ時計が進むと
+    /// lockstepの前提が壊れる)。1回の呼び出しで複数tick進む場合も、待機に入った時点で
+    /// 残りのtickは次回の呼び出しへ持ち越す。
+    fn advance_networked(&mut self, delta: Duration, local_action: Option<InputAction>) {
+        // 受信処理だけは決着後も続ける(相手の`Result`は自分の決着より後に届くため)。
+        self.drain_network_events();
+        if self.outcome.is_some() {
+            self.reconcile_remote_result();
+            return;
+        }
+
+        let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
+        if link.disconnected {
+            // 切断を検知した側の不戦勝(12.4)。
+            self.outcome = Some(BattleOutcome::Win);
+            return;
+        }
+        if let Some(since) = link.awaiting_since {
+            if since.elapsed() >= Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS) {
+                link.disconnected = true;
+                self.outcome = Some(BattleOutcome::Win);
+            }
+            // 待機中は自分の時計を進めない(12.3)。届いていれば`drain_network_events`が
+            // 既に待機を解除している。
+            return;
+        }
+        if link.last_heartbeat_sent.elapsed() >= Duration::from_millis(HEARTBEAT_INTERVAL_MS) {
+            let tick = link.next_tick;
+            link.last_heartbeat_sent = Instant::now();
+            let _ = net::write_message(&mut link.writer, &GameMessage::Heartbeat { tick });
+        }
+
+        self.net_tick_accum += delta.min(Duration::from_millis(DELTA_CLAMP_MS));
+
+        let net_tick = Duration::from_millis(NET_TICK_MS);
+        let mut local_action = local_action;
+        while self.net_tick_accum >= net_tick {
+            let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
+
+            // 自分の入力は相手を待たずに先に確定して送る。相手の入力が届いてから送る形に
+            // すると、両者が相手の`Input`を待ったまま進まなくなる。送信済みの入力は
+            // tickが揃うまで`committed_local_action`に控え、同じtickを二重に送らない。
+            let my_action = match link.committed_local_action {
+                Some(action) => action,
+                None => {
+                    let action = local_action
+                        .take()
+                        .and_then(Option::<NetAction>::from)
+                        .unwrap_or(NetAction::None);
+                    link.committed_local_action = Some(action);
+                    let _ = net::write_message(
+                        &mut link.writer,
+                        &GameMessage::Input {
+                            tick: link.next_tick,
+                            action,
+                        },
+                    );
+                    action
+                }
+            };
+
+            let Some(remote_action) = take_remote_input_for(link, link.next_tick) else {
+                // 相手の入力がまだ無い。このtickぶんは`net_tick_accum`から引かずに
+                // 次回の呼び出しへ持ち越す。
+                link.awaiting_since = Some(Instant::now());
+                break;
+            };
+
+            self.net_tick_accum -= net_tick;
+            link.committed_local_action = None;
+            link.next_tick += 1;
+            self.run_net_tick_with_remote(my_action.into(), remote_action.into());
+
+            if self.outcome.is_some() {
+                self.maybe_send_result();
+                self.reconcile_remote_result();
+                break;
+            }
+        }
+    }
+
+    /// 通信スレッドから届いたイベントを、キューが空になるまで処理する(#254)。
+    fn drain_network_events(&mut self) {
+        let Some(link) = &mut self.network else {
+            return;
+        };
+
+        while let Ok(event) = link.event_rx.try_recv() {
+            match event {
+                NetworkEvent::Message(GameMessage::Input { tick, action }) => {
+                    link.last_remote_activity = Instant::now();
+                    link.pending_remote_inputs.push_back((tick, action));
+                }
+                NetworkEvent::Message(GameMessage::Heartbeat { .. }) => {
+                    link.last_remote_activity = Instant::now();
+                }
+                NetworkEvent::Message(GameMessage::Result {
+                    reached_goal, tick, ..
+                }) => {
+                    link.remote_result = Some((reached_goal, tick));
+                }
+                NetworkEvent::Message(GameMessage::Bye) | NetworkEvent::Disconnected => {
+                    link.disconnected = true;
+                }
+                // `StateHash`の照合は#255の範囲。ハンドシェイク用のメッセージは#253で
+                // 消費済みのため、この段階で届いても無視してよい。
+                NetworkEvent::Message(_) => {}
+            }
+        }
+
+        // 待っていたtickの入力が届いていれば待機を解除する。
+        if link.awaiting_since.is_some()
+            && link
+                .pending_remote_inputs
+                .iter()
+                .any(|&(tick, _)| tick == link.next_tick)
+        {
+            link.awaiting_since = None;
+        }
+
+        // Input・Heartbeatのいずれも途絶えたら切断とみなす(12.4)。
+        if link.last_remote_activity.elapsed() >= Duration::from_millis(HEARTBEAT_TIMEOUT_MS) {
+            link.disconnected = true;
+        }
+    }
+
+    /// 決着直後に自分の`Result`を1回だけ送る(12.4。勝敗判定の根拠ではなく相互確認用)。
+    fn maybe_send_result(&mut self) {
+        let reached_goal = self.game_local.status == GameStatus::Cleared;
+        let Some(link) = &mut self.network else {
+            return;
+        };
+        if link.result_sent {
+            return;
+        }
+        link.result_sent = true;
+
+        let time_ms = net::unix_time_ms().saturating_sub(link.start_at_unix_ms);
+        let _ = net::write_message(
+            &mut link.writer,
+            &GameMessage::Result {
+                reached_goal,
+                tick: link.next_tick,
+                time_ms,
+            },
+        );
+    }
+
+    /// 受信済みの相手の`Result`を自分のシミュレーション結果と照合する(12.4)。
+    ///
+    /// 相手の自己申告と、自分が持つ相手インスタンスの判定が食い違ったら、どちらが正しいか
+    /// 判定できないためデシンクと同様に引き分けへ上書きする。自分がまだ決着していない
+    /// 段階では、単に自分のtickが相手より遅れているだけのため照合しない。
+    fn reconcile_remote_result(&mut self) {
+        if self.outcome.is_none() {
+            return;
+        }
+        let reached_goal_in_my_simulation = self.game_remote.status == GameStatus::Cleared;
+        let Some(link) = &self.network else {
+            return;
+        };
+        let Some((remote_reached_goal, _tick)) = link.remote_result else {
+            return;
+        };
+
+        if remote_reached_goal != reached_goal_in_my_simulation {
+            self.outcome = Some(BattleOutcome::Draw);
+        }
+    }
+
+    /// lockstepの1tickぶんを進め、その結果から決着を確定する。相手の入力は通信なしの
+    /// 経路(#252)用に`receive_remote_action`から取る。
     fn run_net_tick(&mut self, local_action: Option<InputAction>) {
+        self.run_net_tick_with_remote(local_action, receive_remote_action());
+    }
+
+    /// `run_net_tick`の本体。通信あり(#254)の経路は、受信済みの相手の入力を直接渡す。
+    fn run_net_tick_with_remote(
+        &mut self,
+        local_action: Option<InputAction>,
+        remote_action: Option<InputAction>,
+    ) {
         lockstep::run_tick(
             &mut self.game_local,
             &mut self.game_remote,
             local_action,
-            receive_remote_action(),
+            remote_action,
         );
 
         // 一度確定した決着は上書きしない(決着後は`advance`がtickを呼ばないため、
@@ -98,6 +376,18 @@ impl BattleState {
             self.outcome = resolve_outcome(self.game_local.status, self.game_remote.status);
         }
     }
+}
+
+/// `pending_remote_inputs`から指定したtickの相手の入力を取り出す。届く順序は通常
+/// tick順だが、取り違えを防ぐためtick番号で突き合わせる。
+fn take_remote_input_for(link: &mut NetworkLink, tick: u32) -> Option<NetAction> {
+    let index = link
+        .pending_remote_inputs
+        .iter()
+        .position(|&(pending_tick, _)| pending_tick == tick)?;
+    link.pending_remote_inputs
+        .remove(index)
+        .map(|(_, action)| action)
 }
 
 /// `BattleConfig`とseedから、通常プレイの開始処理と同一順序でGameを1つ生成する
@@ -145,9 +435,9 @@ pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
     game
 }
 
-/// 相手の入力を1tickぶん受け取る。通信スレッドがまだ無い#252時点では常に`None`。
-/// #254で通信スレッドの受信キュー(mpsc)からの取り出しへ差し替える。相手の入力を
-/// 取得する箇所をこの関数1つに閉じているため、差し替えはここだけで済む。
+/// 通信なし(`network`が`None`)の経路で相手の入力を1tickぶん受け取る。相手がいないため
+/// 常に`None`。通信あり(#254)の経路は受信キュー(mpsc)から取り出した入力を
+/// `run_net_tick_with_remote`へ直接渡すため、この関数は通らない。
 fn receive_remote_action() -> Option<InputAction> {
     None
 }
@@ -182,6 +472,7 @@ mod tests {
     use super::*;
     use crate::constants::FIELD_WIDTH_DEFAULT;
     use crate::game::board::Cell;
+    use std::net::TcpListener;
 
     /// テスト用の短いコース(ゴール20m)。本番のノーマルコース(1000m)より盤面生成が軽く、
     /// ゴール到達も数tickで再現できる。
@@ -444,5 +735,356 @@ mod tests {
         // 自分がゴール・相手が脱落なら、どちらの判定でも自分の勝ち。
         assert_eq!(resolve_outcome(Cleared, GameOver), Some(Win));
         assert_eq!(resolve_outcome(GameOver, Cleared), Some(Lose));
+    }
+
+    // -----------------------------------------------------------------------
+    // 通信あり(#254)。ループバックTCPで#253のハンドシェイクを実際に行ってから、
+    // 2つの`BattleState`をlockstepで進める。
+    // -----------------------------------------------------------------------
+
+    /// テストのポンプ回数の上限。ループバックの配送待ちで何周か空回りするため実際の
+    /// tick数より多めに取る。ここまで回して条件が揃わなければ実装の不具合とみなす。
+    const MAX_PUMPS: usize = 500;
+
+    /// 1周ごとに挟む待ち時間。受信スレッドがメッセージを届ける隙を作るためのもので、
+    /// これが無いとポンプの空回りだけで上限に達し、相手の入力が届く前に打ち切られる。
+    fn pump_interval() {
+        thread::sleep(Duration::from_millis(1));
+    }
+
+    /// 通信ありの状態が持つ`NetworkLink`を取り出す。
+    fn link(state: &BattleState) -> &NetworkLink {
+        state.network.as_ref().expect("通信ありの対戦状態のはず")
+    }
+
+    /// ループバックTCPで#253のハンドシェイクを実行し、ホスト側・クライアント側の
+    /// `BattleState`と、両者が合意した内容(参照実装の組み立てに使う)を返す。
+    fn connected_pair() -> (BattleState, BattleState, net::HandshakeResult) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = test_battle_config();
+
+        let host = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let result = net::run_host_handshake(&mut stream, "host", config).unwrap();
+            (result, stream)
+        });
+
+        let mut client_stream = TcpStream::connect(addr).unwrap();
+        let client_result = net::run_client_handshake(&mut client_stream, "client").unwrap();
+        let (host_result, host_stream) = host.join().unwrap();
+        let agreed = host_result.clone();
+
+        (
+            BattleState::from_handshake(host_result, host_stream).unwrap(),
+            BattleState::from_handshake(client_result, client_stream).unwrap(),
+            agreed,
+        )
+    }
+
+    /// ホスト側だけ`BattleState`を作り、相手側は生のTCPストリームのままにする。
+    /// 偽のメッセージを送りつけるテスト用。
+    fn battle_with_raw_peer() -> (BattleState, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = test_battle_config();
+
+        let host = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let result = net::run_host_handshake(&mut stream, "host", config).unwrap();
+            (result, stream)
+        });
+
+        let mut peer = TcpStream::connect(addr).unwrap();
+        net::run_client_handshake(&mut peer, "peer").unwrap();
+        let (host_result, host_stream) = host.join().unwrap();
+
+        (
+            BattleState::from_handshake(host_result, host_stream).unwrap(),
+            peer,
+        )
+    }
+
+    /// 対戦の1フレームぶん`advance`を呼ぶ。実測時間を渡すのは「目標tickにまだ達して
+    /// おらず、前フレームぶんの蓄積も使い切っている」ときだけにする。こうしないと相手待ちの
+    /// 空回り中に時間だけが溜まり、後からまとめてtickへ化けて両者のtick数がずれる。
+    fn pump(state: &mut BattleState, target_ticks: u32, action: Option<InputAction>) {
+        let needs_time = state.net_tick_accum < net_tick() && link(state).next_tick < target_ticks;
+        let delta = if needs_time {
+            net_tick()
+        } else {
+            Duration::ZERO
+        };
+        state.advance(delta, action);
+    }
+
+    /// `tick`番目に入力する予定のアクション(尽きたら何もしない)。
+    fn action_for(actions: &[Option<InputAction>], tick: u32) -> Option<InputAction> {
+        actions.get(tick as usize).copied().flatten()
+    }
+
+    #[test]
+    fn two_hosts_connected_over_tcp_advance_in_lockstep() {
+        // 双方が異なる入力列を送り合っても、両視点のクロスチェック(A.local⟷B.remote)が
+        // 一致し、かつ#251のローカルハーネス(`lockstep::run_tick`)と同じ結果になる。
+        const TICKS: u32 = 12;
+        let host_actions: Vec<Option<InputAction>> = (0..TICKS)
+            .map(|i| match i % 4 {
+                0 => Some(InputAction::MoveRight),
+                1 => Some(InputAction::Drill),
+                2 => None,
+                _ => Some(InputAction::FaceDown),
+            })
+            .collect();
+        let client_actions: Vec<Option<InputAction>> = (0..TICKS)
+            .map(|i| match i % 3 {
+                0 => Some(InputAction::MoveLeft),
+                1 => Some(InputAction::Drill),
+                _ => None,
+            })
+            .collect();
+
+        let (mut host, mut client, agreed) = connected_pair();
+        for _ in 0..MAX_PUMPS {
+            let host_action = action_for(&host_actions, link(&host).next_tick);
+            pump(&mut host, TICKS, host_action);
+            let client_action = action_for(&client_actions, link(&client).next_tick);
+            pump(&mut client, TICKS, client_action);
+            if link(&host).next_tick >= TICKS && link(&client).next_tick >= TICKS {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(link(&host).next_tick, TICKS, "ホストが目標tickまで進むはず");
+        assert_eq!(
+            link(&client).next_tick,
+            TICKS,
+            "クライアントが目標tickまで進むはず"
+        );
+        assert_eq!(host.outcome, None, "前提: この長さでは決着しないはず");
+        assert_eq!(client.outcome, None);
+
+        assert_eq!(
+            host.game_local.state_hash(),
+            client.game_remote.state_hash(),
+            "ホストの自分盤面とクライアントの相手盤面が一致しない"
+        );
+        assert_eq!(
+            host.game_remote.state_hash(),
+            client.game_local.state_hash(),
+            "ホストの相手盤面とクライアントの自分盤面が一致しない"
+        );
+
+        let mut reference_host = new_game_from_battle_config(agreed.seed, &agreed.config);
+        let mut reference_client = new_game_from_battle_config(agreed.seed, &agreed.config);
+        for tick in 0..TICKS as usize {
+            lockstep::run_tick(
+                &mut reference_host,
+                &mut reference_client,
+                host_actions[tick],
+                client_actions[tick],
+            );
+        }
+        assert_eq!(
+            host.game_local.state_hash(),
+            reference_host.state_hash(),
+            "通信を挟んでもローカルハーネスと同じ結果になるはず"
+        );
+        assert_eq!(host.game_remote.state_hash(), reference_client.state_hash());
+    }
+
+    #[test]
+    fn an_opponent_that_stops_sending_input_times_out_into_a_win_by_default() {
+        // 相手が`advance`を呼ばなくなる(入力を送らなくなる)と、500ms待って不戦勝になる。
+        // `client`は束縛したままにして接続自体は生かす(切断検知ではなくtick待ちの
+        // タイムアウトで決着することを見るため)。
+        let (mut host, _client, _) = connected_pair();
+
+        let started = Instant::now();
+        let deadline = Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS * 8);
+        while host.outcome.is_none() && started.elapsed() < deadline {
+            host.advance(net_tick(), None);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert!(
+            started.elapsed() >= Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS),
+            "待機上限に達する前に不戦勝にはしないはず"
+        );
+        assert!(link(&host).disconnected, "切断扱いになるはず");
+        assert_eq!(link(&host).next_tick, 0, "1tickも進めずに終わるはず");
+    }
+
+    #[test]
+    fn receiving_bye_from_the_opponent_ends_the_battle_as_a_win_by_default() {
+        let (mut host, mut peer) = battle_with_raw_peer();
+        net::write_message(&mut peer, &GameMessage::Bye).unwrap();
+
+        // `delta`を0にして回すと`net_tick_accum`が溜まらず相手待ちにも入らないため、
+        // tick待ちのタイムアウトではなくBye受信だけで決着することを確認できる。
+        for _ in 0..MAX_PUMPS {
+            host.advance(Duration::ZERO, None);
+            if host.outcome.is_some() {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert!(link(&host).disconnected);
+        assert!(
+            link(&host).awaiting_since.is_none(),
+            "tick待ちには入っていないはず(Bye受信での決着)"
+        );
+    }
+
+    #[test]
+    fn a_heartbeat_is_sent_while_neither_side_ticks() {
+        // どちらのtickも動いていない間は、生存を示すのがHeartbeatだけになる(12.4)。
+        let (mut host, mut peer) = battle_with_raw_peer();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(HEARTBEAT_INTERVAL_MS + 200) {
+            // `delta`が0ならtickは進まないため、Inputは1件も送られない。
+            host.advance(Duration::ZERO, None);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            net::read_message(&mut peer).unwrap(),
+            GameMessage::Heartbeat { tick: 0 }
+        );
+    }
+
+    #[test]
+    fn silence_longer_than_the_heartbeat_timeout_counts_as_a_disconnect() {
+        // 相手役はInputもHeartbeatも送らない。tickを進めない(delta=0)ため、tick待ちの
+        // タイムアウトではなくHeartbeatの途絶だけで切断と判定される。
+        let (mut host, _peer) = battle_with_raw_peer();
+
+        let started = Instant::now();
+        let deadline = Duration::from_millis(HEARTBEAT_TIMEOUT_MS * 2);
+        while host.outcome.is_none() && started.elapsed() < deadline {
+            host.advance(Duration::ZERO, None);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert!(
+            started.elapsed() >= Duration::from_millis(HEARTBEAT_TIMEOUT_MS),
+            "途絶の上限に達する前に切断扱いにはしないはず"
+        );
+        assert!(
+            link(&host).awaiting_since.is_none(),
+            "tick待ちのタイムアウトではないはず"
+        );
+    }
+
+    #[test]
+    fn a_consistent_result_exchange_leaves_both_outcomes_untouched() {
+        // 「ホスト側のプレイヤーがゴール直前にいる」状態を両ホストで同一に作る
+        // (ホストから見た自分の盤面=クライアントから見た相手の盤面)。
+        const TICKS: u32 = 20;
+        let (mut host, mut client, _) = connected_pair();
+        place_just_above_goal(&mut host.game_local);
+        place_just_above_goal(&mut client.game_remote);
+
+        for _ in 0..MAX_PUMPS {
+            pump(&mut host, TICKS, None);
+            pump(&mut client, TICKS, None);
+            if link(&host).remote_result.is_some() && link(&client).remote_result.is_some() {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            host.game_local.status,
+            GameStatus::Cleared,
+            "前提: ホスト側がゴールに到達しているはず"
+        );
+        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert_eq!(client.outcome, Some(BattleOutcome::Lose));
+        assert_eq!(
+            link(&host).remote_result.map(|(reached, _)| reached),
+            Some(false),
+            "相手は「自分はゴールしていない」と申告するはず"
+        );
+        assert_eq!(
+            link(&client).remote_result.map(|(reached, _)| reached),
+            Some(true),
+            "相手は「自分がゴールした」と申告するはず"
+        );
+
+        // 申告と自分のシミュレーションが一致しているため、決着は上書きされない。
+        for _ in 0..10 {
+            host.advance(Duration::ZERO, None);
+            client.advance(Duration::ZERO, None);
+        }
+        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert_eq!(client.outcome, Some(BattleOutcome::Lose));
+    }
+
+    #[test]
+    fn a_contradictory_result_from_the_opponent_overwrites_the_outcome_with_a_draw() {
+        // 相手の申告と自分のシミュレーションが食い違ったら引き分けにする(12.4)。
+        const TICKS: u32 = 16;
+        let (mut host, mut peer) = battle_with_raw_peer();
+        place_just_above_goal(&mut host.game_local);
+
+        // 相手役はtickを進めるための入力だけ送る(自分は何もしない)。
+        for tick in 0..TICKS {
+            net::write_message(
+                &mut peer,
+                &GameMessage::Input {
+                    tick,
+                    action: NetAction::None,
+                },
+            )
+            .unwrap();
+        }
+        for _ in 0..MAX_PUMPS {
+            pump(&mut host, TICKS, None);
+            if host.outcome.is_some() {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            host.game_local.status,
+            GameStatus::Cleared,
+            "前提: 自分のゴール到達で決着しているはず"
+        );
+        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+
+        // ホストの持つ相手インスタンスはまだプレイ中なのに、相手は「自分がゴールした」と
+        // 申告してくる。
+        net::write_message(
+            &mut peer,
+            &GameMessage::Result {
+                reached_goal: true,
+                tick: link(&host).next_tick,
+                time_ms: 0,
+            },
+        )
+        .unwrap();
+        for _ in 0..MAX_PUMPS {
+            host.advance(Duration::ZERO, None);
+            if host.outcome == Some(BattleOutcome::Draw) {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            host.game_remote.status,
+            GameStatus::Playing,
+            "前提: 自分のシミュレーション上、相手はゴールしていない"
+        );
+        assert_eq!(host.outcome, Some(BattleOutcome::Draw));
     }
 }
