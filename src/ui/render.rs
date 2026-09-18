@@ -1127,6 +1127,7 @@ fn draw_static_field(
             } else if board_row < game.board.depth_rows() {
                 game.board.cell(board_row, col)
             } else {
+                // 盤面外(ゴールより深い行)。draw_static_cellが地面として描く。
                 BoardCell::Empty
             };
             // プレイヤーがいるセルも含め常にそのマス本来の内容を描画し、プレイヤーの
@@ -1164,10 +1165,10 @@ fn draw_static_field(
 /// 盤面のセル1マスぶんを、その場(静止位置)に描画する。落下補間中のブロックは
 /// `draw_falling_blocks`が別途上から重ねるため、ここでは扱わない。
 ///
-/// 優先順: クリア後の盤面の底(フィールドより深い行)は地底の地面 > 爆風直後のセルは
-/// 炎色で一瞬覆う > フラッシュ中のセルはフラッシュしてから背景色へ消える > 消滅は
-/// 確定したが落下ブロックの到着待ちのセルは消滅前の見た目のまま(#234) >
-/// チェックポイント安全地帯のEmptyは地面ビジュアル > 通常描画。
+/// 優先順: 盤面の底(フィールドより深い、実データの無い行)はクリア前後を問わず地底の
+/// 地面 > 爆風直後のセルは炎色で一瞬覆う > フラッシュ中のセルはフラッシュしてから
+/// 背景色へ消える > 消滅は確定したが落下ブロックの到着待ちのセルは消滅前の見た目の
+/// まま(#234) > チェックポイント安全地帯のEmptyは地面ビジュアル > 通常描画。
 fn draw_static_cell(
     buf: &mut Buffer,
     x: u16,
@@ -1178,7 +1179,7 @@ fn draw_static_cell(
     moved_map: &HashMap<Pos, Pos>,
 ) {
     let (board_row, col) = pos;
-    if game.status == GameStatus::Cleared && board_row >= game.board.depth_rows() {
+    if board_row >= game.board.depth_rows() {
         fill_bedrock_ground(buf, x, y);
     } else if let Some((t, tier)) = game.explosion_flash_progress(pos) {
         fill_block(
@@ -1811,8 +1812,9 @@ fn fill_block(buf: &mut Buffer, x: u16, y: u16, bg: Color) {
     }
 }
 
-/// 最終ゴール到達時の盤面の底やチェックポイント安全地帯に見せる地底の地面。単色でなく
-/// 岩肌のようなハッチング模様にして「掘り進めない底に到達した」ことを見た目でも伝える。
+/// 盤面の底(ゴールより深い行。到達前から近づくと見える)やチェックポイント安全地帯に
+/// 見せる地底の地面。単色でなく岩肌のようなハッチング模様にして「この先は掘り進めない
+/// 底がある」ことを見た目でも伝える。
 const BEDROCK_GROUND_GLYPHS: [[char; 4]; 2] = [['▓', '▒', '▓', '▒'], ['▒', '▓', '▒', '▓']];
 
 fn fill_bedrock_ground(buf: &mut Buffer, x: u16, y: u16) {
@@ -2815,6 +2817,165 @@ mod tests {
             "500mはボーナスフロアなので対象外のはず"
         );
         assert!(is_checkpoint_safe_zone_row(600));
+    }
+
+    #[test]
+    fn rows_below_the_board_bottom_are_drawn_as_bedrock_ground_before_clearing() {
+        // #261の回帰防止。盤面外(ゴールより深い行)は、ゲーム状態がPlayingのままでも
+        // クリア前から地底の地面ビジュアルで表示されるはず。到達した瞬間に突然
+        // 出現するのがバグだった(ゴール直前まで地面が見えず、着地すると急に現れる)。
+        let mut game = free_falling_game();
+        game.board.rows.truncate(20);
+        assert_eq!(
+            game.status,
+            GameStatus::Playing,
+            "テスト前提: クリア前であること"
+        );
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+        let area = Rect::new(0, 0, CELL_W, CELL_H);
+
+        // 盤面外(depth_rows=20を超えた行)。
+        let mut below_buf = Buffer::empty(area);
+        draw_static_cell(
+            &mut below_buf,
+            0,
+            0,
+            &game,
+            (20, 0),
+            BoardCell::Empty,
+            &no_moves,
+        );
+        assert!(
+            below_buf
+                .content
+                .iter()
+                .all(|c| c.bg == colors::BEDROCK_GROUND_BG),
+            "盤面外の行はクリア前でも地底の地面のはず"
+        );
+
+        // 対照: 盤面内・チェックポイント帯でもない普通のEmpty行は素の背景のまま。
+        let mut inside_buf = Buffer::empty(area);
+        draw_static_cell(
+            &mut inside_buf,
+            0,
+            0,
+            &game,
+            (19, 0),
+            BoardCell::Empty,
+            &no_moves,
+        );
+        assert!(
+            inside_buf
+                .content
+                .iter()
+                .all(|c| c.bg == colors::FIELD_EMPTY_BG),
+            "盤面内の通常のEmpty行は地底の地面にならないはず"
+        );
+    }
+
+    #[test]
+    fn rows_below_the_board_bottom_stay_bedrock_ground_after_clearing() {
+        // #182の回帰防止。クリア後も盤面外の行は同じく地底の地面のままのはず。
+        let mut game = free_falling_game();
+        game.board.rows.truncate(20);
+        game.status = GameStatus::Cleared;
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+
+        let area = Rect::new(0, 0, CELL_W, CELL_H);
+        let mut buf = Buffer::empty(area);
+        draw_static_cell(&mut buf, 0, 0, &game, (20, 0), BoardCell::Empty, &no_moves);
+        assert!(
+            buf.content
+                .iter()
+                .all(|c| c.bg == colors::BEDROCK_GROUND_BG),
+            "クリア後も盤面外の行は地底の地面のままのはず"
+        );
+    }
+
+    #[test]
+    fn bottom_of_a_bonus_floor_depth_course_is_ground_before_clearing() {
+        // ユーザー報告の再現(500mコース)。500はチェックポイント安全地帯の判定からは
+        // 除外される(ボーナスフロアのため)が、盤面外判定が先に効くのでクリア前でも
+        // 地底の地面になるはず。
+        assert!(
+            !is_checkpoint_safe_zone_row(BONUS_FLOOR_DEPTH_M),
+            "テスト前提: 500mはチェックポイント安全地帯の判定からは対象外のはず"
+        );
+        let mut game = free_falling_game();
+        game.board.rows.truncate(BONUS_FLOOR_DEPTH_M);
+        assert_eq!(
+            game.status,
+            GameStatus::Playing,
+            "テスト前提: クリア前であること"
+        );
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+
+        let area = Rect::new(0, 0, CELL_W, CELL_H);
+        let mut buf = Buffer::empty(area);
+        draw_static_cell(
+            &mut buf,
+            0,
+            0,
+            &game,
+            (BONUS_FLOOR_DEPTH_M, 0),
+            BoardCell::Empty,
+            &no_moves,
+        );
+        assert!(
+            buf.content
+                .iter()
+                .all(|c| c.bg == colors::BEDROCK_GROUND_BG),
+            "500mゴールの盤面外行はクリア前でも地底の地面のはず"
+        );
+    }
+
+    #[test]
+    fn static_field_shows_the_ground_at_the_bottom_while_the_player_approaches_the_goal() {
+        // #261の統合テスト。draw_static_field経由でも、盤面外の行が画面内に入れば
+        // クリア前から地底の地面が描かれ、盤面内のEmpty行とは見た目が区別できるはず。
+        let mut game = free_falling_game();
+        game.board.rows.truncate(20);
+        game.player.row = 15;
+        game.player.col = 2;
+
+        // top_row=10・visible_rows=10で盤面内の行は board_row 10〜19の10行ぶん。
+        // dy=1(半端スクロール量、CELL_H=2の半分)にすると、`inner`の最終端末行
+        // (row=inner.height-1)には次に見えてくる盤面外の行(board_row=20)の
+        // 上側ピクセル行がせり上がって見える(#242のオフスクリーン転写の仕組み)。
+        let visible_rows = 10;
+        let cam = FieldCamera {
+            row_f: 10.5,
+            top_row: 10,
+            dy: 1,
+        };
+        let inner = field_inner_rect(visible_rows);
+        let no_moves: HashMap<Pos, Pos> = HashMap::new();
+        let mut buf = Buffer::empty(inner);
+
+        draw_static_field(&mut buf, inner, &cam, visible_rows, &game, &no_moves);
+
+        // inner先頭の端末行(board_row=10、盤面内の通常のEmpty行)。
+        let inside_y = inner.y;
+        // inner最終端末行(board_row=20、盤面外)。
+        let below_y = inner.y + inner.height - 1;
+
+        let row_bg = |y: u16| {
+            (inner.x..inner.x + inner.width)
+                .map(|x| buf.cell(Position::new(x, y)).unwrap().bg)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            row_bg(inside_y)
+                .iter()
+                .all(|&bg| bg == colors::FIELD_EMPTY_BG),
+            "盤面内のEmpty行は素の背景のままのはず"
+        );
+        assert!(
+            row_bg(below_y)
+                .iter()
+                .all(|&bg| bg == colors::BEDROCK_GROUND_BG),
+            "ゴールに近づいている(クリア前)時点で盤面外の行が地底の地面として見えるはず"
+        );
     }
 
     #[test]

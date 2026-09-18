@@ -830,8 +830,15 @@ fn player_sprite(facing: Direction) -> [&'static str; 2] {
 | プレイヤー | `PLAYER_FG = Rgb(255, 170, 40)` |
 | パネル枠線 | `PANEL_BORDER = Rgb(90, 90, 100)` |
 | パネル文字 | `PANEL_TEXT = Rgb(230, 230, 230)` |
+| 地底の地面(下記) | `BEDROCK_GROUND_BG = Rgb(60, 38, 22)` / `BEDROCK_GROUND_FG = Rgb(150, 110, 70)` |
 
 岩ブロックの背景色は`lerp(ROCK_BG_INTACT, ROCK_BG_CRACKED, hits / 4.0)`で補間する。
+
+盤面の底(ゴールより深い、実データの無い行)やチェックポイント安全地帯のEmptyセルは、
+単色でなく`BEDROCK_GROUND_BG`/`BEDROCK_GROUND_FG`のハッチング模様で地底の地面として
+表示する(TERM独自拡張。#182/#186/#188/#261)。ゲーム状態(Playing/Cleared)を問わず、
+その行が画面内に入れば常に表示される。最終ゴールの地面は到達前から近づくと見えている
+必要があり、到達した瞬間に突然出現させない(#261)。
 
 酸素ゲージのバー色は残量に応じて変化させる:
 
