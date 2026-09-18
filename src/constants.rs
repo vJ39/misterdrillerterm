@@ -624,3 +624,6 @@ pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 /// Heartbeatは「自分のtickも相手のtickも動いていない」状況で生存を示すための
 /// 補助メッセージとして、この間隔で定期的に送る。
 pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
+
+/// `StateHash`を送る間隔(tick数、spec.md 12.3)。約3秒ごと。
+pub const STATE_HASH_INTERVAL_TICKS: u32 = 20;

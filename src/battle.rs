@@ -2,11 +2,12 @@
 //!
 //! 「自分の盤面と相手の盤面を150ms固定tickでlockstep実行し、決着を確定する」状態遷移を
 //! 持つ。#252では通信を伴わない状態遷移だけだったが、#254で実際のTCP通信(#253)と繋ぎ、
-//! 通信スレッドとのInput交換・切断検知・`Result`の交換を追加した。StateHash配線(#255)・
-//! UDP探索とロビーUI(#256)は対象外で、この段階ではタイトルから`Screen::Battle`へ到達する
-//! 入口も無いため、検証はループバックTCPを使ったユニットテストで行う。
+//! 通信スレッドとのInput交換・切断検知・`Result`の交換を追加し、#255で定期的な
+//! `StateHash`の照合(デシンク検出)を追加した。UDP探索とロビーUI(#256)は対象外で、
+//! この段階ではタイトルから`Screen::Battle`へ到達する入口も無いため、検証はループバック
+//! TCPを使ったユニットテストで行う。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::TcpStream;
 use std::sync::mpsc;
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::constants::{
     HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS, LOCKSTEP_WAIT_TIMEOUT_MS, NET_TICK_MS,
+    STATE_HASH_INTERVAL_TICKS,
 };
 use crate::game::{Game, GameStatus, InputAction};
 use crate::lockstep;
@@ -31,6 +33,9 @@ pub enum BattleOutcome {
     Win,
     Lose,
     Draw,
+    /// StateHashの不一致を検出して対戦を中断した(spec.md 12.3)。勝敗としては
+    /// 引き分けと同様に扱うが、原因が異なるためUI表示を分けられるよう区別する。
+    Desync,
 }
 
 /// 対戦画面(`Screen::Battle`)が持つ状態。
@@ -89,6 +94,12 @@ struct NetworkLink {
     remote_result: Option<(bool, u32)>,
     /// 相手の切断を検知済みか(Bye受信・ソケットエラー・各種タイムアウト)。
     disconnected: bool,
+    /// 自分が計算し、まだ相手からの対応する`StateHash`と照合できていない
+    /// (local_hash, remote_hash)。tick番号をキーに持つ。相手の到着が自分より
+    /// 早い場合と遅い場合の両方があるため、双方向にキューを持つ。
+    own_state_hashes: HashMap<u32, (u64, u64)>,
+    /// 相手から届いたが、自分がまだそのtickに到達していない`StateHash`。
+    pending_remote_state_hashes: HashMap<u32, (u64, u64)>,
 }
 
 impl BattleState {
@@ -143,6 +154,8 @@ impl BattleState {
                 result_sent: false,
                 remote_result: None,
                 disconnected: false,
+                own_state_hashes: HashMap::new(),
+                pending_remote_state_hashes: HashMap::new(),
             }),
         })
     }
@@ -252,7 +265,28 @@ impl BattleState {
             self.net_tick_accum -= net_tick;
             link.committed_local_action = None;
             link.next_tick += 1;
+            let completed_tick = link.next_tick - 1; // このtickの処理が完了した
             self.run_net_tick_with_remote(my_action.into(), remote_action.into());
+
+            // 定期的に状態ダイジェストを交換してデシンクを検出する(#255。spec.md 12.3)。
+            // tick 0も対象になり、そこでの照合はハンドシェイクで合意したseed/configから
+            // 同一の初期盤面が作られているかの検証を兼ねる。
+            if completed_tick.is_multiple_of(STATE_HASH_INTERVAL_TICKS) {
+                let local_hash = self.game_local.state_hash();
+                let remote_hash = self.game_remote.state_hash();
+                let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
+                link.own_state_hashes
+                    .insert(completed_tick, (local_hash, remote_hash));
+                let _ = net::write_message(
+                    &mut link.writer,
+                    &GameMessage::StateHash {
+                        tick: completed_tick,
+                        local_hash,
+                        remote_hash,
+                    },
+                );
+                reconcile_state_hash(link, &mut self.outcome, completed_tick);
+            }
 
             if self.outcome.is_some() {
                 self.maybe_send_result();
@@ -277,6 +311,17 @@ impl BattleState {
                 NetworkEvent::Message(GameMessage::Heartbeat { .. }) => {
                     link.last_remote_activity = Instant::now();
                 }
+                NetworkEvent::Message(GameMessage::StateHash {
+                    tick,
+                    local_hash,
+                    remote_hash,
+                }) => {
+                    link.last_remote_activity = Instant::now();
+                    link.pending_remote_state_hashes
+                        .insert(tick, (local_hash, remote_hash));
+                    // 自分が先に計算済みで相手の到着を待っていた場合は、ここで照合できる。
+                    reconcile_state_hash(link, &mut self.outcome, tick);
+                }
                 NetworkEvent::Message(GameMessage::Result {
                     reached_goal, tick, ..
                 }) => {
@@ -285,8 +330,8 @@ impl BattleState {
                 NetworkEvent::Message(GameMessage::Bye) | NetworkEvent::Disconnected => {
                     link.disconnected = true;
                 }
-                // `StateHash`の照合は#255の範囲。ハンドシェイク用のメッセージは#253で
-                // 消費済みのため、この段階で届いても無視してよい。
+                // ハンドシェイク用のメッセージは#253で消費済みのため、この段階で
+                // 届いても無視してよい。
                 NetworkEvent::Message(_) => {}
             }
         }
@@ -388,6 +433,34 @@ fn take_remote_input_for(link: &mut NetworkLink, tick: u32) -> Option<NetAction>
     link.pending_remote_inputs
         .remove(index)
         .map(|(_, action)| action)
+}
+
+/// 指定tickについて、自分の計算値と相手からの申告値が両方揃っていれば照合する(#255)。
+/// 相手の`local_hash`(相手自身の盤面)は自分の`game_remote`のそのtick時点の値と、
+/// 相手の`remote_hash`(相手から見た自分)は自分の`game_local`のそのtick時点の値と
+/// 一致するはず。不一致ならデシンクとして`outcome`を`Desync`にする(spec.md 12.3)。
+///
+/// 送信時(自分がそのtickへ到達した時)と受信時の両方から呼ぶ。どちらが先になるかは
+/// 通信の遅延次第のため、両方が揃った側の呼び出しだけが実際の照合まで進む。
+fn reconcile_state_hash(link: &mut NetworkLink, outcome: &mut Option<BattleOutcome>, tick: u32) {
+    let Some(&(mine_local, mine_remote)) = link.own_state_hashes.get(&tick) else {
+        return;
+    };
+    let Some(&(their_local, their_remote)) = link.pending_remote_state_hashes.get(&tick) else {
+        return;
+    };
+
+    link.own_state_hashes.remove(&tick);
+    link.pending_remote_state_hashes.remove(&tick);
+
+    if outcome.is_some() {
+        // 既に他の理由で決着済みなら上書きしない。デシンク検出は対戦終了前の同期ズレを
+        // 捉えるためのもので、確定済みのWin/Lose/Drawを覆す根拠にはしない。
+        return;
+    }
+    if mine_remote != their_local || mine_local != their_remote {
+        *outcome = Some(BattleOutcome::Desync);
+    }
 }
 
 /// `BattleConfig`とseedから、通常プレイの開始処理と同一順序でGameを1つ生成する
@@ -1086,5 +1159,192 @@ mod tests {
             "前提: 自分のシミュレーション上、相手はゴールしていない"
         );
         assert_eq!(host.outcome, Some(BattleOutcome::Draw));
+    }
+
+    // -----------------------------------------------------------------------
+    // デシンク検出(#255。spec.md 12.3)。
+    // -----------------------------------------------------------------------
+
+    /// 生ストリーム側で、最初の`StateHash`が届くまでメッセージを読み進める。同じtickの
+    /// `Input`が先に届くため、種別で選り分ける必要がある。
+    fn read_state_hash(peer: &mut TcpStream) -> GameMessage {
+        loop {
+            let msg = net::read_message(peer).expect("StateHashが届くはず");
+            if matches!(msg, GameMessage::StateHash { .. }) {
+                return msg;
+            }
+        }
+    }
+
+    #[test]
+    fn state_hashes_are_exchanged_and_reconciled_across_several_intervals() {
+        // `STATE_HASH_INTERVAL_TICKS`を跨いで進めると、tick 0とtick 20のStateHashが
+        // 双方向に送られる。実際に同期しているため照合はすべて通り、控えていた値は
+        // 両側のキューから消える。
+        const TICKS: u32 = STATE_HASH_INTERVAL_TICKS + 5;
+        let (mut host, mut client, _) = connected_pair();
+
+        for _ in 0..MAX_PUMPS {
+            pump(&mut host, TICKS, None);
+            pump(&mut client, TICKS, None);
+            if link(&host).next_tick >= TICKS && link(&client).next_tick >= TICKS {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(link(&host).next_tick, TICKS, "ホストが目標tickまで進むはず");
+        assert_eq!(
+            link(&client).next_tick,
+            TICKS,
+            "クライアントが目標tickまで進むはず"
+        );
+
+        // 最後(tick 20ぶん)のStateHashが相手側で処理されるまで、受信だけ回す。
+        for _ in 0..10 {
+            host.advance(Duration::ZERO, None);
+            client.advance(Duration::ZERO, None);
+            pump_interval();
+        }
+
+        assert_eq!(
+            host.outcome, None,
+            "同期が取れていればデシンクにはならないはず"
+        );
+        assert_eq!(client.outcome, None);
+        for (side, state) in [("ホスト", &host), ("クライアント", &client)] {
+            assert!(
+                link(state).own_state_hashes.is_empty(),
+                "{side}: 自分の計算値がすべて照合済みのはず"
+            );
+            assert!(
+                link(state).pending_remote_state_hashes.is_empty(),
+                "{side}: 相手からの申告値がすべて照合済みのはず"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mismatching_state_hash_from_the_opponent_ends_the_battle_as_a_desync() {
+        // 相手の申告と自分の計算が食い違ったら、どちらの状態が正しいか判定できないため
+        // デシンクとして中断する(12.3)。
+        let (mut host, mut peer) = battle_with_raw_peer();
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+        // 相手役はtick 0を完了させるための入力だけ送る。
+        net::write_message(
+            &mut peer,
+            &GameMessage::Input {
+                tick: 0,
+                action: NetAction::None,
+            },
+        )
+        .unwrap();
+        for _ in 0..MAX_PUMPS {
+            pump(&mut host, 1, None);
+            if link(&host).next_tick >= 1 {
+                break;
+            }
+            pump_interval();
+        }
+        assert_eq!(link(&host).next_tick, 1, "前提: tick 0が完了しているはず");
+
+        // ホストはtick 0の完了時に自分の2インスタンスのダイジェストを送ってくる。
+        assert_eq!(
+            read_state_hash(&mut peer),
+            GameMessage::StateHash {
+                tick: 0,
+                local_hash: host.game_local.state_hash(),
+                remote_hash: host.game_remote.state_hash(),
+            },
+            "自分の盤面・相手の盤面のダイジェストをそのまま申告するはず"
+        );
+
+        // 相手役は「自分の盤面」として、ホストのgame_remoteとは違う値を申告する。
+        let (mine_local, mine_remote) = link(&host).own_state_hashes[&0];
+        net::write_message(
+            &mut peer,
+            &GameMessage::StateHash {
+                tick: 0,
+                local_hash: mine_remote ^ 1,
+                remote_hash: mine_local,
+            },
+        )
+        .unwrap();
+        for _ in 0..MAX_PUMPS {
+            host.advance(Duration::ZERO, None);
+            if host.outcome.is_some() {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(host.outcome, Some(BattleOutcome::Desync));
+        assert!(
+            link(&host).own_state_hashes.is_empty(),
+            "照合の済んだtickは控えから消えるはず"
+        );
+        assert!(link(&host).pending_remote_state_hashes.is_empty());
+    }
+
+    #[test]
+    fn a_mismatching_state_hash_does_not_overwrite_an_outcome_that_is_already_decided() {
+        // デシンク検出は対戦終了前の同期ズレを捉えるためのもので、確定済みの決着は覆さない。
+        const TICKS: u32 = 16;
+        let (mut host, mut peer) = battle_with_raw_peer();
+        place_just_above_goal(&mut host.game_local);
+
+        // 相手役はtickを進めるための入力だけ送る(自分は何もしない)。
+        for tick in 0..TICKS {
+            net::write_message(
+                &mut peer,
+                &GameMessage::Input {
+                    tick,
+                    action: NetAction::None,
+                },
+            )
+            .unwrap();
+        }
+        for _ in 0..MAX_PUMPS {
+            pump(&mut host, TICKS, None);
+            if host.outcome.is_some() {
+                break;
+            }
+            pump_interval();
+        }
+        assert_eq!(
+            host.outcome,
+            Some(BattleOutcome::Win),
+            "前提: 自分のゴール到達で決着しているはず"
+        );
+
+        // tick 0のぶんは相手の申告が来ないまま決着したため、控えに残っている。
+        let (mine_local, mine_remote) = link(&host).own_state_hashes[&0];
+        net::write_message(
+            &mut peer,
+            &GameMessage::StateHash {
+                tick: 0,
+                local_hash: mine_remote ^ 1,
+                remote_hash: mine_local,
+            },
+        )
+        .unwrap();
+        for _ in 0..MAX_PUMPS {
+            host.advance(Duration::ZERO, None);
+            if link(&host).own_state_hashes.is_empty() {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert!(
+            link(&host).own_state_hashes.is_empty(),
+            "前提: 照合自体は行われるはず"
+        );
+        assert_eq!(
+            host.outcome,
+            Some(BattleOutcome::Win),
+            "決着済みの結果はデシンク検出で上書きされないはず"
+        );
     }
 }
