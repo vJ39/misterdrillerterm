@@ -5,4 +5,5 @@
 //! `crate::audio`(`mod audio;`、main.rsから直接参照)は別物なので混同しないこと。
 
 pub mod audio;
+pub mod screens;
 pub mod settings_menu;

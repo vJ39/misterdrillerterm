@@ -22,21 +22,15 @@ use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
-use rand::RngExt;
 use rodio::mixer::Mixer;
 
 use app::audio::{
-    effective_gameplay_bgm_enabled, effective_title_bgm_enabled, handle_events, play_se,
-    should_restart_title_bgm,
+    effective_gameplay_bgm_enabled, effective_title_bgm_enabled, play_se, should_restart_title_bgm,
 };
-use app::settings_menu::{
-    adjust_attack_blocks_per_rock, adjust_attack_rocks_per_wave_max, adjust_bomb_fuse_ms,
-    adjust_bomb_rate_percent, adjust_chain_vanish_interval_ms, adjust_dodge_recovery_ms,
-    adjust_fall_speed_ms, adjust_field_width, adjust_move_cooldown_ms, adjust_rewind_stock_max,
-    adjust_shake_duration_ms, adjust_sound_volume_percent, adjust_spawn_rate_setting,
+use app::screens::{
+    tick_help_screen, tick_mode_select, tick_playing, tick_rewind, tick_settings_screen, tick_title,
 };
-use constants::{ATTRACT_MODE_IDLE_MS, FRAME_INTERVAL_MS, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS};
-use game::{Game, GameOverChoice, GameStatus, InputAction};
+use game::{Game, InputAction};
 use settings::Settings;
 
 fn main() -> io::Result<()> {
@@ -63,6 +57,85 @@ fn main() -> io::Result<()> {
     result
 }
 
+/// 1フレームの処理をまたいで持ち越すアプリ全体の状態(#264)。
+///
+/// 画面状態`Screen`はここに含めない。`Screen::Playing(Box<Game>)`から`game`を取り出して
+/// 画面別の関数へ渡す間、他の全フィールド(`&mut App`)も同時に可変借用する必要があるため、
+/// `screen`は`run()`のローカル変数として別に持つ。
+struct App {
+    /// 音声出力デバイス。ヘッドレス環境等でデバイスが無い場合は`None`のままで、
+    /// 以後の再生を全てスキップする。
+    mixer: Option<Mixer>,
+    settings: Settings,
+    /// タイトル画面用BGMの実効ON/OFF。BGMスレッドと共有する。
+    title_music_enabled: Arc<AtomicBool>,
+    /// プレイ中BGMの実効ON/OFF。BGMスレッドと共有する。
+    gameplay_music_enabled: Arc<AtomicBool>,
+    se_enabled: Arc<AtomicBool>,
+    /// MUSIC音量(#224)。タイトル用・プレイ中用の両BGMスレッドで共有する
+    /// (MUSIC音量は画面によらず1つ)。
+    music_volume_percent: Arc<AtomicU32>,
+    /// タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ。
+    title_bgm_restart: Arc<AtomicBool>,
+    /// 直前フレームでのタイトルBGMの実効ON/OFF。`title_bgm_restart`を立てる
+    /// 「無効→有効」の切り替わり判定に使う。
+    was_title_bgm_enabled: bool,
+    /// タイトル画面へ戻るたびにプレイ中BGMも先頭の曲・先頭位置からリセットするフラグ。
+    /// `title_bgm_restart`とはトリガー条件が異なる(あちらは「無効→有効」の切り替わり、
+    /// こちらは「タイトル画面へ戻った瞬間」)ため、別フラグとして扱う。
+    gameplay_bgm_restart: Arc<AtomicBool>,
+    bgm_stop: Arc<AtomicBool>,
+    rng: rand::rngs::ThreadRng,
+    last_tick: Instant,
+    /// モードセレクト画面での現在の選択(イージー/ノーマル)。
+    mode_select_choice: ui::render::CourseChoice,
+    /// 設定画面での現在の選択項目。
+    settings_selection: ui::render::SettingsChoice,
+    /// 一時停止中にオーバーレイ表示する設定/ヘルプ画面。Gameを作り直さずScreen::Playingの
+    /// まま上に重ねて描画するだけなので、画面遷移ではなくこの状態フラグで管理する。
+    pause_overlay: PauseOverlay,
+    /// ヘルプ画面(タイトルから開く独立画面)のジュークボックスのカーソル位置。
+    /// 画面を離れても保持する。
+    help_jukebox_selection: usize,
+    /// ジュークボックスで再生中の曲。その再生を制御するハンドル(stop/finishedフラグ)と
+    /// セットで持つ。
+    help_jukebox_playing: Option<(usize, audio::bgm::JukeboxPreview)>,
+    /// オートプレイ(TERM独自拡張。#218)。Tキーで生成・破棄する。`Some`の間、
+    /// 毎フレーム`decide`が返す仮想入力を人間の操作と同じ経路(`Game::apply_input`)へ
+    /// 流し込む。Gameを作り直す場面(タイトルへ戻る)では必ずNoneへ戻す。
+    autopilot: Option<autoplay::Autopilot>,
+    /// 現在のオートプレイが、タイトル画面放置による自動デモ(アトラクトモード)として
+    /// 始まったものかどうか。手動でTキーを押した場合(=操作を引き継ぎたい)と、デモを
+    /// 見ていた人が割り込んだ場合(=タイトルへ戻す)で挙動を分けるために区別する。
+    autopilot_is_attract_demo: bool,
+    /// タイトル画面で最後にキーが押されてからの経過時間。`ATTRACT_MODE_IDLE_MS`を
+    /// 超えるとアトラクトモードを自動開始する。
+    title_idle: Duration,
+    /// フレーム巻き戻し(TERM独自拡張。#233)の履歴。`autopilot`と同じくGameの外に置く
+    /// 寿命の状態で、Gameを作り直す場面(タイトルへ戻る・新規ゲーム開始)では必ず捨てる。
+    rewind_history: rewind::RewindHistory,
+    /// 進行中の巻き戻しセッション。`Some`の間はゲーム本体を凍結し、逆再生の操作だけを
+    /// 受け付ける。
+    rewind_session: Option<rewind::RewindSession>,
+}
+
+/// 画面別の1フレーム処理が返す「このフレームで起きた画面遷移」(#264)。
+/// 遷移が起きなかったフレームは`None`(`Option<ScreenTransition>`)で表す。
+enum ScreenTransition {
+    /// アプリを終了する(タイトル画面でのEscのみ)。
+    Quit,
+    /// タイトル画面へ戻る(設定/ヘルプ/モードセレクト画面からの離脱)。Gameを持たない
+    /// 画面からの遷移なので、ゲーム側の状態の後始末は伴わない。
+    ToTitle,
+    /// プレイ中からタイトル画面へ戻る。Gameを破棄するため、Gameの外に置いた状態
+    /// (オーバーレイ・オートプレイ・巻き戻し履歴)も畳み、プレイ中BGMもリセットする。
+    ToTitleDiscardingGame,
+    ToModeSelect,
+    ToSettings,
+    ToHelp,
+    ToPlaying(Box<Game>),
+}
+
 fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     // 音声出力デバイスを開く。ヘッドレス環境等でデバイスが無い場合でも
     // ゲーム自体はプレイ続行できるよう、失敗時はNoneにして以後の再生をスキップする。
@@ -71,7 +144,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
 
     // MUSIC/SE個別ON/OFF設定(spec.md 10章)。前回終了時の状態を復元し、
     // BGMスレッド・SE再生の双方から参照できるよう`Arc<AtomicBool>`で共有する。
-    let mut settings = Settings::load();
+    let settings = Settings::load();
     // タイトル画面用・プレイ中用でBGMを別トラックにする。同時に両方鳴らないよう
     // `effective_title_bgm_enabled`/`effective_gameplay_bgm_enabled`は排他的になるよう
     // 設計している。起動直後はタイトル画面から始まる。
@@ -84,16 +157,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         &Screen::Title,
     )));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
-    // MUSIC音量(#224)。タイトル用・プレイ中用の両BGMスレッドで共有する
-    // (MUSIC音量は画面によらず1つ)。
     let music_volume_percent = Arc::new(AtomicU32::new(settings.music_volume_percent));
-    // タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ。
     // 起動直後の初回表示は「戻ってきた」わけではないので、ここではまだ立てない。
     let title_bgm_restart = Arc::new(AtomicBool::new(false));
-    let mut was_title_bgm_enabled = title_music_enabled.load(Ordering::Relaxed);
-    // タイトル画面へ戻るたびにプレイ中BGMも先頭の曲・先頭位置からリセットするフラグ。
-    // `title_bgm_restart`とはトリガー条件が異なる(あちらは「無効→有効」の切り替わり、
-    // こちらは「タイトル画面へ戻った瞬間」)ため、別フラグとして扱う。
+    let was_title_bgm_enabled = title_music_enabled.load(Ordering::Relaxed);
     let gameplay_bgm_restart = Arc::new(AtomicBool::new(false));
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
@@ -114,1090 +181,103 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         );
     }
 
-    // 通常プレイはOS乱数から生成したシードを使う(spec.md 3章)。
-    let mut rng = rand::rng();
+    // モードセレクト画面は、タイトルから開くたびに前回選んだコース
+    // (`settings.last_course_depth_m`)を初期選択として引き継ぐ。
+    let mode_select_choice =
+        ui::render::CourseChoice::from_depth_goal_m(settings.last_course_depth_m);
+
+    let mut app = App {
+        mixer,
+        settings,
+        title_music_enabled,
+        gameplay_music_enabled,
+        se_enabled,
+        music_volume_percent,
+        title_bgm_restart,
+        was_title_bgm_enabled,
+        gameplay_bgm_restart,
+        bgm_stop,
+        // 通常プレイはOS乱数から生成したシードを使う(spec.md 3章)。
+        rng: rand::rng(),
+        last_tick: Instant::now(),
+        mode_select_choice,
+        settings_selection: ui::render::SettingsChoice::Music,
+        pause_overlay: PauseOverlay::None,
+        help_jukebox_selection: 0,
+        help_jukebox_playing: None,
+        autopilot: None,
+        autopilot_is_attract_demo: false,
+        title_idle: Duration::ZERO,
+        rewind_history: rewind::RewindHistory::new(),
+        rewind_session: None,
+    };
 
     // アプリの画面状態(spec.md 1章)。タイトル画面でのEscのみアプリを終了し、それ以外の
     // 画面でのEscはGameを作り直してタイトルへ戻す(酸素・スコア・深度等が全てリセットされる)。
     let mut screen = Screen::Title;
-    let mut last_tick = Instant::now();
-    // モードセレクト画面での現在の選択(イージー/ノーマル)。タイトルから開くたびに、
-    // 前回選んだコース(`settings.last_course_depth_m`)を初期選択として引き継ぐ。
-    let mut mode_select_choice =
-        ui::render::CourseChoice::from_depth_goal_m(settings.last_course_depth_m);
-    // 設定画面での現在の選択項目。
-    let mut settings_selection = ui::render::SettingsChoice::Music;
-    // 一時停止中にオーバーレイ表示する設定/ヘルプ画面。Gameを作り直さずScreen::Playingの
-    // まま上に重ねて描画するだけなので、画面遷移ではなくこのローカルな状態フラグで管理する。
-    let mut pause_overlay = PauseOverlay::None;
-
-    // ヘルプ画面(タイトルから開く独立画面)のジュークボックス状態。カーソル位置は画面を
-    // 離れても保持する。再生中の曲は、その再生を制御するハンドル(stop/finishedフラグ)と
-    // セットで持つ。
-    let mut help_jukebox_selection: usize = 0;
-    let mut help_jukebox_playing: Option<(usize, audio::bgm::JukeboxPreview)> = None;
-
-    // オートプレイ(TERM独自拡張。#218)。Tキーで生成・破棄する。`Some`の間、
-    // 毎フレーム`decide`が返す仮想入力を人間の操作と同じ経路(`Game::apply_input`)へ
-    // 流し込む。Gameを作り直す場面(タイトルへ戻る)では必ずNoneへ戻す。
-    let mut autopilot: Option<autoplay::Autopilot> = None;
-    // 現在のオートプレイが、タイトル画面放置による自動デモ(アトラクトモード)として
-    // 始まったものかどうか。手動でTキーを押した場合(=操作を引き継ぎたい)と、デモを
-    // 見ていた人が割り込んだ場合(=タイトルへ戻す)で挙動を分けるために区別する。
-    let mut autopilot_is_attract_demo = false;
-    // タイトル画面で最後にキーが押されてからの経過時間。`ATTRACT_MODE_IDLE_MS`を
-    // 超えるとアトラクトモードを自動開始する。
-    let mut title_idle = Duration::ZERO;
-
-    // フレーム巻き戻し(TERM独自拡張。#233)。`autopilot`と同じくGameの外に置く寿命の
-    // 状態で、Gameを作り直す場面(タイトルへ戻る・新規ゲーム開始)では必ず捨てる。
-    // `rewind_session`が`Some`の間はゲーム本体を凍結し、逆再生の操作だけを受け付ける。
-    let mut rewind_history = rewind::RewindHistory::new();
-    let mut rewind_session: Option<rewind::RewindSession> = None;
 
     loop {
-        // Playing→Titleへの遷移フラグ。`screen`自体への再代入は、`game`(screenを
-        // 借用したバインディング)の生存期間が終わった後、if/else全体を抜けてから
-        // 行う(借用中のscreenへ同時に代入できないため)。
-        let mut back_to_title = false;
-
-        if rewind_session.is_some()
-            && let Screen::Playing(game) = &mut screen
-        {
-            // フレーム巻き戻し中(TERM独自拡張。#233)。`game.update`を呼ばずゲームを
-            // 凍結し、逆再生セッションの操作(←→での調整・確定・キャンセル)だけを扱う。
-            let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
-            let now = Instant::now();
-            let delta = now
-                .duration_since(last_tick)
-                .min(Duration::from_millis(250));
-            last_tick = now;
-
-            let viewing_cursor = advance_rewind_session(
-                game,
-                &mut rewind_session,
-                &mut rewind_history,
-                &mut autopilot,
-                &actions,
-                delta,
-                mixer.as_ref(),
-                &se_enabled,
-                settings.se_volume_percent,
-            );
-
-            let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
-            let se_on = se_enabled.load(Ordering::Relaxed);
-            let autoplay_on = autopilot.is_some();
-            let field_width = game.board.width();
-            match viewing_cursor {
-                // まだ巻き戻し中。今見ている時点のスナップショットを描画し、案内を重ねる。
-                Some(cursor) => {
-                    let snapshot = rewind_history.snapshot_at(cursor);
-                    // ゲームは凍結中でフレーム番号が進まないため、現在との差がそのまま
-                    // 「どれだけ過去を見ているか」になる。
-                    let frames_back = game.debug_frame().saturating_sub(snapshot.frame_at_capture);
-                    let snapshot_game = &snapshot.game;
-                    terminal.draw(|frame| {
-                        ui::render::draw(frame, snapshot_game, music_on, se_on, autoplay_on);
-                        ui::render::draw_rewind_overlay(frame, field_width, cursor, frames_back);
-                    })?;
-                }
-                // このフレームで確定/キャンセルした。通常どおり現在の状態を描画する。
-                None => {
-                    terminal.draw(|frame| {
-                        ui::render::draw(frame, game, music_on, se_on, autoplay_on)
-                    })?;
-                }
+        let transition = match &mut screen {
+            // フレーム巻き戻し中(TERM独自拡張。#233)はScreen::Playingのままゲームを
+            // 凍結し、逆再生の操作だけを扱う(この間は画面遷移が起きない)。
+            Screen::Playing(game) if app.rewind_session.is_some() => {
+                tick_rewind(&mut app, game, terminal)?;
+                None
             }
-        } else if let Screen::Playing(game) = &mut screen {
-            // poll_input_batch: 1フレーム内にキューされた全キーイベントを処理する。
-            // 移動・向き変更と掘削をほぼ同時に押しても、同一フレームに届いた
-            // 両方のイベントを取りこぼさず反映するため。
-            for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
-                if back_to_title {
-                    break; // Quit済みなら以降のキューされたアクションは処理しない
-                }
-                // 巻き戻しを開始したら、同じフレームに溜まっていた残りの入力は捨てる
-                // (次フレームから巻き戻し中の操作として解釈する)。
-                if rewind_session.is_some() {
-                    break;
-                }
-                // アトラクトモード(タイトル放置から始まった自動デモ)中に人が何か
-                // 操作したら、そこから引き継ぐのではなくタイトルへ戻す(TERM独自拡張。
-                // #218。デモを見ていた人の割り込みは「やめる」意思表示とみなす)。
-                if autopilot_is_attract_demo {
-                    // アトラクトモードは無人デモの安全策として無敵を強制ONにしている。
-                    // 人が割り込んだこの時点でデモ開始前の状態へ戻す。
-                    if let Some(pilot) = autopilot.take() {
-                        game.set_invincible(pilot.restore_invincible());
-                    }
-                    back_to_title = true;
-                    break;
-                }
-                match action {
-                    // オーバーレイ(設定/ヘルプ)が開いている間のQはタイトルへ戻らず、
-                    // オーバーレイを閉じるだけにする。
-                    InputAction::Quit if pause_overlay != PauseOverlay::None => {
-                        pause_overlay = PauseOverlay::None;
-                    }
-                    InputAction::Quit => back_to_title = true,
-                    InputAction::TogglePause => {
-                        game.toggle_pause();
-                        pause_overlay = PauseOverlay::None;
-                    }
-                    // Backspace/U: フレーム巻き戻しの開始(TERM独自拡張。#233)。
-                    // 設定/ヘルプのオーバーレイ表示中は無効。ストックが残っていて
-                    // (`can_start_rewind`)、戻れる履歴が1つでもあるときだけ起動する。
-                    // 一時停止中・クリア後は`can_start_rewind`がfalseなので何も起きない。
-                    InputAction::Rewind => {
-                        if pause_overlay == PauseOverlay::None
-                            && game.can_start_rewind()
-                            && !rewind_history.is_empty()
-                        {
-                            rewind_session =
-                                Some(rewind::RewindSession::start(&mut rewind_history, game));
-                            play_se(
-                                mixer.as_ref(),
-                                &se_enabled,
-                                settings.se_volume_percent,
-                                audio::sfx::play_rewind_start,
-                            );
-                        }
-                    }
-                    // ポーズ解除はPだけでなく、ショートカット未割り当ての任意キーでも行える。
-                    // オーバーレイ(設定/ヘルプ)表示中は対象外(そちらはQ/S/Hで明示的に閉じる)。
-                    InputAction::UnboundKey
-                        if game.status == GameStatus::Paused
-                            && pause_overlay == PauseOverlay::None =>
-                    {
-                        game.toggle_pause();
-                    }
-                    InputAction::UnboundKey => {}
-                    // M/EキーでのMUSIC/SE切り替えは、一時停止画面でのみ意味を持つ
-                    // (spec.md 1章・10章)。プレイ中(Paused以外)は無視する。
-                    InputAction::ToggleMusic => {
-                        if game.status == GameStatus::Paused {
-                            settings.music_enabled = !settings.music_enabled;
-                            // ここはScreen::Playing(かつPaused)確定なので、タイトル用
-                            // BGMは触れず(既に無音のはず)、プレイ中BGMのみ即時反映する。
-                            gameplay_music_enabled.store(settings.music_enabled, Ordering::Relaxed);
-                            settings.save();
-                        }
-                    }
-                    InputAction::ToggleSe => {
-                        if game.status == GameStatus::Paused {
-                            settings.se_enabled = !settings.se_enabled;
-                            se_enabled.store(settings.se_enabled, Ordering::Relaxed);
-                            settings.save();
-                        }
-                    }
-                    // S/Hキーでの設定/ヘルプ画面オーバーレイ表示。プレイ中に押した場合は
-                    // 自動的に一時停止してからオーバーレイを開く。同じキーの再入力で閉じる
-                    // (閉じても一時停止状態はそのまま、Pキーで別途再開する)。
-                    InputAction::OpenSettings => {
-                        if game.status == GameStatus::Playing {
-                            game.toggle_pause();
-                        }
-                        if game.status == GameStatus::Paused {
-                            pause_overlay = if pause_overlay == PauseOverlay::Settings {
-                                PauseOverlay::None
-                            } else {
-                                // 設定画面では盤面の前提(配分率・速度・列数)を変えられる
-                                // ため、開いた時点で巻き戻し履歴は捨てる(#233)。
-                                rewind_history.clear();
-                                PauseOverlay::Settings
-                            };
-                        }
-                    }
-                    InputAction::OpenHelp => {
-                        if game.status == GameStatus::Playing {
-                            game.toggle_pause();
-                        }
-                        if game.status == GameStatus::Paused {
-                            pause_overlay = if pause_overlay == PauseOverlay::Help {
-                                PauseOverlay::None
-                            } else {
-                                PauseOverlay::Help
-                            };
-                        }
-                    }
-                    // 設定オーバーレイ表示中は上下キー/Spaceを選択操作として扱う(タイトル画面
-                    // のScreen::Settingsと同じ操作感)。
-                    InputAction::FaceUp if pause_overlay == PauseOverlay::Settings => {
-                        settings_selection = settings_selection.cycle_back();
-                    }
-                    InputAction::FaceDown if pause_overlay == PauseOverlay::Settings => {
-                        settings_selection = settings_selection.cycle();
-                    }
-                    InputAction::Drill if pause_overlay == PauseOverlay::Settings => {
-                        match settings_selection {
-                            ui::render::SettingsChoice::Music => {
-                                settings.music_enabled = !settings.music_enabled;
-                                gameplay_music_enabled
-                                    .store(settings.music_enabled, Ordering::Relaxed);
-                                settings.save();
-                            }
-                            ui::render::SettingsChoice::Se => {
-                                settings.se_enabled = !settings.se_enabled;
-                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
-                                settings.save();
-                            }
-                            // 調査用のブロック状態遷移ログのON/OFF。一時停止中の
-                            // オーバーレイからは、稼働中のgameへも即座に反映する
-                            // (無効化時は記録を止め、有効化時は新規にログを開き直す)。
-                            ui::render::SettingsChoice::DebugLogEnabled => {
-                                settings.debug_log_enabled = !settings.debug_log_enabled;
-                                // ログを開き直す前に履歴を捨てる(#233)。古いスナップ
-                                // ショットは差し替え前のログ接続を掴んだままのため。
-                                rewind_history.clear();
-                                game.refresh_debug_log(settings.debug_log_enabled);
-                                settings.save();
-                            }
-                            // 配分率・色数・落下速度・回避硬直時間・音量は←→で調整するので、
-                            // Spaceは無効(トグル対象ではない)。
-                            ui::render::SettingsChoice::MusicVolume
-                            | ui::render::SettingsChoice::SeVolume
-                            | ui::render::SettingsChoice::RockRate
-                            | ui::render::SettingsChoice::AirRate
-                            | ui::render::SettingsChoice::StarRate
-                            | ui::render::SettingsChoice::DiamondRate
-                            | ui::render::SettingsChoice::ItemClearAboveRate
-                            | ui::render::SettingsChoice::ItemUnifyColorsRate
-                            | ui::render::SettingsChoice::ItemStarifyScreenRate
-                            | ui::render::SettingsChoice::ColorCount
-                            | ui::render::SettingsChoice::ColorClusterRate
-                            | ui::render::SettingsChoice::FieldWidth
-                            | ui::render::SettingsChoice::BlockFallSpeed
-                            | ui::render::SettingsChoice::PlayerFallSpeed
-                            | ui::render::SettingsChoice::ShakeDuration
-                            | ui::render::SettingsChoice::MoveSpeed
-                            | ui::render::SettingsChoice::DodgeRecoveryMs
-                            | ui::render::SettingsChoice::BombRate
-                            | ui::render::SettingsChoice::BombFuse
-                            | ui::render::SettingsChoice::AttackBlocksPerRock
-                            | ui::render::SettingsChoice::AttackRocksPerWaveMax
-                            | ui::render::SettingsChoice::ChainVanishInterval
-                            | ui::render::SettingsChoice::RewindStockMax => {}
-                        }
-                    }
-                    // MUSIC/SEのトグルは←→キーでも行える。トグルなので方向は問わず、
-                    // 押されたら反転する。
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if pause_overlay == PauseOverlay::Settings
-                            && matches!(
-                                settings_selection,
-                                ui::render::SettingsChoice::Music
-                                    | ui::render::SettingsChoice::Se
-                                    | ui::render::SettingsChoice::DebugLogEnabled
-                            ) =>
-                    {
-                        match settings_selection {
-                            ui::render::SettingsChoice::Music => {
-                                settings.music_enabled = !settings.music_enabled;
-                                gameplay_music_enabled
-                                    .store(settings.music_enabled, Ordering::Relaxed);
-                            }
-                            ui::render::SettingsChoice::Se => {
-                                settings.se_enabled = !settings.se_enabled;
-                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
-                            }
-                            ui::render::SettingsChoice::DebugLogEnabled => {
-                                settings.debug_log_enabled = !settings.debug_log_enabled;
-                                // 上と同じ理由で、ログを開き直す前に履歴を捨てる(#233)。
-                                rewind_history.clear();
-                                game.refresh_debug_log(settings.debug_log_enabled);
-                            }
-                            _ => {}
-                        }
-                        settings.save();
-                    }
-                    // MUSIC/SEの音量調整(#224)。ON/OFFとは別に、アプリ内部のミックス
-                    // ゲインだけを変える。SE音量は変更のたびに確認用サンプルSE(酸素
-                    // カプセル取得音)を1回鳴らす。
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if pause_overlay == PauseOverlay::Settings
-                            && matches!(
-                                settings_selection,
-                                ui::render::SettingsChoice::MusicVolume
-                                    | ui::render::SettingsChoice::SeVolume
-                            ) =>
-                    {
-                        let increase = action == InputAction::MoveRight;
-                        match settings_selection {
-                            ui::render::SettingsChoice::MusicVolume => {
-                                settings.music_volume_percent = adjust_sound_volume_percent(
-                                    settings.music_volume_percent,
-                                    increase,
-                                );
-                                music_volume_percent
-                                    .store(settings.music_volume_percent, Ordering::Relaxed);
-                            }
-                            ui::render::SettingsChoice::SeVolume => {
-                                settings.se_volume_percent = adjust_sound_volume_percent(
-                                    settings.se_volume_percent,
-                                    increase,
-                                );
-                                if settings.se_enabled
-                                    && let Some(m) = mixer.as_ref()
-                                {
-                                    audio::sfx::play_oxygen_pickup(
-                                        m,
-                                        audio::sfx::se_gain(settings.se_volume_percent),
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
-                        settings.save();
-                    }
-                    // ブロック落下速度・キャラ落下速度・回避硬直時間の調整。
-                    // 配分率・色数と異なり盤面の書き換えを伴わないため、即座にgameへ反映してよい。
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if pause_overlay == PauseOverlay::Settings
-                            && matches!(
-                                settings_selection,
-                                ui::render::SettingsChoice::BlockFallSpeed
-                                    | ui::render::SettingsChoice::PlayerFallSpeed
-                                    | ui::render::SettingsChoice::ShakeDuration
-                                    | ui::render::SettingsChoice::MoveSpeed
-                                    | ui::render::SettingsChoice::DodgeRecoveryMs
-                                    | ui::render::SettingsChoice::BombRate
-                                    | ui::render::SettingsChoice::BombFuse
-                                    | ui::render::SettingsChoice::AttackBlocksPerRock
-                                    | ui::render::SettingsChoice::AttackRocksPerWaveMax
-                                    | ui::render::SettingsChoice::ChainVanishInterval
-                                    | ui::render::SettingsChoice::RewindStockMax
-                            ) =>
-                    {
-                        let increase = action == InputAction::MoveRight;
-                        match settings_selection {
-                            ui::render::SettingsChoice::BlockFallSpeed => {
-                                settings.block_fall_tick_ms =
-                                    adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
-                                game.set_block_fall_tick_ms(settings.block_fall_tick_ms);
-                            }
-                            ui::render::SettingsChoice::PlayerFallSpeed => {
-                                settings.player_fall_tick_ms =
-                                    adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
-                                game.set_player_fall_tick_ms(settings.player_fall_tick_ms);
-                            }
-                            ui::render::SettingsChoice::ShakeDuration => {
-                                settings.shake_duration_ms =
-                                    adjust_shake_duration_ms(settings.shake_duration_ms, increase);
-                                game.set_shake_duration_ms(settings.shake_duration_ms);
-                            }
-                            ui::render::SettingsChoice::MoveSpeed => {
-                                settings.move_cooldown_ms =
-                                    adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
-                                game.set_move_cooldown_ms(settings.move_cooldown_ms);
-                            }
-                            ui::render::SettingsChoice::DodgeRecoveryMs => {
-                                settings.dodge_recovery_ms =
-                                    adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
-                                game.set_dodge_recovery_ms(settings.dodge_recovery_ms);
-                            }
-                            ui::render::SettingsChoice::BombRate => {
-                                settings.bomb_spawn_rate_percent = adjust_bomb_rate_percent(
-                                    settings.bomb_spawn_rate_percent,
-                                    increase,
-                                );
-                                game.set_bomb_spawn_rate_percent(settings.bomb_spawn_rate_percent);
-                            }
-                            ui::render::SettingsChoice::BombFuse => {
-                                settings.bomb_fuse_ms =
-                                    adjust_bomb_fuse_ms(settings.bomb_fuse_ms, increase);
-                                game.set_bomb_fuse_ms(settings.bomb_fuse_ms);
-                            }
-                            ui::render::SettingsChoice::AttackBlocksPerRock => {
-                                settings.attack_blocks_per_rock = adjust_attack_blocks_per_rock(
-                                    settings.attack_blocks_per_rock,
-                                    increase,
-                                );
-                                game.set_attack_blocks_per_rock(settings.attack_blocks_per_rock);
-                            }
-                            ui::render::SettingsChoice::AttackRocksPerWaveMax => {
-                                settings.attack_rocks_per_wave_max =
-                                    adjust_attack_rocks_per_wave_max(
-                                        settings.attack_rocks_per_wave_max,
-                                        increase,
-                                    );
-                                game.set_attack_rocks_per_wave_max(
-                                    settings.attack_rocks_per_wave_max,
-                                );
-                            }
-                            ui::render::SettingsChoice::ChainVanishInterval => {
-                                settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
-                                    settings.chain_vanish_interval_ms,
-                                    increase,
-                                );
-                                game.set_chain_vanish_interval_ms(
-                                    settings.chain_vanish_interval_ms,
-                                );
-                            }
-                            ui::render::SettingsChoice::RewindStockMax => {
-                                settings.rewind_stock_max =
-                                    adjust_rewind_stock_max(settings.rewind_stock_max, increase);
-                                game.set_rewind_stock_max(settings.rewind_stock_max);
-                            }
-                            _ => {}
-                        }
-                        settings.save();
-                    }
-                    // フィールド幅(列数)の調整。盤面の列数そのものを変えるため
-                    // 現在の盤面には反映できず、次回の新規ゲーム開始時にのみ適用される。
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if pause_overlay == PauseOverlay::Settings
-                            && settings_selection == ui::render::SettingsChoice::FieldWidth =>
-                    {
-                        let increase = action == InputAction::MoveRight;
-                        settings.field_width = adjust_field_width(settings.field_width, increase);
-                        settings.save();
-                    }
-                    // Xブロック/AIR/スター/ダイヤの配分率・色数調整。プレイ中なので、
-                    // 既に画面に見えている範囲は変えず、十分先(画面外)から新しい配分率を反映する。
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if pause_overlay == PauseOverlay::Settings
-                            && matches!(
-                                settings_selection,
-                                ui::render::SettingsChoice::RockRate
-                                    | ui::render::SettingsChoice::AirRate
-                                    | ui::render::SettingsChoice::StarRate
-                                    | ui::render::SettingsChoice::DiamondRate
-                                    | ui::render::SettingsChoice::ItemClearAboveRate
-                                    | ui::render::SettingsChoice::ItemUnifyColorsRate
-                                    | ui::render::SettingsChoice::ItemStarifyScreenRate
-                                    | ui::render::SettingsChoice::ColorCount
-                                    | ui::render::SettingsChoice::ColorClusterRate
-                            ) =>
-                    {
-                        let increase = action == InputAction::MoveRight;
-                        adjust_spawn_rate_setting(&mut settings, settings_selection, increase);
-                        settings.save();
-                        let from_row = game.player.row + SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS;
-                        game.reroll_spawn_rates_from(
-                            from_row,
-                            settings.rock_spawn_rate_percent,
-                            settings.air_spawn_rate_percent,
-                            settings.star_spawn_rate_percent,
-                            settings.diamond_spawn_rate_percent,
-                            settings.item_clear_above_rate_percent,
-                            settings.item_unify_colors_rate_percent,
-                            settings.item_starify_screen_rate_percent,
-                            settings.color_count,
-                            settings.color_cluster_rate_percent,
-                        );
-                    }
-                    // GameOverダイアログ中は上下キー/Spaceを選択操作として扱う
-                    // (タイトルへ戻るか、その場から復活して再開するかを選ぶ)。
-                    InputAction::FaceUp | InputAction::FaceDown
-                        if game.status == GameStatus::GameOver =>
-                    {
-                        game.toggle_game_over_selection();
-                    }
-                    InputAction::Confirm if game.status == GameStatus::GameOver => {
-                        match game.game_over_selection() {
-                            GameOverChoice::BackToTitle => back_to_title = true,
-                            GameOverChoice::Revive => {
-                                // 復活は「ここから仕切り直す」選択なので、死ぬ前へ
-                                // 巻き戻せる履歴は残さない(#233)。
-                                rewind_history.clear();
-                                game.revive();
-                            }
-                        }
-                    }
-                    InputAction::Confirm => {}
-                    // 移動・向き・掘削の5操作は`apply_input`へ統一する(TERM独自拡張。
-                    // #218)。オートプレイの仮想入力と全く同じ経路を通ることで、
-                    // AIだけが使える裏口が生まれないようにする。人が実際に操作した
-                    // 時点でオートプレイは解除し、無敵も開始前の状態へ戻す。
-                    InputAction::MoveLeft
-                    | InputAction::MoveRight
-                    | InputAction::FaceUp
-                    | InputAction::FaceDown
-                    | InputAction::Drill => {
-                        // 人が操作した時点でオートプレイは解除する。無敵はGキーが
-                        // 単独で管理するため、ここでは変更しない(#221)。
-                        autopilot = None;
-                        let events = game.apply_input(action);
-                        handle_events(
-                            &events,
-                            mixer.as_ref(),
-                            &se_enabled,
-                            settings.se_volume_percent,
-                        );
-                    }
-                    // T: オートプレイのON/OFF。無敵は連動させず、Gキーの状態をそのまま
-                    // 残す(#221。AIが無敵に頼らず生き延びられるかをTだけで試せるように
-                    // するため。無人のアトラクトモードだけは安全策として無敵もONにする)。
-                    InputAction::DebugToggleAutopilot => {
-                        autopilot = match autopilot.take() {
-                            Some(_) => None,
-                            None => Some(autoplay::Autopilot::new(game.is_invincible())),
-                        };
-                    }
-                    // G: 無敵の単独トグル。オートプレイとは独立して切り替えられる。
-                    InputAction::DebugToggleInvincible => {
-                        game.set_invincible(!game.is_invincible());
-                    }
-                    InputAction::DebugUnifyNearbyColors => {
-                        let events = game.debug_unify_nearby_colors();
-                        handle_events(
-                            &events,
-                            mixer.as_ref(),
-                            &se_enabled,
-                            settings.se_volume_percent,
-                        );
-                    }
-                    InputAction::DebugAddLife => game.debug_add_life(),
-                    InputAction::DebugFillAir => game.debug_fill_air(),
-                    InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
-                    InputAction::DebugStarifyVisibleScreen => game.debug_starify_visible_screen(),
-                    InputAction::DebugPlaceBomb => game.debug_place_bomb(),
-                    InputAction::DebugReceiveOpponentAttack => game.debug_receive_opponent_attack(),
-                    // 速度系デバッグショートカット([ ] - = , .)。落下・揺れの速度は
-                    // スナップショット(Game丸ごと)にも含まれるため、変更前の履歴へ
-                    // 戻ると変更を取り消したのと同じことになる。混乱を避けるため、
-                    // 速度を変えた時点で履歴を捨てる(#233)。
-                    InputAction::DebugBlockFallSlower => {
-                        rewind_history.clear();
-                        game.debug_adjust_block_fall_speed(false);
-                        settings.block_fall_tick_ms = game.block_fall_tick_ms();
-                        settings.save();
-                    }
-                    InputAction::DebugBlockFallFaster => {
-                        rewind_history.clear();
-                        game.debug_adjust_block_fall_speed(true);
-                        settings.block_fall_tick_ms = game.block_fall_tick_ms();
-                        settings.save();
-                    }
-                    InputAction::DebugPlayerFallSlower => {
-                        rewind_history.clear();
-                        game.debug_adjust_player_fall_speed(false);
-                        settings.player_fall_tick_ms = game.player_fall_tick_ms();
-                        settings.save();
-                    }
-                    InputAction::DebugPlayerFallFaster => {
-                        rewind_history.clear();
-                        game.debug_adjust_player_fall_speed(true);
-                        settings.player_fall_tick_ms = game.player_fall_tick_ms();
-                        settings.save();
-                    }
-                    InputAction::DebugShakeDurationLonger => {
-                        rewind_history.clear();
-                        game.debug_adjust_shake_duration(true);
-                        settings.shake_duration_ms = game.shake_duration_ms();
-                        settings.save();
-                    }
-                    InputAction::DebugShakeDurationShorter => {
-                        rewind_history.clear();
-                        game.debug_adjust_shake_duration(false);
-                        settings.shake_duration_ms = game.shake_duration_ms();
-                        settings.save();
-                    }
-                }
+            Screen::Playing(game) => tick_playing(&mut app, game, terminal)?,
+            Screen::Settings => tick_settings_screen(&mut app, terminal)?,
+            Screen::Help => tick_help_screen(&mut app, terminal)?,
+            Screen::ModeSelect => tick_mode_select(&mut app, terminal)?,
+            Screen::Title => tick_title(&mut app, terminal)?,
+        };
+
+        match transition {
+            Some(ScreenTransition::Quit) => break,
+            Some(ScreenTransition::ToTitle) => screen = Screen::Title,
+            Some(ScreenTransition::ToTitleDiscardingGame) => {
+                screen = Screen::Title;
+                app.pause_overlay = PauseOverlay::None;
+                // タイトルへ戻るとGameごと破棄されるため、オートプレイも必ず手放す
+                // (TERM独自拡張。#218)。アイドルタイマーも0から数え直す。
+                app.autopilot = None;
+                app.autopilot_is_attract_demo = false;
+                app.title_idle = Duration::ZERO;
+                // Gameを破棄するので、それを複製した巻き戻し履歴・進行中のセッションも捨てる(#233)。
+                app.rewind_history.clear();
+                app.rewind_session = None;
+                // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする。次にプレイを始めた
+                // とき、前回の再生位置・曲順を引きずらず必ず1曲目の先頭から鳴るようにする。
+                app.gameplay_bgm_restart.store(true, Ordering::Relaxed);
             }
-
-            // 巻き戻しを開始したフレームはゲームを進めず描画もしない(次フレームから
-            // 巻き戻し専用の処理へ入る)。
-            if !back_to_title && rewind_session.is_none() {
-                // オートプレイ(TERM独自拡張。#218)。盤面から決めた仮想入力を、人の
-                // 操作と同じ経路へ流し込む。GameOver中は何も返さないため、ダイアログは
-                // 人間がプレイしたときと同じように表示されたまま操作を待つ(#225)。
-                if let Some(pilot) = autopilot.as_mut() {
-                    for action in pilot.decide(game) {
-                        let events = game.apply_input(action);
-                        handle_events(
-                            &events,
-                            mixer.as_ref(),
-                            &se_enabled,
-                            settings.se_volume_percent,
-                        );
-                    }
-                }
-
-                let now = Instant::now();
-                let delta = now.duration_since(last_tick);
-                last_tick = now;
-
-                let events = game.update(delta.min(Duration::from_millis(250)));
-                handle_events(
-                    &events,
-                    mixer.as_ref(),
-                    &se_enabled,
-                    settings.se_volume_percent,
-                );
-
-                // 巻き戻し用スナップショットの蓄積(TERM独自拡張。#233)。記録の可否・
-                // 間隔の判定はRewindHistory側が持つ(ここは毎フレーム呼ぶだけ)。
-                rewind_history.maybe_capture(game);
-
-                let music_on = gameplay_music_enabled.load(Ordering::Relaxed);
-                let se_on = se_enabled.load(Ordering::Relaxed);
-                let autoplay_on = autopilot.is_some();
-                terminal.draw(|frame| {
-                    ui::render::draw(frame, game, music_on, se_on, autoplay_on);
-                    // 一時停止中の設定/ヘルプオーバーレイ。Screen::Playingのまま
-                    // Gameを手放さずに上へ重ね描きするだけで、専用のScreen遷移は行わない。
-                    match pause_overlay {
-                        PauseOverlay::None => {}
-                        PauseOverlay::Settings => ui::render::draw_settings(
-                            frame,
-                            settings_selection,
-                            music_on,
-                            se_on,
-                            settings.music_volume_percent,
-                            settings.se_volume_percent,
-                            settings.rock_spawn_rate_percent,
-                            settings.air_spawn_rate_percent,
-                            settings.star_spawn_rate_percent,
-                            settings.diamond_spawn_rate_percent,
-                            settings.item_clear_above_rate_percent,
-                            settings.item_unify_colors_rate_percent,
-                            settings.item_starify_screen_rate_percent,
-                            settings.color_count,
-                            settings.color_cluster_rate_percent,
-                            settings.field_width,
-                            settings.block_fall_tick_ms,
-                            settings.player_fall_tick_ms,
-                            settings.shake_duration_ms,
-                            settings.move_cooldown_ms,
-                            settings.dodge_recovery_ms,
-                            settings.bomb_spawn_rate_percent,
-                            settings.bomb_fuse_ms,
-                            settings.attack_blocks_per_rock,
-                            settings.attack_rocks_per_wave_max,
-                            settings.debug_log_enabled,
-                            settings.chain_vanish_interval_ms,
-                            settings.rewind_stock_max,
-                            false,
-                        ),
-                        PauseOverlay::Help => ui::render::draw_help(frame, None, false),
-                    }
-                })?;
+            Some(ScreenTransition::ToModeSelect) => screen = Screen::ModeSelect,
+            Some(ScreenTransition::ToSettings) => screen = Screen::Settings,
+            Some(ScreenTransition::ToHelp) => screen = Screen::Help,
+            Some(ScreenTransition::ToPlaying(game)) => {
+                screen = Screen::Playing(game);
+                app.last_tick = Instant::now();
             }
-        } else if let Screen::Settings = screen {
-            let music_on = settings.music_enabled;
-            let se_on = settings.se_enabled;
-            terminal.draw(|frame| {
-                ui::render::draw_settings(
-                    frame,
-                    settings_selection,
-                    music_on,
-                    se_on,
-                    settings.music_volume_percent,
-                    settings.se_volume_percent,
-                    settings.rock_spawn_rate_percent,
-                    settings.air_spawn_rate_percent,
-                    settings.star_spawn_rate_percent,
-                    settings.diamond_spawn_rate_percent,
-                    settings.item_clear_above_rate_percent,
-                    settings.item_unify_colors_rate_percent,
-                    settings.item_starify_screen_rate_percent,
-                    settings.color_count,
-                    settings.color_cluster_rate_percent,
-                    settings.field_width,
-                    settings.block_fall_tick_ms,
-                    settings.player_fall_tick_ms,
-                    settings.shake_duration_ms,
-                    settings.move_cooldown_ms,
-                    settings.dodge_recovery_ms,
-                    settings.bomb_spawn_rate_percent,
-                    settings.bomb_fuse_ms,
-                    settings.attack_blocks_per_rock,
-                    settings.attack_rocks_per_wave_max,
-                    settings.debug_log_enabled,
-                    settings.chain_vanish_interval_ms,
-                    settings.rewind_stock_max,
-                    true,
-                )
-            })?;
-
-            // 設定画面もpoll_input_batchを使う(FaceUp/FaceDown=選択切替、Drill=トグル、
-            // MoveLeft/MoveRight=配分率調整、Quit=タイトルへ戻る、と既存のInputActionを
-            // そのまま再利用できるため)。
-            for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
-                match action {
-                    InputAction::Quit => screen = Screen::Title,
-                    InputAction::FaceUp => {
-                        settings_selection = settings_selection.cycle_back();
-                    }
-                    InputAction::FaceDown => {
-                        settings_selection = settings_selection.cycle();
-                    }
-                    InputAction::Drill => match settings_selection {
-                        ui::render::SettingsChoice::Music => {
-                            settings.music_enabled = !settings.music_enabled;
-                            gameplay_music_enabled.store(settings.music_enabled, Ordering::Relaxed);
-                            settings.save();
-                        }
-                        ui::render::SettingsChoice::Se => {
-                            settings.se_enabled = !settings.se_enabled;
-                            se_enabled.store(settings.se_enabled, Ordering::Relaxed);
-                            settings.save();
-                        }
-                        // 調査用のブロック状態遷移ログのON/OFF。このScreen::Settings
-                        // (タイトルから開く独立画面)にはgameが無いため、次回のゲーム
-                        // 開始時(refresh_debug_log呼び出し時)に反映される。
-                        ui::render::SettingsChoice::DebugLogEnabled => {
-                            settings.debug_log_enabled = !settings.debug_log_enabled;
-                            settings.save();
-                        }
-                        ui::render::SettingsChoice::MusicVolume
-                        | ui::render::SettingsChoice::SeVolume
-                        | ui::render::SettingsChoice::RockRate
-                        | ui::render::SettingsChoice::AirRate
-                        | ui::render::SettingsChoice::StarRate
-                        | ui::render::SettingsChoice::DiamondRate
-                        | ui::render::SettingsChoice::ItemClearAboveRate
-                        | ui::render::SettingsChoice::ItemUnifyColorsRate
-                        | ui::render::SettingsChoice::ItemStarifyScreenRate
-                        | ui::render::SettingsChoice::ColorCount
-                        | ui::render::SettingsChoice::ColorClusterRate
-                        | ui::render::SettingsChoice::FieldWidth
-                        | ui::render::SettingsChoice::BlockFallSpeed
-                        | ui::render::SettingsChoice::PlayerFallSpeed
-                        | ui::render::SettingsChoice::ShakeDuration
-                        | ui::render::SettingsChoice::MoveSpeed
-                        | ui::render::SettingsChoice::DodgeRecoveryMs
-                        | ui::render::SettingsChoice::BombRate
-                        | ui::render::SettingsChoice::BombFuse
-                        | ui::render::SettingsChoice::AttackBlocksPerRock
-                        | ui::render::SettingsChoice::AttackRocksPerWaveMax
-                        | ui::render::SettingsChoice::ChainVanishInterval
-                        | ui::render::SettingsChoice::RewindStockMax => {}
-                    },
-                    // MUSIC/SEのトグルはSpace(TogglePause)・←→キーでも行える(ヘルプ表示
-                    // 「Spaceか←→でトグル」と一致させるため)。一時停止中のオーバーレイの
-                    // Spaceは別途「閉じて再開する」処理を持つため対象外。方向は問わず反転する。
-                    InputAction::TogglePause | InputAction::MoveLeft | InputAction::MoveRight
-                        if matches!(
-                            settings_selection,
-                            ui::render::SettingsChoice::Music
-                                | ui::render::SettingsChoice::Se
-                                | ui::render::SettingsChoice::DebugLogEnabled
-                        ) =>
-                    {
-                        match settings_selection {
-                            ui::render::SettingsChoice::Music => {
-                                settings.music_enabled = !settings.music_enabled;
-                                gameplay_music_enabled
-                                    .store(settings.music_enabled, Ordering::Relaxed);
-                            }
-                            ui::render::SettingsChoice::Se => {
-                                settings.se_enabled = !settings.se_enabled;
-                                se_enabled.store(settings.se_enabled, Ordering::Relaxed);
-                            }
-                            ui::render::SettingsChoice::DebugLogEnabled => {
-                                settings.debug_log_enabled = !settings.debug_log_enabled;
-                            }
-                            _ => {}
-                        }
-                        settings.save();
-                    }
-                    // MUSIC/SEの音量調整(#224)。一時停止オーバーレイと同じ挙動で、
-                    // SE音量は変更のたびに確認用サンプルSEを1回鳴らす。
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if matches!(
-                            settings_selection,
-                            ui::render::SettingsChoice::MusicVolume
-                                | ui::render::SettingsChoice::SeVolume
-                        ) =>
-                    {
-                        let increase = action == InputAction::MoveRight;
-                        match settings_selection {
-                            ui::render::SettingsChoice::MusicVolume => {
-                                settings.music_volume_percent = adjust_sound_volume_percent(
-                                    settings.music_volume_percent,
-                                    increase,
-                                );
-                                music_volume_percent
-                                    .store(settings.music_volume_percent, Ordering::Relaxed);
-                            }
-                            ui::render::SettingsChoice::SeVolume => {
-                                settings.se_volume_percent = adjust_sound_volume_percent(
-                                    settings.se_volume_percent,
-                                    increase,
-                                );
-                                if settings.se_enabled
-                                    && let Some(m) = mixer.as_ref()
-                                {
-                                    audio::sfx::play_oxygen_pickup(
-                                        m,
-                                        audio::sfx::se_gain(settings.se_volume_percent),
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
-                        settings.save();
-                    }
-                    InputAction::MoveLeft | InputAction::MoveRight
-                        if matches!(
-                            settings_selection,
-                            ui::render::SettingsChoice::RockRate
-                                | ui::render::SettingsChoice::AirRate
-                                | ui::render::SettingsChoice::StarRate
-                                | ui::render::SettingsChoice::DiamondRate
-                                | ui::render::SettingsChoice::ItemClearAboveRate
-                                | ui::render::SettingsChoice::ItemUnifyColorsRate
-                                | ui::render::SettingsChoice::ItemStarifyScreenRate
-                                | ui::render::SettingsChoice::ColorCount
-                                | ui::render::SettingsChoice::ColorClusterRate
-                                | ui::render::SettingsChoice::FieldWidth
-                                | ui::render::SettingsChoice::BlockFallSpeed
-                                | ui::render::SettingsChoice::PlayerFallSpeed
-                                | ui::render::SettingsChoice::ShakeDuration
-                                | ui::render::SettingsChoice::MoveSpeed
-                                | ui::render::SettingsChoice::DodgeRecoveryMs
-                                | ui::render::SettingsChoice::BombRate
-                                | ui::render::SettingsChoice::BombFuse
-                                | ui::render::SettingsChoice::AttackBlocksPerRock
-                                | ui::render::SettingsChoice::AttackRocksPerWaveMax
-                                | ui::render::SettingsChoice::ChainVanishInterval
-                                | ui::render::SettingsChoice::RewindStockMax
-                        ) =>
-                    {
-                        let increase = action == InputAction::MoveRight;
-                        if adjust_spawn_rate_setting(&mut settings, settings_selection, increase) {
-                            settings.save();
-                            continue;
-                        }
-                        match settings_selection {
-                            ui::render::SettingsChoice::FieldWidth => {
-                                settings.field_width =
-                                    adjust_field_width(settings.field_width, increase);
-                            }
-                            ui::render::SettingsChoice::BlockFallSpeed => {
-                                settings.block_fall_tick_ms =
-                                    adjust_fall_speed_ms(settings.block_fall_tick_ms, increase);
-                            }
-                            ui::render::SettingsChoice::PlayerFallSpeed => {
-                                settings.player_fall_tick_ms =
-                                    adjust_fall_speed_ms(settings.player_fall_tick_ms, increase);
-                            }
-                            ui::render::SettingsChoice::ShakeDuration => {
-                                settings.shake_duration_ms =
-                                    adjust_shake_duration_ms(settings.shake_duration_ms, increase);
-                            }
-                            ui::render::SettingsChoice::MoveSpeed => {
-                                settings.move_cooldown_ms =
-                                    adjust_move_cooldown_ms(settings.move_cooldown_ms, increase);
-                            }
-                            ui::render::SettingsChoice::DodgeRecoveryMs => {
-                                settings.dodge_recovery_ms =
-                                    adjust_dodge_recovery_ms(settings.dodge_recovery_ms, increase);
-                            }
-                            ui::render::SettingsChoice::BombRate => {
-                                settings.bomb_spawn_rate_percent = adjust_bomb_rate_percent(
-                                    settings.bomb_spawn_rate_percent,
-                                    increase,
-                                );
-                            }
-                            ui::render::SettingsChoice::BombFuse => {
-                                settings.bomb_fuse_ms =
-                                    adjust_bomb_fuse_ms(settings.bomb_fuse_ms, increase);
-                            }
-                            ui::render::SettingsChoice::AttackBlocksPerRock => {
-                                settings.attack_blocks_per_rock = adjust_attack_blocks_per_rock(
-                                    settings.attack_blocks_per_rock,
-                                    increase,
-                                );
-                            }
-                            ui::render::SettingsChoice::AttackRocksPerWaveMax => {
-                                settings.attack_rocks_per_wave_max =
-                                    adjust_attack_rocks_per_wave_max(
-                                        settings.attack_rocks_per_wave_max,
-                                        increase,
-                                    );
-                            }
-                            ui::render::SettingsChoice::ChainVanishInterval => {
-                                settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
-                                    settings.chain_vanish_interval_ms,
-                                    increase,
-                                );
-                            }
-                            ui::render::SettingsChoice::RewindStockMax => {
-                                settings.rewind_stock_max =
-                                    adjust_rewind_stock_max(settings.rewind_stock_max, increase);
-                            }
-                            _ => {}
-                        }
-                        settings.save();
-                    }
-                    _ => {}
-                }
-            }
-        } else if let Screen::Help = screen {
-            // 曲が最後まで自然に終わっていたら、再生中表示を消す。
-            if help_jukebox_playing
-                .as_ref()
-                .is_some_and(|(_, preview)| preview.is_finished())
-            {
-                help_jukebox_playing = None;
-            }
-
-            let jukebox_state = ui::render::HelpJukeboxState {
-                selection: help_jukebox_selection,
-                playing: help_jukebox_playing.as_ref().map(|(idx, _)| *idx),
-            };
-            terminal.draw(|frame| ui::render::draw_help(frame, Some(&jukebox_state), true))?;
-
-            // ヘルプ画面はEscキーでタイトルへ戻る。↑/↓で曲を選び、
-            // X/Zで再生・停止するジュークボックス操作を持つ。
-            for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
-                match action {
-                    InputAction::Quit => {
-                        if let Some((_, preview)) = help_jukebox_playing.take() {
-                            preview.stop();
-                        }
-                        screen = Screen::Title;
-                    }
-                    InputAction::FaceUp => {
-                        help_jukebox_selection = cycle_jukebox_selection(
-                            help_jukebox_selection,
-                            audio::bgm::JUKEBOX_TRACKS.len(),
-                            false,
-                        );
-                    }
-                    InputAction::FaceDown => {
-                        help_jukebox_selection = cycle_jukebox_selection(
-                            help_jukebox_selection,
-                            audio::bgm::JUKEBOX_TRACKS.len(),
-                            true,
-                        );
-                    }
-                    InputAction::Drill => {
-                        if let Some(m) = &mixer {
-                            let already_playing_selection =
-                                help_jukebox_playing.as_ref().map(|(idx, _)| *idx)
-                                    == Some(help_jukebox_selection);
-                            if let Some((_, preview)) = help_jukebox_playing.take() {
-                                preview.stop();
-                            }
-                            if !already_playing_selection {
-                                let (_, track) = audio::bgm::JUKEBOX_TRACKS[help_jukebox_selection];
-                                let preview = audio::bgm::start_jukebox_preview(
-                                    m,
-                                    track,
-                                    settings.music_volume_percent,
-                                );
-                                help_jukebox_playing = Some((help_jukebox_selection, preview));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        } else if let Screen::ModeSelect = screen {
-            terminal.draw(|frame| ui::render::draw_mode_select(frame, mode_select_choice))?;
-
-            // モードセレクト画面。↑/↓・←/→どちらでもイージー/ノーマルを
-            // 切り替えられるようにする(設定画面の選択操作と揃える)。
-            for action in input::poll_input_batch(FRAME_INTERVAL_MS)? {
-                match action {
-                    InputAction::Quit => screen = Screen::Title,
-                    InputAction::FaceUp
-                    | InputAction::FaceDown
-                    | InputAction::MoveLeft
-                    | InputAction::MoveRight => {
-                        mode_select_choice = mode_select_choice.toggle();
-                    }
-                    InputAction::Confirm => {
-                        let depth_goal_m = mode_select_choice.depth_goal_m();
-                        settings.last_course_depth_m = depth_goal_m;
-                        settings.save();
-                        let game = start_new_game(rng.random(), &settings, depth_goal_m);
-                        // 新しい盤面なので前のゲームの履歴は引き継がない(#233)。
-                        rewind_history.clear();
-                        rewind_session = None;
-                        screen = Screen::Playing(Box::new(game));
-                        last_tick = Instant::now();
-                    }
-                    _ => {}
-                }
-            }
-        } else {
-            terminal.draw(ui::render::draw_title)?;
-
-            let title_frame_started = Instant::now();
-            let key = input::poll_any_key(FRAME_INTERVAL_MS)?;
-            // アトラクトモード(TERM独自拡張。#218)のアイドル計測。`poll_any_key`は
-            // 最大FRAME_INTERVAL_MSだけ待つが、キーが来れば早く返るため、実際の
-            // 経過時間で数える。どのキーであっても(画面遷移しないキーでも)
-            // 押された時点でタイマーは0へ戻す。
-            if key.is_some() {
-                title_idle = Duration::ZERO;
-            } else {
-                title_idle += title_frame_started.elapsed();
-            }
-
-            if let Some(action) = key {
-                match action {
-                    input::AnyKeyAction::Quit => break,
-                    input::AnyKeyAction::OpenSettings => screen = Screen::Settings,
-                    input::AnyKeyAction::OpenHelp => screen = Screen::Help,
-                    input::AnyKeyAction::Advance => {
-                        mode_select_choice = ui::render::CourseChoice::from_depth_goal_m(
-                            settings.last_course_depth_m,
-                        );
-                        screen = Screen::ModeSelect;
-                    }
-                    // 画面遷移は起こさないが、アイドルタイマーのリセットは上で済んでいる。
-                    input::AnyKeyAction::Ignored => {}
-                }
-            } else if title_idle >= Duration::from_millis(ATTRACT_MODE_IDLE_MS) {
-                // 放置されたので自動デモを始める。モードセレクトは挟まず、前回選んだ
-                // コースでそのまま開始し、無敵ONのオートプレイに操作を任せる。
-                let mut game =
-                    start_new_game(rng.random(), &settings, settings.last_course_depth_m);
-                // 無人で回り続けるデモなので、手動のTキー(#221で無敵と切り離した)とは
-                // 違い、ここだけは安全策として無敵も自動でONにする。
-                game.set_invincible(true);
-                // 新規に作ったゲームなので、デモ開始前の無敵状態は常にOFF。
-                autopilot = Some(autoplay::Autopilot::new(false));
-                autopilot_is_attract_demo = true;
-                title_idle = Duration::ZERO;
-                // 新しい盤面なので前のゲームの履歴は引き継がない(#233)。
-                rewind_history.clear();
-                rewind_session = None;
-                screen = Screen::Playing(Box::new(game));
-                last_tick = Instant::now();
-            }
-        }
-
-        if back_to_title {
-            screen = Screen::Title;
-            pause_overlay = PauseOverlay::None;
-            // タイトルへ戻るとGameごと破棄されるため、オートプレイも必ず手放す
-            // (TERM独自拡張。#218)。アイドルタイマーも0から数え直す。
-            autopilot = None;
-            autopilot_is_attract_demo = false;
-            title_idle = Duration::ZERO;
-            // Gameを破棄するので、それを複製した巻き戻し履歴・進行中のセッションも捨てる(#233)。
-            rewind_history.clear();
-            rewind_session = None;
-            // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする。次にプレイを始めた
-            // とき、前回の再生位置・曲順を引きずらず必ず1曲目の先頭から鳴るようにする。
-            gameplay_bgm_restart.store(true, Ordering::Relaxed);
+            None => {}
         }
 
         // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが参照する
         // 実効MUSIC状態を毎フレーム同期する。タイトル用・プレイ中用のいずれか一方だけがtrueになる。
-        let title_bgm_now_enabled = effective_title_bgm_enabled(settings.music_enabled, &screen);
-        title_music_enabled.store(title_bgm_now_enabled, Ordering::Relaxed);
-        gameplay_music_enabled.store(
-            effective_gameplay_bgm_enabled(settings.music_enabled, &screen),
+        let title_bgm_now_enabled =
+            effective_title_bgm_enabled(app.settings.music_enabled, &screen);
+        app.title_music_enabled
+            .store(title_bgm_now_enabled, Ordering::Relaxed);
+        app.gameplay_music_enabled.store(
+            effective_gameplay_bgm_enabled(app.settings.music_enabled, &screen),
             Ordering::Relaxed,
         );
         // タイトル画面へ戻ってきた(無効→有効に転じた)瞬間に、タイトルBGMを
         // 先頭から再生し直す。
-        if should_restart_title_bgm(was_title_bgm_enabled, title_bgm_now_enabled) {
-            title_bgm_restart.store(true, Ordering::Relaxed);
+        if should_restart_title_bgm(app.was_title_bgm_enabled, title_bgm_now_enabled) {
+            app.title_bgm_restart.store(true, Ordering::Relaxed);
         }
-        was_title_bgm_enabled = title_bgm_now_enabled;
+        app.was_title_bgm_enabled = title_bgm_now_enabled;
     }
 
-    bgm_stop.store(true, Ordering::Relaxed);
+    app.bgm_stop.store(true, Ordering::Relaxed);
 
     Ok(())
 }
