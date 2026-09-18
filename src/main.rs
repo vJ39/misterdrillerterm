@@ -8,6 +8,7 @@ mod constants;
 mod debug_log;
 mod game;
 mod input;
+mod lockstep;
 mod rewind;
 mod settings;
 mod ui;

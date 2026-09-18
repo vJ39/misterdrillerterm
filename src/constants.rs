@@ -597,3 +597,16 @@ pub const REWIND_STOCK_PER_CHECKPOINT: u8 = 1;
 /// 設定画面で調整できる巻き戻しストック上限の範囲(0=巻き戻し機能そのものをOFF)。
 pub const REWIND_STOCK_MAX_SETTING_MIN: u8 = 0;
 pub const REWIND_STOCK_MAX_SETTING_MAX: u8 = 5;
+
+// ---------------------------------------------------------------------------
+// ネットワーク対戦(#10、TERM独自拡張)。lockstep方式で両ホストの盤面を同期する
+// (spec.md 12.3)。
+// ---------------------------------------------------------------------------
+
+/// 対戦lockstepの論理tick間隔(ms)。通常プレイの`FALL_TICK_MS`と同値だが、
+/// 落下速度が設定・デバッグ操作で可変になった現在は「落下tick」と「ネットワーク
+/// tick」は別概念のため、専用の定数として分離する(spec.md 12.3)。
+/// 通信層(#10本体)実装まではローカルlockstepハーネス(`lockstep.rs`)の
+/// テストからしか使われないため、`state_hash`等と同じ理由でdead_code警告を抑止する。
+#[allow(dead_code)]
+pub const NET_TICK_MS: u64 = 150;
