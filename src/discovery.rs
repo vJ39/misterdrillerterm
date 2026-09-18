@@ -45,13 +45,47 @@ pub struct Discovery {
     peers: Vec<DiscoveredPeer>,
 }
 
+/// 環境変数`MDT_DISCOVERY_PORT`(自分がbindするポート)を読み取る。未設定・不正な
+/// 値なら`DISCOVERY_PORT`(39393)を使う(#267)。
+///
+/// 同一マシンで2プロセスを起動して動作確認したい場合に使う開発用のオーバーライドで、
+/// 通常のプレイでは設定不要(本番の自動探索は全ホストが39393で待ち受ける前提のまま)。
+fn bind_port_override() -> u16 {
+    resolve_port_override(
+        std::env::var("MDT_DISCOVERY_PORT").ok().as_deref(),
+        DISCOVERY_PORT,
+    )
+}
+
+/// 環境変数`MDT_DISCOVERY_PEER_PORT`(HELLO/招待の送信先ポート)を読み取る。未設定・
+/// 不正な値なら`bind_port`と同じ値を使う(#267。通常運用と同じ「全員同じポート」)。
+fn peer_port_override(bind_port: u16) -> u16 {
+    resolve_port_override(
+        std::env::var("MDT_DISCOVERY_PEER_PORT").ok().as_deref(),
+        bind_port,
+    )
+}
+
+/// 環境変数の文字列値をポート番号として解決する。`None`・パース失敗なら`default`に
+/// フォールバックする(実際の`std::env::var`呼び出しと切り離してテストできるよう、
+/// 判定ロジックだけを独立させている)。
+fn resolve_port_override(value: Option<&str>, default: u16) -> u16 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 impl Discovery {
-    /// `0.0.0.0:39393`にbindし、非ブロッキング+ブロードキャスト送信可能にしてから
-    /// 最初のHELLOを1回流す。
+    /// 既定では`0.0.0.0:39393`にbindし、非ブロッキング+ブロードキャスト送信可能に
+    /// してから最初のHELLOを1回流す。`MDT_DISCOVERY_PORT`/`MDT_DISCOVERY_PEER_PORT`が
+    /// 設定されていればそちらを使う(#267。同一マシンで2プロセスを別ポートで起動し、
+    /// 互いを送信先に向けることで対戦フローを実機無しに確認できる)。
     pub fn start(my_name: String, my_tcp_port: u16) -> io::Result<Self> {
+        let bind_port = bind_port_override();
+        let peer_port = peer_port_override(bind_port);
         Self::start_with(
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT)),
-            SocketAddr::from((Ipv4Addr::BROADCAST, DISCOVERY_PORT)),
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, bind_port)),
+            SocketAddr::from((Ipv4Addr::BROADCAST, peer_port)),
             my_name,
             my_tcp_port,
         )
@@ -259,6 +293,31 @@ impl DiscoveredPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // ポートのオーバーライド(#267)。実際の環境変数(グローバル状態で他のテストと
+    // 競合しうる)は読まず、判定ロジックだけを純粋関数として確認する。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_port_override_falls_back_to_the_default_when_unset_or_invalid() {
+        assert_eq!(resolve_port_override(None, DISCOVERY_PORT), DISCOVERY_PORT);
+        assert_eq!(
+            resolve_port_override(Some(""), DISCOVERY_PORT),
+            DISCOVERY_PORT
+        );
+        assert_eq!(
+            resolve_port_override(Some("not-a-port"), DISCOVERY_PORT),
+            DISCOVERY_PORT
+        );
+        // peer_port_overrideのフォールバック(bind_port)側の使われ方も兼ねて確認する。
+        assert_eq!(resolve_port_override(None, 39400), 39400);
+    }
+
+    #[test]
+    fn resolve_port_override_uses_the_given_value_when_valid() {
+        assert_eq!(resolve_port_override(Some("39400"), DISCOVERY_PORT), 39400);
+    }
 
     /// 探索側のインスタンス(ループバックの空きポートにbind)。
     fn discovery() -> Discovery {
