@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::constants::NET_TICK_MS;
 use crate::game::{Game, GameStatus, InputAction};
 use crate::lockstep;
+use crate::net::BattleConfig;
 
 /// 1フレームの実測時間としてtickへ繰り入れる上限(ms)。通常プレイ(`tick_playing`)が
 /// `Game::update`へ渡すdeltaに掛けているクランプと同じ値で、ウィンドウ非アクティブ等で
@@ -99,6 +100,51 @@ impl BattleState {
     }
 }
 
+/// `BattleConfig`とseedから、通常プレイの開始処理と同一順序でGameを1つ生成する
+/// (#253。spec.md 12.2ステップ4)。ホスト・クライアントの双方がこの関数を同じ引数で
+/// 呼ぶことで、4インスタンス(各ホスト2つ)の初期盤面が一致する。
+///
+/// 通常プレイの`start_new_game`(`main.rs`)が`Settings`から行っている反映を、`Settings`
+/// ではなく`BattleConfig`から同じ並び(生成 → 速度系setter群 → 配分率の再抽選)で行う。
+/// 巻き戻しストック・ブロック状態遷移ログは対戦では設定として共有しない(前者は対戦中
+/// 無効、後者はシミュレーションに影響しないローカル専用。spec.md 12.5)ため、
+/// `BattleConfig`にも含まれず、ここでも触らない。
+///
+/// `Screen::Battle`への実際の遷移は#254/#256で作るため、この段階ではテストからのみ
+/// 呼ばれる(`BattleState::new`と同じ理由でdead_code警告を抑止する)。
+#[allow(dead_code)]
+pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
+    let mut game = Game::new_with_width(
+        seed,
+        config.field_width as usize,
+        config.depth_goal_m as usize,
+    );
+    game.set_block_fall_tick_ms(config.block_fall_tick_ms);
+    game.set_player_fall_tick_ms(config.player_fall_tick_ms);
+    game.set_shake_duration_ms(config.shake_duration_ms);
+    game.set_dodge_recovery_ms(config.dodge_recovery_ms);
+    game.set_move_cooldown_ms(config.move_cooldown_ms);
+    game.set_bomb_spawn_rate_percent(config.bomb_spawn_rate_percent);
+    game.set_bomb_fuse_ms(config.bomb_fuse_ms);
+    game.set_chain_vanish_interval_ms(config.chain_vanish_interval_ms);
+    game.set_attack_blocks_per_rock(config.attack_blocks_per_rock);
+    game.set_attack_rocks_per_wave_max(config.attack_rocks_per_wave_max);
+    // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
+    game.reroll_spawn_rates_from(
+        2,
+        config.rock_spawn_rate_percent,
+        config.air_spawn_rate_percent,
+        config.star_spawn_rate_percent,
+        config.diamond_spawn_rate_percent,
+        config.item_clear_above_rate_percent,
+        config.item_unify_colors_rate_percent,
+        config.item_starify_screen_rate_percent,
+        config.color_count,
+        config.color_cluster_rate_percent,
+    );
+    game
+}
+
 /// 相手の入力を1tickぶん受け取る。通信スレッドがまだ無い#252時点では常に`None`。
 /// #254で通信スレッドの受信キュー(mpsc)からの取り出しへ差し替える。相手の入力を
 /// 取得する箇所をこの関数1つに閉じているため、差し替えはここだけで済む。
@@ -143,6 +189,11 @@ mod tests {
 
     fn net_tick() -> Duration {
         Duration::from_millis(NET_TICK_MS)
+    }
+
+    /// テスト用の`BattleConfig`。ゴールは上の短いコース(20m)に合わせる。
+    fn test_battle_config() -> BattleConfig {
+        BattleConfig::from_settings(&crate::settings::Settings::default(), TEST_GOAL_M)
     }
 
     /// テスト用の対戦状態。短いコースの`Game`を2つ持たせる。
@@ -324,6 +375,55 @@ mod tests {
             state.game_local.debug_frame(),
             frames_at_outcome,
             "決着後はtickが進まないはず"
+        );
+    }
+
+    #[test]
+    fn new_game_from_battle_config_builds_the_same_board_for_the_same_arguments() {
+        // 同一シード・同一設定なら、ホスト側とクライアント側で別々に生成しても
+        // 初期盤面が完全に一致する(lockstepの前提。spec.md 12.2ステップ4)。
+        let config = test_battle_config();
+
+        let host_side = new_game_from_battle_config(4242, &config);
+        let client_side = new_game_from_battle_config(4242, &config);
+
+        assert_eq!(host_side.state_hash(), client_side.state_hash());
+    }
+
+    #[test]
+    fn new_game_from_battle_config_applies_the_field_width_and_goal_depth() {
+        let config = BattleConfig {
+            field_width: 10,
+            ..test_battle_config()
+        };
+
+        let game = new_game_from_battle_config(1, &config);
+
+        assert_eq!(game.board.rows[0].len(), 10);
+        assert_eq!(game.depth_goal_m(), TEST_GOAL_M);
+    }
+
+    #[test]
+    fn new_game_from_battle_config_reflects_the_seed_and_the_spawn_rate_settings() {
+        // 引数が効いていること(同じ値を返すだけの実装になっていないこと)を、
+        // シードと配分率をそれぞれ変えて確認する。
+        let config = test_battle_config();
+        let base = new_game_from_battle_config(1, &config);
+
+        assert_ne!(
+            base.state_hash(),
+            new_game_from_battle_config(2, &config).state_hash(),
+            "シードが違えば盤面も変わるはず"
+        );
+
+        let denser_rocks = BattleConfig {
+            rock_spawn_rate_percent: 300,
+            ..config
+        };
+        assert_ne!(
+            base.state_hash(),
+            new_game_from_battle_config(1, &denser_rocks).state_hash(),
+            "配分率の設定が盤面へ反映されているはず"
         );
     }
 

@@ -10,6 +10,7 @@ mod debug_log;
 mod game;
 mod input;
 mod lockstep;
+mod net;
 mod rewind;
 mod settings;
 mod ui;
