@@ -1,4 +1,4 @@
-//! 対戦用の状態(#252/#254/#273。spec.md 12章)。
+//! 対戦用の状態(#252/#254/#273/#274。spec.md 12章)。
 //!
 //! 「全参加者の盤面を150ms固定tickでlockstep実行し、決着を確定する」状態遷移を持つ。
 //! #252では通信を伴わない状態遷移だけだったが、#254で実際のTCP通信(#253)と繋ぎ、
@@ -9,8 +9,11 @@
 //!
 //! #273で参加者を2人固定からN人(2〜4)へ一般化した。盤面は`games: Vec<Game>`(index 0が
 //! 自分)で持ち、決着は「Win/Lose/Draw」の3値から順位(`BattleOutcome::Ranked`)へ
-//! 置き換えた。通信あり(`network`)の経路は2人専用のまま残っており、N人分の接続
-//! (フルメッシュ)への置き換えは段階B(#274)で行う。
+//! 置き換えた。#274で通信経路もN人(フルメッシュ)へ広げ、自分以外の各参加者と1本ずつ
+//! TCP接続を持つ(`peers`)形にした。`GameMessage`(net.rs)は変更せず、Input/Heartbeat/
+//! StateHash/Result/Byeの交換は2人版のロジックをpeerごとに適用している。N人分の
+//! ハンドシェイク(誰が接続を作るか)は段階C(#275)で行うため、この段階の入口は
+//! 「確立済みのTCP接続がN-1本渡される」`from_peer_streams`になる。
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -67,16 +70,23 @@ pub struct BattleState {
     next_lose_rank: u8,
     /// 決着。`Some`になった以後はtickを進めず、自分の入力も受け付けない。
     outcome: Option<BattleOutcome>,
-    /// `Some`なら実際の通信で相手の入力を得る(#254)。`None`なら#252までと同じ、
-    /// 他の参加者の入力は常に`None`として扱うローカル専用の動作(#273のテストの前提)。
-    ///
-    /// この経路は2人専用のまま残しており、`games`の長さが2であることを前提とする。
-    /// N人分のフルメッシュ接続への置き換えは段階B(#274)で行う。
-    network: Option<NetworkLink>,
+    /// 自分以外の各参加者との通信路(#274)。`peers[i]`は`games[i+1]`に対応する
+    /// (自分が`games[0]`なので、`games[1..]`と`peers[0..]`が1対1)。`None`なら通信なしで、
+    /// 他の参加者の入力は常に`None`として扱うローカル専用の動作(#252/#273のテストの前提)。
+    peers: Option<Vec<PeerLink>>,
+    /// 全peerへ送信済みの、現在のtickぶんの自分の入力。他の参加者の入力を待っている間に
+    /// 自分の入力だけ先に確定・送信するため、tickが揃うまでここに控える
+    /// (`None`なら現在のtickぶんの自分の入力はまだ確定していない)。全peerへ同じ値を
+    /// 送るだけなのでpeerごとには持たない(#274設計書4節)。
+    committed_local_action: Option<NetAction>,
+    /// 次に処理するtick番号。全peerで共通(フルメッシュの全員が同じtickを共有するのが
+    /// 前提)で、StateHashのキーや`completed_tick`の算出に使う。
+    net_tick: u32,
 }
 
-/// 対戦相手との通信路(#254)。`BattleState`が対戦中ずっと保持する。
-struct NetworkLink {
+/// 対戦相手1人との通信路(#274。#254の`NetworkLink`を複数保持できるよう改名し、
+/// フィールドはそのまま持ち越す)。`BattleState`が対戦中ずっと保持する。
+struct PeerLink {
     /// 送信用のストリーム。送信はメインループから直接行い、専用スレッドは立てない
     /// (TCPの送信バッファへ書くだけで通常は即座に返るため)。
     writer: TcpStream,
@@ -84,12 +94,10 @@ struct NetworkLink {
     event_rx: mpsc::Receiver<NetworkEvent>,
     /// Dropさせない目的だけで保持する(スレッド自体は`writer`と無関係に動く)。
     _receiver_thread: thread::JoinHandle<()>,
-    /// 次に処理するtick番号。`Input`メッセージの`tick`と突き合わせるのに使う。
+    /// このpeerについて次に処理するtick番号。受信した`Input`メッセージの`tick`と
+    /// 突き合わせるのに使う。未切断の間は`BattleState::net_tick`と一致し、切断を
+    /// 検知した時点で止まる(以後そのpeerの入力は待たないため進める意味が無い)。
     next_tick: u32,
-    /// `next_tick`のぶんとして既に送信済みの自分の入力。相手の入力を待っている間に
-    /// 自分の入力だけ先に確定・送信するため、tickが揃うまでここに控える
-    /// (`None`なら`next_tick`ぶんの自分の入力はまだ確定していない)。
-    committed_local_action: Option<NetAction>,
     /// 通信の遅延で自分のtickより先に届いた相手の`Input`を、tick番号付きで
     /// 一時保持する。
     pending_remote_inputs: VecDeque<(u32, NetAction)>,
@@ -117,6 +125,35 @@ struct NetworkLink {
     pending_remote_state_hashes: HashMap<u32, (u64, u64)>,
 }
 
+impl PeerLink {
+    /// 確立済みのTCP接続1本から通信路を組み立てる(#274)。`stream`は呼び出し元が
+    /// ハンドシェイクに使ったものをそのまま渡す(内部で`try_clone`して読み書き用に分け、
+    /// 読み側は受信専用スレッドへ預ける)。
+    fn new(stream: TcpStream, start_at_unix_ms: u64) -> io::Result<Self> {
+        let reader_stream = stream.try_clone()?;
+        let (tx, event_rx) = mpsc::channel();
+        let receiver_thread = net::spawn_receiver_thread(reader_stream, tx);
+
+        let now = Instant::now();
+        Ok(Self {
+            writer: stream,
+            event_rx,
+            _receiver_thread: receiver_thread,
+            next_tick: 0,
+            pending_remote_inputs: VecDeque::new(),
+            awaiting_since: None,
+            last_remote_activity: now,
+            last_heartbeat_sent: now,
+            start_at_unix_ms,
+            result_sent: false,
+            remote_result: None,
+            disconnected: false,
+            own_state_hashes: HashMap::new(),
+            pending_remote_state_hashes: HashMap::new(),
+        })
+    }
+}
+
 impl BattleState {
     /// 通信なしの対戦状態を作る(#273)。`games`のindex 0が自分で、`player_names`は
     /// 同じindexで対応する表示名。`games.len()`は2〜4を想定するが、この段階では長さの
@@ -135,21 +172,66 @@ impl BattleState {
             next_win_rank: 1,
             next_lose_rank: player_count as u8,
             outcome: None,
-            network: None,
+            peers: None,
+            committed_local_action: None,
+            net_tick: 0,
         }
     }
 
-    /// #253のハンドシェイク結果と確立済みのTCPストリームから、通信ありの対戦状態を
-    /// 組み立てる(#254)。`stream`は呼び出し元がハンドシェイクに使ったものをそのまま渡す
-    /// (内部で`try_clone`して読み書き用に分ける)。
+    /// N人分の確立済みTCP接続から通信ありの対戦状態を組み立てる(#274)。
+    ///
+    /// `games`/`player_names`は既にseed/configから生成済み(index 0が自分)で、`streams`は
+    /// 自分以外の各参加者との接続(`games`のindex 1..と対応する順)。`start_at_unix_ms`は
+    /// ハンドシェイクで合意した開始時刻(`Result`送信時の経過時間の算出に使う)。
+    ///
+    /// 接続の確立自体(誰が誰へ繋ぐか・configとseedの配布)は呼び出し元の責務で、N人分の
+    /// ハンドシェイクは段階C(#275)で実装する。
+    pub fn from_peer_streams(
+        games: Vec<Game>,
+        player_names: Vec<String>,
+        streams: Vec<TcpStream>,
+        start_at_unix_ms: u64,
+    ) -> io::Result<Self> {
+        debug_assert_eq!(
+            games.len(),
+            player_names.len(),
+            "盤面と表示名は同じindexで対応するはず"
+        );
+        debug_assert_eq!(
+            streams.len(),
+            games.len() - 1,
+            "接続は自分以外の参加者ぶん必要"
+        );
+        let player_count = games.len();
+        let peers = streams
+            .into_iter()
+            .map(|stream| PeerLink::new(stream, start_at_unix_ms))
+            .collect::<io::Result<Vec<_>>>()?;
+
+        Ok(Self {
+            games,
+            player_names,
+            net_tick_accum: Duration::ZERO,
+            ranks: vec![None; player_count],
+            next_win_rank: 1,
+            next_lose_rank: player_count as u8,
+            outcome: None,
+            peers: Some(peers),
+            committed_local_action: None,
+            net_tick: 0,
+        })
+    }
+
+    /// #253のハンドシェイク結果と確立済みのTCPストリームから、2人対戦の状態を
+    /// 組み立てる(#254)。`stream`は呼び出し元がハンドシェイクに使ったものをそのまま渡す。
     ///
     /// 呼び出し元はロビー(`lobby.rs`)で、招待の成立後にホスト役・クライアント役の
     /// どちらの経路からもここへ合流する(#256)。`my_name`は自分の表示名で、
     /// `player_names`のindex 0に入る(ハンドシェイク結果は相手の名前しか持たないため
     /// 呼び出し元から受け取る)。
     ///
-    /// この経路は2人対戦のまま(`games`の長さは2)で、N人分のフルメッシュ接続の確立は
-    /// 段階C(#275)で行う。
+    /// N人対応のハンドシェイク(#275)ができるまで既存のロビーフローをこのシグネチャの
+    /// まま使い続けられるよう、組み立ての本体は`from_peer_streams`(#274)へ委譲する。
     pub fn from_handshake(
         handshake: net::HandshakeResult,
         stream: TcpStream,
@@ -160,39 +242,13 @@ impl BattleState {
             new_game_from_battle_config(handshake.seed, &handshake.config),
         ];
         let player_names = vec![my_name.to_string(), handshake.opponent_name];
-        let player_count = games.len();
 
-        let reader_stream = stream.try_clone()?;
-        let (tx, event_rx) = mpsc::channel();
-        let receiver_thread = net::spawn_receiver_thread(reader_stream, tx);
-
-        let now = Instant::now();
-        Ok(Self {
+        Self::from_peer_streams(
             games,
             player_names,
-            net_tick_accum: Duration::ZERO,
-            ranks: vec![None; player_count],
-            next_win_rank: 1,
-            next_lose_rank: player_count as u8,
-            outcome: None,
-            network: Some(NetworkLink {
-                writer: stream,
-                event_rx,
-                _receiver_thread: receiver_thread,
-                next_tick: 0,
-                committed_local_action: None,
-                pending_remote_inputs: VecDeque::new(),
-                awaiting_since: None,
-                last_remote_activity: now,
-                last_heartbeat_sent: now,
-                start_at_unix_ms: handshake.start_at_unix_ms,
-                result_sent: false,
-                remote_result: None,
-                disconnected: false,
-                own_state_hashes: HashMap::new(),
-                pending_remote_state_hashes: HashMap::new(),
-            }),
-        })
+            vec![stream],
+            handshake.start_at_unix_ms,
+        )
     }
 
     /// 決着(#256)。`Some`なら対戦は終わっており、画面側は結果表示へ切り替える。
@@ -200,14 +256,19 @@ impl BattleState {
         self.outcome
     }
 
-    /// 対戦から抜けることを相手へ伝える(#256)。通信なし(#252のローカル専用)の場合や
-    /// 既に切断されている場合は何も起きない。届かなくても相手側はHeartbeatの途絶で
-    /// 切断を検知するため、送信失敗は無視する。
+    /// 対戦から抜けることを他の参加者全員へ伝える(#256/#274)。通信なし(#252のローカル
+    /// 専用)の場合は何も起きない。届かなくても相手側はHeartbeatの途絶で切断を検知する
+    /// ため、送信失敗は無視する。
     pub fn notify_bye(&mut self) {
-        let Some(link) = &mut self.network else {
+        let Some(peers) = &mut self.peers else {
             return;
         };
-        let _ = net::write_message(&mut link.writer, &GameMessage::Bye);
+        for peer in peers.iter_mut() {
+            if peer.disconnected {
+                continue;
+            }
+            let _ = net::write_message(&mut peer.writer, &GameMessage::Bye);
+        }
     }
 
     /// 全参加者の現在の`games`から、まだ確定していない参加者の順位を更新する(#273)。
@@ -269,10 +330,10 @@ impl BattleState {
     /// 高々1アクション(12.2)のため、1フレームで複数tick進む場合も最初のtickだけが消費し、
     /// 残りのtickは`None`で進む。決着後(`outcome`が`Some`)は何もしない。
     ///
-    /// 通信あり(`network`が`Some`)の場合は`advance_networked`へ委ねる。相手の入力が
+    /// 通信あり(`peers`が`Some`)の場合は`advance_networked`へ委ねる。他の参加者の入力が
     /// 揃ったtickしか進められないため、時間の扱いがローカル専用の場合と異なる。
     pub fn advance(&mut self, delta: Duration, local_action: Option<InputAction>) {
-        if self.network.is_some() {
+        if self.peers.is_some() {
             self.advance_networked(delta, local_action);
             return;
         }
@@ -295,209 +356,331 @@ impl BattleState {
         }
     }
 
-    /// 通信ありの1フレーム(#254)。相手の入力が揃ったtickだけを進める。
+    /// 通信ありの1フレーム(#254/#274)。他の参加者の入力が揃ったtickだけを進める。
     ///
-    /// 相手を待っている間は`net_tick_accum`へ時間を足さない(自分だけ時計が進むと
+    /// 誰かを待っている間は`net_tick_accum`へ時間を足さない(自分だけ時計が進むと
     /// lockstepの前提が壊れる)。1回の呼び出しで複数tick進む場合も、待機に入った時点で
     /// 残りのtickは次回の呼び出しへ持ち越す。
     fn advance_networked(&mut self, delta: Duration, local_action: Option<InputAction>) {
-        // 受信処理だけは決着後も続ける(相手の`Result`は自分の決着より後に届くため)。
+        // 受信処理だけは決着後も続ける(他の参加者の`Result`は自分の決着より後に届くため)。
         self.drain_network_events();
         if self.outcome.is_some() {
-            self.reconcile_remote_result();
+            self.reconcile_remote_results();
             return;
         }
 
-        let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
-        if link.disconnected {
-            // 切断を検知した側の不戦勝(12.4)。盤面から導けない決着のため`ranks`は触らず
-            // 自分の順位だけを1位として確定する(#274でN人版へ作り直す)。
-            self.outcome = Some(BattleOutcome::Ranked(1));
+        // 切断・タイムアウトしたpeerの順位を確定させる。残りの参加者では対戦を続けるため、
+        // ここで自分の順位まで決まる(=生存者側で決着した)場合だけ`outcome`が入る。
+        self.settle_disconnected_peers();
+        if self.outcome.is_some() {
             return;
         }
-        if let Some(since) = link.awaiting_since {
-            if since.elapsed() >= Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS) {
-                link.disconnected = true;
-                self.outcome = Some(BattleOutcome::Ranked(1));
-            }
+
+        if self.is_awaiting_any_peer() {
             // 待機中は自分の時計を進めない(12.3)。届いていれば`drain_network_events`が
             // 既に待機を解除している。
             return;
         }
-        if link.last_heartbeat_sent.elapsed() >= Duration::from_millis(HEARTBEAT_INTERVAL_MS) {
-            let tick = link.next_tick;
-            link.last_heartbeat_sent = Instant::now();
-            let _ = net::write_message(&mut link.writer, &GameMessage::Heartbeat { tick });
-        }
+        self.send_due_heartbeats();
 
         self.net_tick_accum += delta.min(Duration::from_millis(DELTA_CLAMP_MS));
 
         let net_tick = Duration::from_millis(NET_TICK_MS);
         let mut local_action = local_action;
         while self.net_tick_accum >= net_tick {
-            let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
-
-            // 自分の入力は相手を待たずに先に確定して送る。相手の入力が届いてから送る形に
-            // すると、両者が相手の`Input`を待ったまま進まなくなる。送信済みの入力は
-            // tickが揃うまで`committed_local_action`に控え、同じtickを二重に送らない。
-            let my_action = match link.committed_local_action {
+            // 自分の入力は他の参加者を待たずに先に確定して送る。相手の入力が届いてから
+            // 送る形にすると、全員が互いの`Input`を待ったまま進まなくなる。送信済みの
+            // 入力はtickが揃うまで`committed_local_action`に控え、同じtickを二重に送らない。
+            let my_action = match self.committed_local_action {
                 Some(action) => action,
                 None => {
                     let action = local_action
                         .take()
                         .and_then(Option::<NetAction>::from)
                         .unwrap_or(NetAction::None);
-                    link.committed_local_action = Some(action);
-                    let _ = net::write_message(
-                        &mut link.writer,
-                        &GameMessage::Input {
-                            tick: link.next_tick,
-                            action,
-                        },
-                    );
+                    self.committed_local_action = Some(action);
+                    self.send_local_input(action);
                     action
                 }
             };
 
-            let Some(remote_action) = take_remote_input_for(link, link.next_tick) else {
-                // 相手の入力がまだ無い。このtickぶんは`net_tick_accum`から引かずに
+            let Some(all_actions) = self.take_actions_for_this_tick(my_action) else {
+                // 誰かの入力がまだ無い。このtickぶんは`net_tick_accum`から引かずに
                 // 次回の呼び出しへ持ち越す。
-                link.awaiting_since = Some(Instant::now());
                 break;
             };
 
             self.net_tick_accum -= net_tick;
-            link.committed_local_action = None;
-            link.next_tick += 1;
-            let completed_tick = link.next_tick - 1; // このtickの処理が完了した
-            self.run_net_tick_with_actions(&[my_action.into(), remote_action.into()]);
+            self.committed_local_action = None;
+            let completed_tick = self.net_tick; // このtickの処理がこれから完了する
+            self.net_tick += 1;
+            let next_tick = self.net_tick;
+            for peer in self.peers_mut() {
+                if !peer.disconnected {
+                    peer.next_tick = next_tick;
+                }
+            }
+            self.run_net_tick_with_actions(&all_actions);
 
             // 定期的に状態ダイジェストを交換してデシンクを検出する(#255。spec.md 12.3)。
             // tick 0も対象になり、そこでの照合はハンドシェイクで合意したseed/configから
             // 同一の初期盤面が作られているかの検証を兼ねる。
             if completed_tick.is_multiple_of(STATE_HASH_INTERVAL_TICKS) {
-                let local_hash = self.games[0].state_hash();
-                let remote_hash = self.games[1].state_hash();
-                let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
-                link.own_state_hashes
-                    .insert(completed_tick, (local_hash, remote_hash));
-                let _ = net::write_message(
-                    &mut link.writer,
-                    &GameMessage::StateHash {
-                        tick: completed_tick,
-                        local_hash,
-                        remote_hash,
-                    },
-                );
-                reconcile_state_hash(link, &mut self.outcome, completed_tick);
+                self.exchange_state_hashes(completed_tick);
             }
 
             if self.outcome.is_some() {
-                self.maybe_send_result();
-                self.reconcile_remote_result();
+                self.maybe_send_results();
+                self.reconcile_remote_results();
                 break;
             }
         }
     }
 
-    /// 通信スレッドから届いたイベントを、キューが空になるまで処理する(#254)。
-    fn drain_network_events(&mut self) {
-        let Some(link) = &mut self.network else {
-            return;
-        };
+    /// 通信ありの経路でのみ使う、全peerへの可変参照。
+    fn peers_mut(&mut self) -> impl Iterator<Item = &mut PeerLink> {
+        self.peers
+            .as_mut()
+            .expect("通信ありの経路でのみ呼ばれる")
+            .iter_mut()
+    }
 
-        while let Ok(event) = link.event_rx.try_recv() {
-            match event {
-                NetworkEvent::Message(GameMessage::Input { tick, action }) => {
-                    link.last_remote_activity = Instant::now();
-                    link.pending_remote_inputs.push_back((tick, action));
+    /// 確定した自分の入力を、未切断の全peerへ送る(#274。全員へ同じ値を送る)。
+    fn send_local_input(&mut self, action: NetAction) {
+        let tick = self.net_tick;
+        for peer in self.peers_mut() {
+            if peer.disconnected {
+                continue;
+            }
+            let _ = net::write_message(&mut peer.writer, &GameMessage::Input { tick, action });
+        }
+    }
+
+    /// このtickぶんの入力が全員分揃っていれば、`games`と同じ並びの入力列を返す(#274)。
+    /// 揃っていなければ足りないpeerを待機中にして`None`を返す。
+    ///
+    /// 揃っていない場合は誰の入力も消費しない。先に取り出してしまうと、待機解除後に
+    /// そのtickの入力が失われてlockstepが止まる。
+    fn take_actions_for_this_tick(
+        &mut self,
+        my_action: NetAction,
+    ) -> Option<Vec<Option<InputAction>>> {
+        let tick = self.net_tick;
+        let mut ready = true;
+        for peer in self.peers_mut() {
+            // 切断済みのpeerは待たない(#274設計書3節)。
+            if peer.disconnected {
+                continue;
+            }
+            if !has_remote_input_for(peer, tick) {
+                peer.awaiting_since = Some(Instant::now());
+                ready = false;
+            }
+        }
+        if !ready {
+            return None;
+        }
+
+        let mut all_actions = Vec::with_capacity(self.games.len());
+        all_actions.push(my_action.into());
+        for peer in self.peers_mut() {
+            // 切断済みのpeerは`None`(このtickでは何もしない)として扱う。盤面は既に
+            // `GameOver`へ倒しているため、`run_tick_n`を掛けても実害は無い。
+            let action = if peer.disconnected {
+                None
+            } else {
+                take_remote_input_for(peer, tick)
+            };
+            all_actions.push(action.and_then(Option::<InputAction>::from));
+        }
+        Some(all_actions)
+    }
+
+    /// 切断・タイムアウトを検知したpeerの順位を、まだ未確定なら確定させる(#274設計書3節)。
+    ///
+    /// フルメッシュの狙い(単一障害点を避ける)に合わせ、1人が抜けても全員終了にはしない。
+    /// 該当peerの盤面を`GameOver`へ倒して通常の脱落と同じ経路(`update_ranks`)に乗せる
+    /// ことで、切断者は最下位側から順位が埋まり、残りの参加者は対戦を続けられる。
+    fn settle_disconnected_peers(&mut self) {
+        let timeout = Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS);
+        let peer_count = self.peers.as_ref().map_or(0, Vec::len);
+        for i in 0..peer_count {
+            let disconnected = {
+                let peer = &mut self.peers.as_mut().expect("通信ありの経路でのみ呼ばれる")[i];
+                // 入力待ちが上限を超えたpeerも切断扱いにする(12.4)。
+                if peer
+                    .awaiting_since
+                    .is_some_and(|since| since.elapsed() >= timeout)
+                {
+                    peer.disconnected = true;
                 }
-                NetworkEvent::Message(GameMessage::Heartbeat { .. }) => {
-                    link.last_remote_activity = Instant::now();
-                }
-                NetworkEvent::Message(GameMessage::StateHash {
+                peer.disconnected
+            };
+            if !disconnected || self.ranks[i + 1].is_some() {
+                continue;
+            }
+            // 実際の脱落ではないが、順位確定のためだけにこの状態を使う。
+            self.games[i + 1].status = GameStatus::GameOver;
+            self.update_ranks();
+        }
+    }
+
+    /// 未切断のpeerの誰かの入力を待っている最中か(#274)。
+    fn is_awaiting_any_peer(&self) -> bool {
+        self.peers.as_ref().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| !peer.disconnected && peer.awaiting_since.is_some())
+        })
+    }
+
+    /// 送信間隔を超えたpeerへHeartbeatを送る(#254の間隔ロジックをpeerごとに適用)。
+    fn send_due_heartbeats(&mut self) {
+        let interval = Duration::from_millis(HEARTBEAT_INTERVAL_MS);
+        for peer in self.peers_mut() {
+            if peer.disconnected || peer.last_heartbeat_sent.elapsed() < interval {
+                continue;
+            }
+            let tick = peer.next_tick;
+            peer.last_heartbeat_sent = Instant::now();
+            let _ = net::write_message(&mut peer.writer, &GameMessage::Heartbeat { tick });
+        }
+    }
+
+    /// 完了したtickの状態ダイジェストを未切断の全peerと交換・照合する(#255/#274)。
+    ///
+    /// peer `i`へ送る`local_hash`は自分の`games[0]`、`remote_hash`は`games[i+1]`(そのpeerに
+    /// 対応するインスタンス)。相手も同じ規約で送ってくるため、2人版と同じ照合ロジックが
+    /// ペアごとにそのまま使える(#274設計書1節)。
+    fn exchange_state_hashes(&mut self, tick: u32) {
+        let local_hash = self.games[0].state_hash();
+        // `games`と`peers`の同時可変借用を避けるため、ハッシュ計算だけ先に済ませる。
+        let remote_hashes: Vec<u64> = self.games[1..].iter().map(Game::state_hash).collect();
+
+        let peers = self.peers.as_mut().expect("通信ありの経路でのみ呼ばれる");
+        for (peer, remote_hash) in peers.iter_mut().zip(remote_hashes) {
+            if peer.disconnected {
+                continue;
+            }
+            peer.own_state_hashes
+                .insert(tick, (local_hash, remote_hash));
+            let _ = net::write_message(
+                &mut peer.writer,
+                &GameMessage::StateHash {
                     tick,
                     local_hash,
                     remote_hash,
-                }) => {
-                    link.last_remote_activity = Instant::now();
-                    link.pending_remote_state_hashes
-                        .insert(tick, (local_hash, remote_hash));
-                    // 自分が先に計算済みで相手の到着を待っていた場合は、ここで照合できる。
-                    reconcile_state_hash(link, &mut self.outcome, tick);
+                },
+            );
+            reconcile_state_hash(peer, &mut self.outcome, tick);
+        }
+    }
+
+    /// 通信スレッドから届いたイベントを、キューが空になるまで処理する(#254)。peerごとに
+    /// 独立したキューを持つため、全peerぶんを順に処理する(#274)。
+    fn drain_network_events(&mut self) {
+        let heartbeat_timeout = Duration::from_millis(HEARTBEAT_TIMEOUT_MS);
+        let peer_count = self.peers.as_ref().map_or(0, Vec::len);
+        for i in 0..peer_count {
+            let peer = &mut self.peers.as_mut().expect("通信ありの経路でのみ呼ばれる")[i];
+
+            while let Ok(event) = peer.event_rx.try_recv() {
+                match event {
+                    NetworkEvent::Message(GameMessage::Input { tick, action }) => {
+                        peer.last_remote_activity = Instant::now();
+                        peer.pending_remote_inputs.push_back((tick, action));
+                    }
+                    NetworkEvent::Message(GameMessage::Heartbeat { .. }) => {
+                        peer.last_remote_activity = Instant::now();
+                    }
+                    NetworkEvent::Message(GameMessage::StateHash {
+                        tick,
+                        local_hash,
+                        remote_hash,
+                    }) => {
+                        peer.last_remote_activity = Instant::now();
+                        peer.pending_remote_state_hashes
+                            .insert(tick, (local_hash, remote_hash));
+                        // 自分が先に計算済みで相手の到着を待っていた場合は、ここで照合できる。
+                        reconcile_state_hash(peer, &mut self.outcome, tick);
+                    }
+                    NetworkEvent::Message(GameMessage::Result {
+                        reached_goal, tick, ..
+                    }) => {
+                        peer.remote_result = Some((reached_goal, tick));
+                    }
+                    NetworkEvent::Message(GameMessage::Bye) | NetworkEvent::Disconnected => {
+                        peer.disconnected = true;
+                    }
+                    // ハンドシェイク用のメッセージは#253で消費済みのため、この段階で
+                    // 届いても無視してよい。
+                    NetworkEvent::Message(_) => {}
                 }
-                NetworkEvent::Message(GameMessage::Result {
-                    reached_goal, tick, ..
-                }) => {
-                    link.remote_result = Some((reached_goal, tick));
-                }
-                NetworkEvent::Message(GameMessage::Bye) | NetworkEvent::Disconnected => {
-                    link.disconnected = true;
-                }
-                // ハンドシェイク用のメッセージは#253で消費済みのため、この段階で
-                // 届いても無視してよい。
-                NetworkEvent::Message(_) => {}
+            }
+
+            // 待っていたtickの入力が届いていれば待機を解除する。
+            if peer.awaiting_since.is_some() && has_remote_input_for(peer, peer.next_tick) {
+                peer.awaiting_since = None;
+            }
+
+            // Input・Heartbeatのいずれも途絶えたら切断とみなす(12.4)。
+            if peer.last_remote_activity.elapsed() >= heartbeat_timeout {
+                peer.disconnected = true;
             }
         }
-
-        // 待っていたtickの入力が届いていれば待機を解除する。
-        if link.awaiting_since.is_some()
-            && link
-                .pending_remote_inputs
-                .iter()
-                .any(|&(tick, _)| tick == link.next_tick)
-        {
-            link.awaiting_since = None;
-        }
-
-        // Input・Heartbeatのいずれも途絶えたら切断とみなす(12.4)。
-        if link.last_remote_activity.elapsed() >= Duration::from_millis(HEARTBEAT_TIMEOUT_MS) {
-            link.disconnected = true;
-        }
     }
 
-    /// 決着直後に自分の`Result`を1回だけ送る(12.4。勝敗判定の根拠ではなく相互確認用)。
-    fn maybe_send_result(&mut self) {
+    /// 決着直後に自分の`Result`を、未切断の各peerへ1回だけ送る(12.4。勝敗判定の根拠では
+    /// なく相互確認用)。
+    fn maybe_send_results(&mut self) {
         let reached_goal = self.games[0].status == GameStatus::Cleared;
-        let Some(link) = &mut self.network else {
+        let Some(peers) = &mut self.peers else {
             return;
         };
-        if link.result_sent {
-            return;
-        }
-        link.result_sent = true;
+        for peer in peers.iter_mut() {
+            if peer.result_sent || peer.disconnected {
+                continue;
+            }
+            peer.result_sent = true;
 
-        let time_ms = net::unix_time_ms().saturating_sub(link.start_at_unix_ms);
-        let _ = net::write_message(
-            &mut link.writer,
-            &GameMessage::Result {
-                reached_goal,
-                tick: link.next_tick,
-                time_ms,
-            },
-        );
+            let time_ms = net::unix_time_ms().saturating_sub(peer.start_at_unix_ms);
+            let _ = net::write_message(
+                &mut peer.writer,
+                &GameMessage::Result {
+                    reached_goal,
+                    tick: peer.next_tick,
+                    time_ms,
+                },
+            );
+        }
     }
 
-    /// 受信済みの相手の`Result`を自分のシミュレーション結果と照合する(12.4)。
+    /// 受信済みの各peerの`Result`を自分のシミュレーション結果と照合する(12.4)。
     ///
-    /// 相手の自己申告と、自分が持つ相手インスタンスの判定が食い違ったら、どちらが正しいか
-    /// 判定できないため`Desync`へ上書きする(順位方式では「順位が確定しない終わり方」が
-    /// `Desync`にあたる。2人専用だった頃は同じ意図を`Draw`で表していた)。自分がまだ
-    /// 決着していない段階では、単に自分のtickが相手より遅れているだけのため照合しない。
-    fn reconcile_remote_result(&mut self) {
+    /// 相手の自己申告と、自分が持つそのpeerのインスタンスの判定が食い違ったら、どちらが
+    /// 正しいか判定できないため`Desync`へ上書きする(順位方式では「順位が確定しない
+    /// 終わり方」が`Desync`にあたる。2人専用だった頃は同じ意図を`Draw`で表していた)。
+    /// 自分がまだ決着していない段階では、単に自分のtickが相手より遅れているだけのため
+    /// 照合しない。切断したpeerは順位確定のために盤面を`GameOver`へ倒しており、
+    /// シミュレーション結果の照合対象にはできないため除く(#274)。
+    fn reconcile_remote_results(&mut self) {
         if self.outcome.is_none() {
             return;
         }
-        let reached_goal_in_my_simulation = self.games[1].status == GameStatus::Cleared;
-        let Some(link) = &self.network else {
-            return;
-        };
-        let Some((remote_reached_goal, _tick)) = link.remote_result else {
-            return;
-        };
+        let peer_count = self.peers.as_ref().map_or(0, Vec::len);
+        for i in 0..peer_count {
+            let reached_goal_in_my_simulation = self.games[i + 1].status == GameStatus::Cleared;
+            let peer = &self.peers.as_ref().expect("通信ありの経路でのみ呼ばれる")[i];
+            if peer.disconnected {
+                continue;
+            }
+            let Some((remote_reached_goal, _tick)) = peer.remote_result else {
+                continue;
+            };
 
-        if remote_reached_goal != reached_goal_in_my_simulation {
-            self.outcome = Some(BattleOutcome::Desync);
+            if remote_reached_goal != reached_goal_in_my_simulation {
+                self.outcome = Some(BattleOutcome::Desync);
+            }
         }
     }
 
@@ -517,9 +700,20 @@ impl BattleState {
     }
 }
 
+/// 指定したtickの相手の入力が届いているかだけを調べる(取り出さない。#274)。
+///
+/// N人版では「全員ぶん揃ってから初めて消費する」必要がある(誰か1人ぶんが未着なら
+/// そのtickは持ち越すため、先に取り出してしまった他のpeerの入力が失われる)。この
+/// 判定と`take_remote_input_for`の2段構えにすることで取りこぼしを防ぐ。
+fn has_remote_input_for(link: &PeerLink, tick: u32) -> bool {
+    link.pending_remote_inputs
+        .iter()
+        .any(|&(pending_tick, _)| pending_tick == tick)
+}
+
 /// `pending_remote_inputs`から指定したtickの相手の入力を取り出す。届く順序は通常
 /// tick順だが、取り違えを防ぐためtick番号で突き合わせる。
-fn take_remote_input_for(link: &mut NetworkLink, tick: u32) -> Option<NetAction> {
+fn take_remote_input_for(link: &mut PeerLink, tick: u32) -> Option<NetAction> {
     let index = link
         .pending_remote_inputs
         .iter()
@@ -530,13 +724,14 @@ fn take_remote_input_for(link: &mut NetworkLink, tick: u32) -> Option<NetAction>
 }
 
 /// 指定tickについて、自分の計算値と相手からの申告値が両方揃っていれば照合する(#255)。
-/// 相手の`local_hash`(相手自身の盤面)は自分の`games[1]`のそのtick時点の値と、
-/// 相手の`remote_hash`(相手から見た自分)は自分の`games[0]`のそのtick時点の値と
-/// 一致するはず。不一致ならデシンクとして`outcome`を`Desync`にする(spec.md 12.3)。
+/// 相手の`local_hash`(相手自身の盤面)は自分の`games[i+1]`(そのpeerに対応する
+/// インスタンス)のそのtick時点の値と、相手の`remote_hash`(相手から見た自分)は
+/// 自分の`games[0]`のそのtick時点の値と一致するはず。不一致ならデシンクとして
+/// `outcome`を`Desync`にする(spec.md 12.3)。
 ///
 /// 送信時(自分がそのtickへ到達した時)と受信時の両方から呼ぶ。どちらが先になるかは
 /// 通信の遅延次第のため、両方が揃った側の呼び出しだけが実際の照合まで進む。
-fn reconcile_state_hash(link: &mut NetworkLink, outcome: &mut Option<BattleOutcome>, tick: u32) {
+fn reconcile_state_hash(link: &mut PeerLink, outcome: &mut Option<BattleOutcome>, tick: u32) {
     let Some(&(mine_local, mine_remote)) = link.own_state_hashes.get(&tick) else {
         return;
     };
@@ -603,6 +798,7 @@ mod tests {
     use super::*;
     use crate::constants::FIELD_WIDTH_DEFAULT;
     use crate::game::board::Cell;
+    use std::collections::HashSet;
     use std::net::TcpListener;
 
     /// テスト用の短いコース(ゴール20m)。本番のノーマルコース(1000m)より盤面生成が軽く、
@@ -1076,9 +1272,15 @@ mod tests {
         thread::sleep(Duration::from_millis(1));
     }
 
-    /// 通信ありの状態が持つ`NetworkLink`を取り出す。
-    fn link(state: &BattleState) -> &NetworkLink {
-        state.network.as_ref().expect("通信ありの対戦状態のはず")
+    /// 通信ありの状態が持つ`PeerLink`のうち`index`番目(`games[index + 1]`に対応)を
+    /// 取り出す。
+    fn link_at(state: &BattleState, index: usize) -> &PeerLink {
+        &state.peers.as_ref().expect("通信ありの対戦状態のはず")[index]
+    }
+
+    /// 2人対戦で唯一の`PeerLink`を取り出す(#254のテスト群用)。
+    fn link(state: &BattleState) -> &PeerLink {
+        link_at(state, 0)
     }
 
     /// ループバックTCPで#253のハンドシェイクを実行し、ホスト側・クライアント側の
@@ -1133,7 +1335,7 @@ mod tests {
     /// おらず、前フレームぶんの蓄積も使い切っている」ときだけにする。こうしないと相手待ちの
     /// 空回り中に時間だけが溜まり、後からまとめてtickへ化けて両者のtick数がずれる。
     fn pump(state: &mut BattleState, target_ticks: u32, action: Option<InputAction>) {
-        let needs_time = state.net_tick_accum < net_tick() && link(state).next_tick < target_ticks;
+        let needs_time = state.net_tick_accum < net_tick() && state.net_tick < target_ticks;
         let delta = if needs_time {
             net_tick()
         } else {
@@ -1598,5 +1800,387 @@ mod tests {
             Some(BattleOutcome::Ranked(1)),
             "決着済みの結果はデシンク検出で上書きされないはず"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // フルメッシュ通信(#274)。N人がそれぞれ他の全員と1本ずつTCP接続を持つ構成を
+    // ループバックで組み、`from_peer_streams`で各参加者の`BattleState`を作る。
+    // ハンドシェイク(#275)は範囲外のため、接続はテスト側で直接用意する。
+    // -----------------------------------------------------------------------
+
+    /// ループバックで繋がったTCPソケットの組を作る。
+    fn loopback_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let outgoing = TcpStream::connect(addr).unwrap();
+        let (incoming, _) = listener.accept().unwrap();
+        (incoming, outgoing)
+    }
+
+    /// 参加者`h`が持つ`games`/`player_names`の並び順(index 0が自分、残りは参加者番号順)。
+    /// `BattleState`の「index 0が自分」という規約に合わせたもの。
+    fn participant_order(n: usize, h: usize) -> Vec<usize> {
+        let mut order = vec![h];
+        order.extend((0..n).filter(|&p| p != h));
+        order
+    }
+
+    /// 参加者`h`の視点で、参加者`p`のインスタンスが`games`の何番目にあるか。
+    fn games_index_of(n: usize, h: usize, p: usize) -> usize {
+        participant_order(n, h)
+            .iter()
+            .position(|&q| q == p)
+            .expect("並び順には全参加者が含まれるはず")
+    }
+
+    /// `n`人ぶんのフルメッシュ(C(n,2)本の接続)を張り、各参加者の`BattleState`を返す。
+    /// 戻り値のindexは参加者番号。
+    fn connected_mesh(n: usize, seed: u64) -> Vec<BattleState> {
+        let config = test_battle_config();
+        // `sockets[a][b]`=参加者aから参加者bへ向かう接続。
+        let mut sockets: Vec<Vec<Option<TcpStream>>> =
+            (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
+        for (a, b) in (0..n).flat_map(|a| ((a + 1)..n).map(move |b| (a, b))) {
+            let (to_b, to_a) = loopback_pair();
+            sockets[a][b] = Some(to_b);
+            sockets[b][a] = Some(to_a);
+        }
+
+        // 開始時刻はハンドシェイク(#275)で合意する値の代わり。
+        let start_at_unix_ms = net::unix_time_ms();
+        let mut states = Vec::with_capacity(n);
+        for (h, mut row) in sockets.into_iter().enumerate() {
+            let order = participant_order(n, h);
+            let games: Vec<Game> = order
+                .iter()
+                .map(|_| new_game_from_battle_config(seed, &config))
+                .collect();
+            let player_names: Vec<String> = order.iter().map(|&p| format!("p{p}")).collect();
+            let streams: Vec<TcpStream> = order[1..]
+                .iter()
+                .map(|&p| row[p].take().expect("各ペアに1本ずつ用意している"))
+                .collect();
+            states.push(
+                BattleState::from_peer_streams(games, player_names, streams, start_at_unix_ms)
+                    .unwrap(),
+            );
+        }
+        states
+    }
+
+    /// 参加者0だけ`BattleState`を作り、他の参加者は生のTCPストリームのままにする。
+    /// 偽のメッセージを送りつけるテスト用(`battle_with_raw_peer`のN人版)。
+    /// 戻り値の`peers[i]`は`games[i+1]`に対応する。
+    fn battle_with_raw_peers(n: usize, seed: u64) -> (BattleState, Vec<TcpStream>) {
+        let config = test_battle_config();
+        let mut host_streams = Vec::with_capacity(n - 1);
+        let mut raw_peers = Vec::with_capacity(n - 1);
+        for _ in 1..n {
+            let (mine, theirs) = loopback_pair();
+            host_streams.push(mine);
+            raw_peers.push(theirs);
+        }
+
+        let games: Vec<Game> = (0..n)
+            .map(|_| new_game_from_battle_config(seed, &config))
+            .collect();
+        let player_names: Vec<String> = (0..n).map(|p| format!("p{p}")).collect();
+        let state =
+            BattleState::from_peer_streams(games, player_names, host_streams, net::unix_time_ms())
+                .unwrap();
+        (state, raw_peers)
+    }
+
+    /// 全参加者の視点で、同じ参加者のインスタンスが一致していることを確認する
+    /// (2人版`two_hosts_connected_over_tcp_advance_in_lockstep`のクロスチェックの一般化)。
+    /// `states`のindexは参加者番号。
+    fn assert_mesh_views_agree(states: &[BattleState], label: &str) {
+        let n = states.len();
+        for p in 0..n {
+            let expected = states[0].games[games_index_of(n, 0, p)].state_hash();
+            for (h, state) in states.iter().enumerate().skip(1) {
+                assert_eq!(
+                    expected,
+                    state.games[games_index_of(n, h, p)].state_hash(),
+                    "{label}: 参加者{p}のインスタンスが参加者0と参加者{h}で一致しない"
+                );
+            }
+        }
+    }
+
+    /// `n`人のフルメッシュで、全員が異なる入力列を送り合っても盤面が一致し続け、かつ
+    /// ローカルハーネス(`lockstep::run_tick_n`)と同じ結果になることを確認する。
+    fn assert_full_mesh_lockstep(n: usize, seed: u64, ticks: u32) {
+        // 参加者ごとに周期をずらし、盤面が互いに違うものになるようにする。
+        let actions: Vec<Vec<Option<InputAction>>> = (0..n)
+            .map(|p| {
+                (0..ticks as usize)
+                    .map(|t| match (t + p) % 5 {
+                        0 => Some(InputAction::MoveRight),
+                        1 => Some(InputAction::Drill),
+                        2 => None,
+                        3 => Some(InputAction::FaceDown),
+                        _ => Some(InputAction::MoveLeft),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let mut states = connected_mesh(n, seed);
+        for _ in 0..MAX_PUMPS {
+            for (p, state) in states.iter_mut().enumerate() {
+                let action = action_for(&actions[p], state.net_tick);
+                pump(state, ticks, action);
+            }
+            if states.iter().all(|state| state.net_tick >= ticks) {
+                break;
+            }
+            pump_interval();
+        }
+
+        for (p, state) in states.iter().enumerate() {
+            assert_eq!(state.net_tick, ticks, "参加者{p}が目標tickまで進むはず");
+            assert_eq!(state.outcome, None, "参加者{p}: この範囲では決着しないはず");
+            assert!(
+                state
+                    .peers
+                    .as_ref()
+                    .is_some_and(|peers| peers.len() == n - 1),
+                "参加者{p}: 自分以外の全員と接続を持つはず"
+            );
+        }
+        assert_mesh_views_agree(&states, &format!("tick{ticks}後"));
+
+        // #273のローカルハーネスと同じ結果になることも確認する。
+        let config = test_battle_config();
+        let mut reference: Vec<Game> = (0..n)
+            .map(|_| new_game_from_battle_config(seed, &config))
+            .collect();
+        // 参加者ごとの入力列を、tickごと(`run_tick_n`が取る並び)へ組み替える。
+        let by_tick: Vec<Vec<Option<InputAction>>> = (0..ticks as usize)
+            .map(|t| {
+                actions
+                    .iter()
+                    .map(|per_participant| per_participant[t])
+                    .collect()
+            })
+            .collect();
+        for tick_actions in &by_tick {
+            lockstep::run_tick_n(&mut reference, tick_actions);
+        }
+        for (h, state) in states.iter().enumerate() {
+            for (p, expected) in reference.iter().enumerate() {
+                assert_eq!(
+                    state.games[games_index_of(n, h, p)].state_hash(),
+                    expected.state_hash(),
+                    "参加者{h}の視点の参加者{p}がローカルハーネスと一致しない"
+                );
+            }
+        }
+
+        // 一致比較が自明に通る状況(盤面が初期状態のまま・全員同じ盤面)になっていない
+        // ことの裏取り。入力列は参加者ごとに違うが、移動が打ち消し合って同じ盤面に
+        // 行き着く組み合わせもあるため、全員が互いに異なることまでは求めない。
+        let initial = new_game_from_battle_config(seed, &config).state_hash();
+        let distinct: HashSet<u64> = reference.iter().map(Game::state_hash).collect();
+        assert!(
+            !distinct.contains(&initial),
+            "どの参加者の盤面も初期状態からは進んでいるはず"
+        );
+        assert!(
+            distinct.len() >= 2,
+            "入力列が違うため、少なくとも一部の参加者の盤面は互いに異なるはず"
+        );
+    }
+
+    #[test]
+    fn three_participants_in_a_full_mesh_advance_in_lockstep() {
+        assert_full_mesh_lockstep(3, 9201, 12);
+    }
+
+    #[test]
+    fn four_participants_in_a_full_mesh_advance_in_lockstep() {
+        assert_full_mesh_lockstep(4, 9202, 12);
+    }
+
+    /// `target_ticks`まで全員を進める。進まなければ実装の不具合とみなす。
+    fn pump_all_to(states: &mut [BattleState], target_ticks: u32) {
+        for _ in 0..MAX_PUMPS {
+            for state in states.iter_mut() {
+                pump(state, target_ticks, None);
+            }
+            if states.iter().all(|state| state.net_tick >= target_ticks) {
+                return;
+            }
+            pump_interval();
+        }
+    }
+
+    #[test]
+    fn a_participant_leaving_with_bye_is_ranked_last_while_the_others_keep_playing() {
+        // 4人のうち1人がByeを送って抜けても、残り3人だけで対戦が進み、抜けた人は
+        // 最下位で確定する(#274設計書3節)。
+        const N: usize = 4;
+        const TICKS_BEFORE: u32 = 3;
+        const TICKS_AFTER: u32 = 9;
+        const LEAVER: usize = N - 1;
+
+        let mut states = connected_mesh(N, 9203);
+        pump_all_to(&mut states, TICKS_BEFORE);
+        assert!(
+            states.iter().all(|state| state.net_tick == TICKS_BEFORE),
+            "前提: まずは全員が同じtickまで進むはず"
+        );
+
+        // 抜ける側はByeを送ってから状態を捨てる(接続も閉じる)。
+        let mut leaver = states.pop().expect("4人ぶんあるはず");
+        leaver.notify_bye();
+        drop(leaver);
+
+        pump_all_to(&mut states, TICKS_AFTER);
+        for (h, state) in states.iter().enumerate() {
+            let leaver_index = games_index_of(N, h, LEAVER);
+            assert_eq!(
+                state.net_tick, TICKS_AFTER,
+                "参加者{h}: 残った3人だけで対戦が進むはず"
+            );
+            assert!(
+                link_at(state, leaver_index - 1).disconnected,
+                "参加者{h}: 抜けた参加者は切断扱いになるはず"
+            );
+            assert_eq!(
+                state.games[leaver_index].status,
+                GameStatus::GameOver,
+                "参加者{h}: 順位確定のため抜けた参加者の盤面はGameOverへ倒すはず"
+            );
+            assert_eq!(
+                state.ranks[leaver_index],
+                Some(N as u8),
+                "参加者{h}: 抜けた参加者は最下位で確定するはず"
+            );
+            assert_eq!(
+                state.ranks[0], None,
+                "参加者{h}: 生存者の順位はまだ未確定のはず"
+            );
+            assert_eq!(
+                state.outcome, None,
+                "参加者{h}: 生存者が3人残っているので決着はしないはず"
+            );
+            assert_eq!(
+                state.games[0].status,
+                GameStatus::Playing,
+                "参加者{h}: 自分は続けてプレイできるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn a_participant_that_stops_sending_input_is_ranked_last_while_the_others_keep_playing() {
+        // 1人が入力を送らなくなった場合も同様に、待機上限を超えた時点で最下位で確定し、
+        // 残りの参加者で対戦を続ける。接続自体は生かしたままにして、切断検知ではなく
+        // tick待ちのタイムアウトで脱落することを見る。
+        const N: usize = 4;
+        const TICKS_BEFORE: u32 = 2;
+        const TICKS_AFTER: u32 = 6;
+        const SILENT: usize = N - 1;
+
+        let mut states = connected_mesh(N, 9204);
+        pump_all_to(&mut states, TICKS_BEFORE);
+        assert!(
+            states.iter().all(|state| state.net_tick == TICKS_BEFORE),
+            "前提: まずは全員が同じtickまで進むはず"
+        );
+        let _silent = states.pop().expect("4人ぶんあるはず");
+
+        let started = Instant::now();
+        let deadline = Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS * 8);
+        while started.elapsed() < deadline {
+            for state in states.iter_mut() {
+                pump(state, TICKS_AFTER, None);
+            }
+            if states.iter().all(|state| state.net_tick >= TICKS_AFTER) {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert!(
+            started.elapsed() >= Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS),
+            "待機上限に達する前に脱落扱いにはしないはず"
+        );
+        for (h, state) in states.iter().enumerate() {
+            let silent_index = games_index_of(N, h, SILENT);
+            assert_eq!(
+                state.net_tick, TICKS_AFTER,
+                "参加者{h}: 待機上限の後は残りの参加者で進み続けるはず"
+            );
+            assert!(
+                link_at(state, silent_index - 1).disconnected,
+                "参加者{h}: 入力の途絶えた参加者は切断扱いになるはず"
+            );
+            assert_eq!(
+                state.ranks[silent_index],
+                Some(N as u8),
+                "参加者{h}: 入力の途絶えた参加者は最下位で確定するはず"
+            );
+            assert_eq!(
+                state.outcome, None,
+                "参加者{h}: 生存者が3人残っているので決着はしないはず"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mismatching_state_hash_from_any_peer_ends_the_battle_as_a_desync() {
+        // どのpeerとの照合で食い違ってもデシンクになる(#274設計書6節)。
+        const N: usize = 4;
+        for bad in 0..N - 1 {
+            let (mut host, mut peers) = battle_with_raw_peers(N, 9205);
+
+            // 相手役は全員、tick 0を完了させるための入力だけ送る。
+            for peer in peers.iter_mut() {
+                net::write_message(
+                    peer,
+                    &GameMessage::Input {
+                        tick: 0,
+                        action: NetAction::None,
+                    },
+                )
+                .unwrap();
+            }
+            for _ in 0..MAX_PUMPS {
+                pump(&mut host, 1, None);
+                if host.net_tick >= 1 {
+                    break;
+                }
+                pump_interval();
+            }
+            assert_eq!(host.net_tick, 1, "前提: tick 0が完了しているはず");
+
+            // `bad`番目のpeerだけ、自分の盤面として食い違う値を申告する。
+            let (mine_local, mine_remote) = link_at(&host, bad).own_state_hashes[&0];
+            net::write_message(
+                &mut peers[bad],
+                &GameMessage::StateHash {
+                    tick: 0,
+                    local_hash: mine_remote ^ 1,
+                    remote_hash: mine_local,
+                },
+            )
+            .unwrap();
+            for _ in 0..MAX_PUMPS {
+                host.advance(Duration::ZERO, None);
+                if host.outcome.is_some() {
+                    break;
+                }
+                pump_interval();
+            }
+
+            assert_eq!(
+                host.outcome,
+                Some(BattleOutcome::Desync),
+                "peer{bad}との不一致でもデシンクになるはず"
+            );
+        }
     }
 }
