@@ -603,13 +603,15 @@ pub const REWIND_STOCK_MAX_SETTING_MAX: u8 = 5;
 // (spec.md 12.3)。
 // ---------------------------------------------------------------------------
 
-/// 対戦lockstepの論理tick間隔(ms)。通常プレイの`FALL_TICK_MS`と同値だが、
-/// 落下速度が設定・デバッグ操作で可変になった現在は「落下tick」と「ネットワーク
-/// tick」は別概念のため、専用の定数として分離する(spec.md 12.3)。
+/// 対戦lockstepの論理tick間隔(ms)。「落下tick」(`FALL_TICK_MS`)とは別概念の、
+/// 入力を確定・同期する間隔(spec.md 12.3)。当初は`FALL_TICK_MS`と同値の150msだった
+/// が、実機確認で操作の反映が重く感じられたため50msへ短縮した(#279)。
+/// `STATE_HASH_INTERVAL_TICKS`はこの値との積で実時間の間隔になるため、変更時は
+/// 合わせて見直すこと。
 /// 通信層(#10本体)実装まではローカルlockstepハーネス(`lockstep.rs`)の
 /// テストからしか使われないため、`state_hash`等と同じ理由でdead_code警告を抑止する。
 #[allow(dead_code)]
-pub const NET_TICK_MS: u64 = 150;
+pub const NET_TICK_MS: u64 = 50;
 
 /// 次のtickに必要な相手の入力を待つ上限(ms)。超えたら相手の切断とみなし対戦を
 /// 中断する(不戦敗にする側は検知した側の相手が勝つ。spec.md 12.3)。
@@ -625,5 +627,6 @@ pub const HEARTBEAT_TIMEOUT_MS: u64 = 2000;
 /// 補助メッセージとして、この間隔で定期的に送る。
 pub const HEARTBEAT_INTERVAL_MS: u64 = 1000;
 
-/// `StateHash`を送る間隔(tick数、spec.md 12.3)。約3秒ごと。
-pub const STATE_HASH_INTERVAL_TICKS: u32 = 20;
+/// `StateHash`を送る間隔(tick数、spec.md 12.3)。約3秒ごと
+/// (`NET_TICK_MS`との積が3000msになるよう、#279でのtick間隔短縮に合わせて調整)。
+pub const STATE_HASH_INTERVAL_TICKS: u32 = 60;

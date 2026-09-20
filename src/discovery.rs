@@ -611,10 +611,19 @@ mod tests {
             .port()
     }
 
+    /// 「起点を1つ確保して手放し、そこから続く範囲を掴み直す」手順は、他のテストが
+    /// 並行して同じ手順を踏むと範囲の一部を横取りされうる(cargo testはテストを並列に
+    /// 走らせるため)。この手順を使うテスト同士を直列化し、横取りを防ぐ。
+    fn port_range_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn four_processes_on_the_same_host_bind_to_distinct_ports_in_the_range() {
         // 範囲(4つ)ぶんの`Discovery`を起動すると、1つ目から順に空いている最初の
         // ポートを確保していくため、全員が異なるポートになる。
+        let _guard = port_range_test_lock();
         const COUNT: u16 = 4;
         let base = free_loopback_port();
 
@@ -641,6 +650,7 @@ mod tests {
 
     #[test]
     fn a_fifth_process_fails_to_start_once_the_range_is_exhausted() {
+        let _guard = port_range_test_lock();
         const COUNT: u16 = 4;
         let base = free_loopback_port();
         let _discoveries: Vec<Discovery> = (0..COUNT)
@@ -663,6 +673,7 @@ mod tests {
         // 環境変数オーバーライド無しでも、範囲内の全ポートへ送るHELLOによって
         // 4プロセスが自動的に互いを発見できる(実際のユーザー報告: 手動でポートを
         // 指定しないと2台目以降がロビーに入れなかった問題の再現・解消確認)。
+        let _guard = port_range_test_lock();
         const COUNT: u16 = 4;
         let base = free_loopback_port();
 

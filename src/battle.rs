@@ -908,8 +908,8 @@ mod tests {
         state.games[1].player.oxygen = 1.0;
 
         // 酸素切れの後、「天に召される」演出(CRUSH_ASCEND_MS=3000ms)を経てGameOverに
-        // なるため、150msのtickで十分な回数を回す。
-        advance_until_outcome(&mut state, 60);
+        // なるため、tickで十分な回数(3000msの3倍以上)を回す。
+        advance_until_outcome(&mut state, 180);
 
         assert_eq!(
             state.games[1].status,
@@ -944,7 +944,7 @@ mod tests {
         state.games[0].player.lives = 1;
         state.games[0].player.oxygen = 1.0;
 
-        advance_until_outcome(&mut state, 60);
+        advance_until_outcome(&mut state, 180);
 
         assert_eq!(state.games[0].status, GameStatus::GameOver);
         assert_eq!(state.outcome, Some(BattleOutcome::Ranked(2)));
@@ -953,27 +953,27 @@ mod tests {
 
     #[test]
     fn frame_deltas_shorter_than_one_net_tick_are_carried_over() {
-        // 150msに満たないフレームではtickが起きず、繰り越した分と合わせて150msを
-        // 超えた時点で1tick進む。
+        // NET_TICK_MS(50ms)に満たないフレームではtickが起きず、繰り越した分と合わせて
+        // NET_TICK_MSを超えた時点で1tick進む。
         let mut state = battle(8, 9);
 
-        state.advance(Duration::from_millis(100), None);
+        state.advance(Duration::from_millis(30), None);
         assert_eq!(
             state.games[0].debug_frame(),
             0,
-            "150msに満たないのでまだtickは起きないはず"
+            "NET_TICK_MSに満たないのでまだtickは起きないはず"
         );
-        assert_eq!(state.net_tick_accum, Duration::from_millis(100));
+        assert_eq!(state.net_tick_accum, Duration::from_millis(30));
 
-        state.advance(Duration::from_millis(100), None);
+        state.advance(Duration::from_millis(30), None);
         assert_eq!(
             state.games[0].debug_frame(),
             1,
-            "繰り越し分と合わせて150msを超えたら1tick進むはず"
+            "繰り越し分と合わせてNET_TICK_MSを超えたら1tick進むはず"
         );
         assert_eq!(
             state.net_tick_accum,
-            Duration::from_millis(50),
+            Duration::from_millis(10),
             "使い切らなかった端数は次フレームへ繰り越すはず"
         );
     }
@@ -987,10 +987,10 @@ mod tests {
 
         assert_eq!(
             state.games[0].debug_frame(),
-            1,
-            "250msにクランプされるので1tickぶんしか進まないはず"
+            5,
+            "250msにクランプされるのでNET_TICK_MS(50ms)ぶん5tickしか進まないはず"
         );
-        assert_eq!(state.net_tick_accum, Duration::from_millis(100));
+        assert_eq!(state.net_tick_accum, Duration::from_millis(0));
     }
 
     #[test]
@@ -998,8 +998,8 @@ mod tests {
         // 1フレームで2tick進む場合でも、自分の入力が適用されるのは最初の1tickだけ。
         // 同じtick列を1tickずつ手で回したものと状態が一致することで確認する。
         let mut batched = battle(12, 13);
-        batched.advance(Duration::from_millis(250), None); // 1tick進み100ms繰り越す
-        batched.advance(Duration::from_millis(250), Some(InputAction::MoveRight)); // 2tick進む
+        batched.advance(Duration::from_millis(50), None); // 1tick進み0ms繰り越す
+        batched.advance(Duration::from_millis(100), Some(InputAction::MoveRight)); // 2tick進む
 
         let mut stepwise = battle(12, 13);
         stepwise.run_net_tick(None);
