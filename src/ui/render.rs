@@ -68,9 +68,13 @@ const PLAYER_NAME_INPUT_BOX_H: u16 = 8;
 /// ダイアログ等、中央に出る他のオーバーレイと重ならないようにするため)。
 const REWIND_OVERLAY_H: u16 = 4;
 
-/// 対戦画面(#252)の相手パネルの高さ(行数)。内容3行(名前・深度/ライフ・進捗バー)+
-/// 上下ボーダー2行。巻き戻し中オーバーレイと同じく画面下端に寄せる。
-const BATTLE_OPPONENT_PANEL_H: u16 = 5;
+/// 対戦画面(#252)の相手パネルで1人ぶんに使う行数(名前・深度/ライフ・進捗バー)。
+const BATTLE_OPPONENT_PANEL_ROWS_PER_PLAYER: u16 = 3;
+
+/// 対戦の待機中オーバーレイ(#302)の横幅(`centered_rect`のパーセント指定)。覆い隠す対象の
+/// GameOverダイアログ(幅40%)より広く、かつ相手パネル(#290)を余計に隠さない程度に留める。
+/// 縦幅はダイアログ側の`game_over_overlay_percent_y`から引くため、ここには持たない。
+const BATTLE_WAITING_OVERLAY_PERCENT_X: u16 = 50;
 
 /// 1論理セルの文字グリッドサイズ(9.2)。
 const CELL_W: u16 = 4;
@@ -295,14 +299,18 @@ fn on_off_label(enabled: bool) -> &'static str {
     if enabled { "ON" } else { "OFF" }
 }
 
-/// 対戦画面(#252)の1フレーム。自分の盤面は通常プレイと同じ`draw`で描き、相手の盤面は
-/// フル描画せず深度・ライフ・進捗バーの3値だけをパネルに重ねる(spec.md 12.3)。
+/// 対戦画面(#252)の1フレーム。自分の盤面は通常プレイと同じ`draw`で描き、他の参加者の
+/// 盤面はフル描画せず深度・ライフ・進捗バーの3値だけをパネルに重ねる(spec.md 12.3)。
+///
+/// `other_games`・`opponent_names`は自分以外の全参加者(N人対戦では最大3人)で、同じindexで
+/// 対応する。パネルは全員ぶんを縦に積み(#290)、あわせて各参加者の現在位置を自分の盤面へ
+/// ゴーストとして重ねる(#301)。
 /// `outcome`が`Some`なら決着しているので、結果を中央に重ねる(#256)。
 pub fn draw_battle(
     frame: &mut Frame,
     game_local: &Game,
-    game_remote: &Game,
-    opponent_name: &str,
+    other_games: &[Game],
+    opponent_names: &[String],
     music_enabled: bool,
     se_enabled: bool,
     outcome: Option<BattleOutcome>,
@@ -316,48 +324,32 @@ pub fn draw_battle(
     }
 
     let plan = compute_layout(area, game_local.board.width());
-    let panel_area = bottom_anchored_rect(90, BATTLE_OPPONENT_PANEL_H, plan.game_frame);
-    frame.render_widget(Clear, panel_area);
 
-    let text_style = Style::default()
-        .fg(colors::PANEL_TEXT)
-        .bg(colors::LETTERBOX_BG);
-    let heading_style = Style::default()
-        .fg(colors::STAR_FG)
-        .bg(colors::LETTERBOX_BG);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(colors::PANEL_BORDER)
-                .bg(colors::LETTERBOX_BG),
-        )
-        .style(Style::default().bg(colors::LETTERBOX_BG));
+    // 他の参加者の位置を自分の盤面へ重ねる(#301)。相手パネルより先に描き、パネルと
+    // 重なる位置のゴーストはパネルの裏に隠れるようにする。
+    draw_opponent_ghosts(
+        frame.buffer_mut(),
+        plan.field_rect,
+        plan.visible_rows,
+        game_local,
+        other_games,
+    );
+    draw_battle_opponent_panel(frame, plan.game_frame, other_games, opponent_names);
 
-    let depth_m = game_remote.player.depth_m();
-    let ratio = battle_progress_ratio(depth_m, game_remote.depth_goal_m());
-    let paragraph = Paragraph::new(vec![
-        Line::from(Span::styled(
-            format!("OPPONENT: {opponent_name}"),
-            heading_style,
-        )),
-        Line::from(Span::styled(
-            format!(
-                "DEPTH {depth_m} m   LIVES \u{2665} \u{d7}{}",
-                game_remote.player.lives
-            ),
-            text_style,
-        )),
-        // 進捗バーは酸素ゲージ(9.7)と同じ`[####░░░░░░] 42%`の書式を使う。
-        Line::from(Span::styled(
-            air_gauge_string(ratio, (ratio * 100.0).round() as u32),
-            text_style,
-        )),
-    ])
-    .block(block)
-    .style(Style::default().bg(colors::LETTERBOX_BG))
-    .alignment(Alignment::Center);
-    frame.render_widget(paragraph, panel_area);
+    // 自分が力尽きても、対戦は全員の結果がそろうまで決着しない(#289)。その間は通常プレイの
+    // GameOverダイアログ(タイトルへ戻る/その場から復活)の操作を`tick_battle`が受け付け
+    // ないため、押しても何も起きないダイアログを待機中の案内で覆い隠す(#302)。
+    if battle_local_is_waiting_for_others(game_local, outcome) {
+        draw_overlay_sized(
+            frame,
+            plan.game_frame,
+            BATTLE_WAITING_OVERLAY_PERCENT_X,
+            // ダイアログは巻き戻しヒントの有無で高さが変わるので、高い方に合わせる。
+            game_over_overlay_percent_y(true),
+            "GAME OVER",
+            &["対戦終了までお待ちください", "決着まで操作できません"],
+        );
+    }
 
     // 決着していれば結果を中央に重ねる(#256)。盤面・相手パネルはそのまま残し、
     // 最後の状態を見ながら結果を確認できるようにする。
@@ -369,6 +361,85 @@ pub fn draw_battle(
             &["Enter/Escキーでタイトルへ"],
         );
     }
+}
+
+/// 相手パネルの高さ(行数)。自分以外の参加者ぶんを縦に積み、上下ボーダー2行を足す(#290)。
+/// 巻き戻し中オーバーレイと同じく画面下端に寄せる。
+fn battle_opponent_panel_h(opponent_count: usize) -> u16 {
+    opponent_count as u16 * BATTLE_OPPONENT_PANEL_ROWS_PER_PLAYER + 2
+}
+
+/// 相手パネル(#252)。自分以外の全参加者を1人3行(名前・深度/ライフ・進捗バー)で縦に
+/// 積む(#290)。見出しの色と番号は自分の盤面のゴースト(#301)と揃えて、どの行がどの
+/// ゴーストなのかを対応づけられるようにする。
+fn draw_battle_opponent_panel(
+    frame: &mut Frame,
+    game_frame: Rect,
+    other_games: &[Game],
+    opponent_names: &[String],
+) {
+    if other_games.is_empty() {
+        return;
+    }
+
+    let panel_area =
+        bottom_anchored_rect(90, battle_opponent_panel_h(other_games.len()), game_frame);
+    frame.render_widget(Clear, panel_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let mut lines =
+        Vec::with_capacity(other_games.len() * BATTLE_OPPONENT_PANEL_ROWS_PER_PLAYER as usize);
+    for (index, game) in other_games.iter().enumerate() {
+        // `other_games`と`opponent_names`は同じindexで対応する。
+        let name = opponent_names.get(index).map_or("", String::as_str);
+        let heading_style = Style::default()
+            .fg(colors::battle_ghost_fg(index))
+            .bg(colors::LETTERBOX_BG);
+        let depth_m = game.player.depth_m();
+        let ratio = battle_progress_ratio(depth_m, game.depth_goal_m());
+
+        lines.push(Line::from(Span::styled(
+            format!("[{}] OPPONENT: {name}", ghost_marker_glyph(index)),
+            heading_style,
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "DEPTH {depth_m} m   LIVES \u{2665} \u{d7}{}",
+                game.player.lives
+            ),
+            text_style,
+        )));
+        // 進捗バーは酸素ゲージ(9.7)と同じ`[####░░░░░░] 42%`の書式を使う。
+        lines.push(Line::from(Span::styled(
+            air_gauge_string(ratio, (ratio * 100.0).round() as u32),
+            text_style,
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Center);
+    frame.render_widget(paragraph, panel_area);
+}
+
+/// 自分が力尽きた後、他の参加者の決着を待っている状態か(#302)。`draw`がGameOver
+/// ダイアログを出すのと同じ条件(「天に召される」演出を見せ切った後)で切り替える。
+fn battle_local_is_waiting_for_others(game_local: &Game, outcome: Option<BattleOutcome>) -> bool {
+    outcome.is_none()
+        && game_local.status == GameStatus::GameOver
+        && !game_local.crush_flash_active()
 }
 
 /// 相手の進捗(深度÷ゴール深度)を0.0〜1.0で返す。ゴール深度0の盤面は存在しないが、
@@ -1671,6 +1742,91 @@ fn draw_off_screen_bomb_warnings(
     }
 }
 
+/// 対戦中、他の参加者の現在位置を自分の盤面へ「ゴースト」として重ねる(#301)。相手の盤面は
+/// フル描画しない(spec.md 12.3)ので、代わりに相手の(行, 列)を自分の盤面の同じ座標として
+/// 示し、どのあたりを誰が掘っているかが分かるようにする。可視範囲内なら輪郭だけのスプライト、
+/// 範囲外(自分より浅い/深い)なら画面の上端・下端に矢印を出す(画面外ボム警告と同じ考え方)。
+fn draw_opponent_ghosts(
+    buf: &mut Buffer,
+    field_rect: Rect,
+    visible_rows: usize,
+    game_local: &Game,
+    other_games: &[Game],
+) {
+    if other_games.is_empty() || visible_rows == 0 {
+        return;
+    }
+    // `draw_field`が盤面を描くのと同じ、罫線の内側の領域を求める。
+    let inner = Block::default().borders(Borders::ALL).inner(field_rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let cam_row_f = field_camera(game_local, player_screen_row(visible_rows)).row_f;
+
+    for (index, game) in other_games.iter().enumerate() {
+        let (row, col) = game.player.position();
+        let fg = colors::battle_ghost_fg(index);
+        let marker = ghost_marker_glyph(index);
+        match cell_screen_pos(inner, cam_row_f, visible_rows, row, col) {
+            Some((x, y)) => draw_ghost_sprite(buf, x, y, marker, fg),
+            None => {
+                // 自分より浅い位置なら上端、深い位置なら下端に矢印を出す。
+                let above = (row as f32) < cam_row_f;
+                draw_off_screen_ghost_marker(buf, inner, visible_rows, col, marker, fg, above);
+            }
+        }
+    }
+}
+
+/// 相手ゴースト(#301)の輪郭。自分のスプライト(`player_sprite`)と混ざらないよう罫線の箱で
+/// 囲み、中に参加者番号を入れる。背景色は書き換えず(`put_fg`)、下の盤面が透けて見える
+/// 半透明のような見た目にする。
+const BATTLE_GHOST_OUTLINE: [[char; CELL_W as usize]; CELL_H as usize] =
+    [['┌', '─', '─', '┐'], ['└', ' ', ' ', '┘']];
+
+/// 相手ゴーストのスプライト。`BATTLE_GHOST_OUTLINE`の空白部分に参加者番号を埋める。
+fn draw_ghost_sprite(buf: &mut Buffer, x: u16, y: u16, marker: char, fg: Color) {
+    for (dy, row) in BATTLE_GHOST_OUTLINE.iter().enumerate() {
+        for (dx, &ch) in row.iter().enumerate() {
+            let ch = if ch == ' ' { marker } else { ch };
+            put_fg(buf, x + dx as u16, y + dy as u16, ch, fg);
+        }
+    }
+}
+
+/// 可視範囲の外にいる相手を、その列の画面上端(`above`)または下端に矢印で示す(#301)。
+fn draw_off_screen_ghost_marker(
+    buf: &mut Buffer,
+    inner: Rect,
+    visible_rows: usize,
+    col: usize,
+    marker: char,
+    fg: Color,
+    above: bool,
+) {
+    let x = inner.x + col as u16 * CELL_W;
+    if x + CELL_W > inner.x + inner.width {
+        return;
+    }
+    // 罫線の内側でも可視セルグリッドに収まる範囲にだけ描く(縮退表示では余りが出る)。
+    let grid_h = (visible_rows as u16 * CELL_H).min(inner.height);
+    if grid_h == 0 {
+        return;
+    }
+    let y = if above { inner.y } else { inner.y + grid_h - 1 };
+    let arrow = if above { '\u{2191}' } else { '\u{2193}' };
+    for (dx, ch) in [arrow, marker, marker, arrow].into_iter().enumerate() {
+        put_fg(buf, x + dx as u16, y, ch, fg);
+    }
+}
+
+/// 参加者index(自分を除いた0始まり)に対応するゴーストの番号グリフ(#301)。相手パネル(#290)の
+/// 見出しと同じ番号を使い、盤面のゴーストとパネルの行を対応づけられるようにする。
+/// 対戦人数の上限は4人なので、自分以外は必ず1桁に収まる。
+fn ghost_marker_glyph(index: usize) -> char {
+    char::from_digit(index as u32 + 1, 10).unwrap_or('?')
+}
+
 /// ボムを盤面の上に重ねて描画する(ブロックとは別レイヤーなので通常のセル描画ループとは独立)。
 /// `BombPhase`に応じて 白ボン登場(Entering)→転がり(Rolling、縦にも弾ませる)→落下・バウンド
 /// (Settling)→設置後の点滅カウントダウン(Ticking) を描き分け、起爆が近づくほど点滅を速める。
@@ -2143,6 +2299,15 @@ fn star_sparkle_content(visible_ms: u32) -> [[char; 2]; 2] {
 fn put(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color, bg: Color) {
     if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
         cell.set_char(ch).set_fg(fg).set_bg(bg);
+    }
+}
+
+/// バッファ1マスへ文字・前景色だけを設定し、背景色はそのまま残す(範囲外は無視)。
+/// 下に描かれている盤面が透けて見えるため、重ねる印(対戦の相手ゴースト#301)を半透明のように
+/// 見せられる。
+fn put_fg(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color) {
+    if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
+        cell.set_char(ch).set_fg(fg);
     }
 }
 
@@ -2669,7 +2834,20 @@ fn format_with_commas(value: u64) -> String {
 // ---------------------------------------------------------------------------
 
 fn draw_overlay(frame: &mut Frame, area: Rect, title: &str, hints: &[&str]) {
-    let overlay_area = centered_rect(40, 20, area);
+    draw_overlay_sized(frame, area, 40, 20, title, hints);
+}
+
+/// `draw_overlay`の箱の大きさを呼び出し側から指定できる版。対戦の待機中オーバーレイ(#302)は
+/// 通常プレイのGameOverダイアログを完全に覆い隠す必要があり、既定の大きさでは足りない。
+fn draw_overlay_sized(
+    frame: &mut Frame,
+    area: Rect,
+    percent_x: u16,
+    percent_y: u16,
+    title: &str,
+    hints: &[&str],
+) {
+    let overlay_area = centered_rect(percent_x, percent_y, area);
     frame.render_widget(Clear, overlay_area);
 
     let text_style = Style::default()
@@ -4148,18 +4326,27 @@ mod tests {
         assert!(spans[0].style.add_modifier.contains(Modifier::REVERSED));
     }
 
+    /// 対戦画面テスト用に、相手1人ぶんのゲームと名前を用意する。
+    fn single_opponent(name: &str) -> (Vec<Game>, Vec<String>) {
+        (
+            vec![Game::new_with_width(1, FIELD_WIDTH, 100)],
+            vec![name.to_string()],
+        )
+    }
+
     #[test]
     fn the_battle_screen_shows_the_result_overlay_once_the_outcome_is_decided() {
         // 決着後は結果と抜け方が盤面の上に重なって見える(#256)。順位は1位から最下位まで
         // どれでも同じように出す(対戦人数の上限は4人=ROOM_MAX_PLAYERS)。
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let (others, names) = single_opponent("opponent");
         for rank in 1..=4u8 {
             let text = rendered_screen_text(|frame| {
                 draw_battle(
                     frame,
                     &game,
-                    &game,
-                    "opponent",
+                    &others,
+                    &names,
                     true,
                     true,
                     Some(BattleOutcome::Ranked(rank)),
@@ -4184,14 +4371,331 @@ mod tests {
     #[test]
     fn the_battle_screen_shows_no_result_overlay_before_the_outcome() {
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let (others, names) = single_opponent("opponent");
         let text = rendered_screen_text(|frame| {
-            draw_battle(frame, &game, &game, "opponent", true, true, None)
+            draw_battle(frame, &game, &others, &names, true, true, None)
         });
 
         assert!(
             !screen_shows(&text, "Enter/Escキーでタイトルへ"),
             "決着前に結果オーバーレイが出てしまっている:\n{text}"
         );
+    }
+
+    // --- N人対戦の相手パネル(#290) ---
+
+    #[test]
+    fn the_battle_opponent_panel_lists_every_other_player() {
+        // N人対戦では自分以外の全員(上限4人=ROOM_MAX_PLAYERSなので最大3人)の名前・深度・
+        // ライフがパネルに並ぶ(#290)。以前は先頭の1人しか出ていなかった。
+        let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let names: Vec<String> = ["alpha", "bravo", "charlie"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let mut others = Vec::new();
+        for (index, depth_row) in [9usize, 24, 49].into_iter().enumerate() {
+            let mut other = Game::new_with_width(2, FIELD_WIDTH, 100);
+            other.player.row = depth_row;
+            other.player.lives = index as u8 + 1;
+            others.push(other);
+        }
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &game, &others, &names, true, true, None)
+        });
+
+        for (index, name) in names.iter().enumerate() {
+            assert!(
+                screen_shows(&text, &format!("OPPONENT: {name}")),
+                "{name}の名前がパネルに出ていない:\n{text}"
+            );
+            let depth_m = others[index].player.depth_m();
+            assert!(
+                screen_shows(&text, &format!("DEPTH {depth_m} m")),
+                "{name}の深度({depth_m}m)がパネルに出ていない:\n{text}"
+            );
+            assert!(
+                screen_shows(&text, &format!("\u{d7}{}", others[index].player.lives)),
+                "{name}のライフがパネルに出ていない:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_battle_opponent_panel_grows_with_the_number_of_players() {
+        // パネルの高さは人数ぶん(1人3行)+上下ボーダー2行。
+        assert_eq!(battle_opponent_panel_h(1), 5);
+        assert_eq!(battle_opponent_panel_h(2), 8);
+        assert_eq!(battle_opponent_panel_h(3), 11);
+    }
+
+    #[test]
+    fn the_battle_screen_draws_no_opponent_panel_without_other_players() {
+        // 相手がいない(全員抜けた等)場合はパネルを出さない。
+        let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let text =
+            rendered_screen_text(|frame| draw_battle(frame, &game, &[], &[], true, true, None));
+        assert!(
+            !screen_shows(&text, "OPPONENT:"),
+            "相手がいないのにパネルが出ている:\n{text}"
+        );
+    }
+
+    // --- 相手の位置のゴースト表示(#301) ---
+
+    /// ゴーストのテスト用に、プレイヤーを指定の行・列に置いたゲームを作る。
+    /// 生成直後のGameは移動アニメーションが完了済みなので、`interp_player_row`は
+    /// この行そのものになる。
+    fn game_at(row: usize, col: usize) -> Game {
+        let mut game = Game::new(7);
+        game.player.row = row;
+        game.player.col = col;
+        game
+    }
+
+    #[test]
+    fn opponent_ghosts_are_drawn_on_the_own_field_when_they_are_in_view() {
+        // 可視範囲にいる相手は、自分の盤面の同じ座標へゴーストとして重なる(#301)。
+        let visible_rows = 10;
+        let local = game_at(100, 0);
+        let cam_row_f = field_camera(&local, player_screen_row(visible_rows)).row_f;
+        // 自分の行はplayer_screen_row分だけ画面上端から下がるため、カメラより深い行にいる。
+        let others = vec![game_at(100 + 1, 3), game_at(100 + 2, 5)];
+
+        let field_rect = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(field_rect);
+        draw_opponent_ghosts(&mut buf, field_rect, visible_rows, &local, &others);
+
+        let inner = Block::default().borders(Borders::ALL).inner(field_rect);
+        for (index, other) in others.iter().enumerate() {
+            let (row, col) = other.player.position();
+            let (x, y) = cell_screen_pos(inner, cam_row_f, visible_rows, row, col)
+                .expect("可視範囲内のはず");
+            let cell = buf.cell(Position::new(x, y)).expect("盤面内のはず");
+            assert_eq!(cell.symbol(), "\u{250c}", "ゴーストの輪郭が描かれていない");
+            assert_eq!(
+                cell.fg,
+                colors::battle_ghost_fg(index),
+                "参加者ごとに色を変えるはず"
+            );
+            // 番号は輪郭の内側(2行目)に入る。
+            let number = buf
+                .cell(Position::new(x + 1, y + 1))
+                .expect("盤面内のはず")
+                .symbol()
+                .to_string();
+            assert_eq!(
+                number,
+                ghost_marker_glyph(index).to_string(),
+                "ゴーストに参加者番号が入っていない"
+            );
+        }
+    }
+
+    #[test]
+    fn opponent_ghosts_keep_the_background_of_the_cell_below_them() {
+        // ゴーストは前景色だけを書き換え、下の盤面の背景色を残す(半透明のような見た目)。
+        let visible_rows = 10;
+        let local = game_at(100, 0);
+        let others = vec![game_at(101, 3)];
+        let field_rect = Rect::new(0, 0, 60, 30);
+
+        let mut buf = Buffer::empty(field_rect);
+        let inner = Block::default().borders(Borders::ALL).inner(field_rect);
+        let cam_row_f = field_camera(&local, player_screen_row(visible_rows)).row_f;
+        let (x, y) =
+            cell_screen_pos(inner, cam_row_f, visible_rows, 101, 3).expect("可視範囲内のはず");
+        fill_block(&mut buf, x, y, colors::ROCK_BG_INTACT);
+
+        draw_opponent_ghosts(&mut buf, field_rect, visible_rows, &local, &others);
+
+        assert_eq!(
+            buf.cell(Position::new(x, y)).unwrap().bg,
+            colors::ROCK_BG_INTACT,
+            "ゴーストが下のマスの背景色を塗り潰している"
+        );
+    }
+
+    #[test]
+    fn opponents_out_of_view_are_shown_as_arrows_at_the_screen_edges() {
+        // 可視範囲の外にいる相手は、その列の上端(浅い)・下端(深い)に矢印で示す(#301)。
+        let visible_rows = 10;
+        let local = game_at(100, 0);
+        let shallow_col = 2;
+        let deep_col = 4;
+        let others = vec![game_at(10, shallow_col), game_at(400, deep_col)];
+
+        let field_rect = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(field_rect);
+        draw_opponent_ghosts(&mut buf, field_rect, visible_rows, &local, &others);
+
+        let inner = Block::default().borders(Borders::ALL).inner(field_rect);
+        let symbol_at = |buf: &Buffer, x: u16, y: u16| {
+            buf.cell(Position::new(x, y))
+                .expect("盤面内のはず")
+                .symbol()
+                .to_string()
+        };
+
+        let shallow_x = inner.x + shallow_col as u16 * CELL_W;
+        assert_eq!(
+            symbol_at(&buf, shallow_x, inner.y),
+            "\u{2191}",
+            "自分より浅い相手は上端に上向き矢印で出るはず"
+        );
+        assert_eq!(
+            symbol_at(&buf, shallow_x + 1, inner.y),
+            ghost_marker_glyph(0).to_string(),
+            "矢印に参加者番号が添えられていない"
+        );
+
+        let deep_x = inner.x + deep_col as u16 * CELL_W;
+        let bottom_y = inner.y + (visible_rows as u16 * CELL_H).min(inner.height) - 1;
+        assert_eq!(
+            symbol_at(&buf, deep_x, bottom_y),
+            "\u{2193}",
+            "自分より深い相手は下端に下向き矢印で出るはず"
+        );
+        assert_eq!(
+            symbol_at(&buf, deep_x + 1, bottom_y),
+            ghost_marker_glyph(1).to_string(),
+            "矢印に参加者番号が添えられていない"
+        );
+    }
+
+    #[test]
+    fn ghost_marker_glyphs_are_numbered_from_one() {
+        // パネルの見出し(#290)と盤面のゴースト(#301)で同じ番号を使う。
+        assert_eq!(ghost_marker_glyph(0), '1');
+        assert_eq!(ghost_marker_glyph(1), '2');
+        assert_eq!(ghost_marker_glyph(2), '3');
+    }
+
+    // --- 自分がGameOverになった後の待機表示(#302) ---
+
+    #[test]
+    fn the_battle_screen_shows_a_waiting_notice_instead_of_the_game_over_dialog() {
+        // 自分が力尽きても対戦は全員の結果がそろうまで終わらない。`tick_battle`は
+        // GameOverダイアログの選択操作を受け付けないため、押しても何も起きない
+        // ダイアログではなく待機中の案内を出す(#302)。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let (others, names) = single_opponent("opponent");
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None)
+        });
+
+        assert!(
+            screen_shows(&text, "対戦終了までお待ちください"),
+            "待機中の案内が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "決着まで操作できません"),
+            "操作できない旨の案内が出ていない:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "タイトルへ戻る"),
+            "押しても効かないGameOverダイアログの選択肢が残っている:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "その場から復活"),
+            "押しても効かないGameOverダイアログの選択肢が残っている:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "↑↓で選択 / Enterで決定"),
+            "押しても効かないGameOverダイアログの操作案内が残っている:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_battle_waiting_notice_gives_way_to_the_result_once_the_outcome_is_decided() {
+        // 決着したら待機表示は引っ込め、結果と抜け方を出す(#256の挙動は変えない)。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let (others, names) = single_opponent("opponent");
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(
+                frame,
+                &local,
+                &others,
+                &names,
+                true,
+                true,
+                Some(BattleOutcome::Ranked(2)),
+            )
+        });
+
+        assert!(
+            screen_shows(&text, "Enter/Escキーでタイトルへ"),
+            "決着後は抜け方の案内が出るはず:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "対戦終了までお待ちください"),
+            "決着後に待機中の案内が残っている:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_battle_waiting_notice_is_not_shown_while_still_playing() {
+        // プレイ中は当然出さない。
+        let local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        assert_eq!(local.status, GameStatus::Playing);
+        let (others, names) = single_opponent("opponent");
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None)
+        });
+        assert!(
+            !screen_shows(&text, "対戦終了までお待ちください"),
+            "プレイ中に待機中の案内が出ている:\n{text}"
+        );
+    }
+
+    #[test]
+    fn battle_waiting_state_needs_both_game_over_and_an_undecided_outcome() {
+        let playing = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let mut over = Game::new_with_width(1, FIELD_WIDTH, 100);
+        over.status = GameStatus::GameOver;
+
+        assert!(battle_local_is_waiting_for_others(&over, None));
+        assert!(
+            !battle_local_is_waiting_for_others(&over, Some(BattleOutcome::Ranked(1))),
+            "決着後は待機ではなく結果表示"
+        );
+        assert!(
+            !battle_local_is_waiting_for_others(&playing, None),
+            "プレイ中は待機ではない"
+        );
+    }
+
+    #[test]
+    fn the_battle_waiting_overlay_fully_covers_the_game_over_dialog() {
+        // 待機中の案内はGameOverダイアログを覆い隠して消す方式なので、ダイアログの箱が
+        // はみ出さないことを確認する(はみ出すと効かない選択肢が見えたままになる)。
+        let area = Rect::new(0, 0, 200, 60);
+        let game_frame = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+        let waiting = centered_rect(
+            BATTLE_WAITING_OVERLAY_PERCENT_X,
+            game_over_overlay_percent_y(true),
+            game_frame,
+        );
+        for with_rewind_hint in [false, true] {
+            let dialog = centered_rect(
+                40,
+                game_over_overlay_percent_y(with_rewind_hint),
+                game_frame,
+            );
+            assert!(
+                waiting.x <= dialog.x
+                    && waiting.y <= dialog.y
+                    && waiting.x + waiting.width >= dialog.x + dialog.width
+                    && waiting.y + waiting.height >= dialog.y + dialog.height,
+                "待機中オーバーレイ({waiting:?})がGameOverダイアログ({dialog:?})を覆いきれていない"
+            );
+        }
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::app::settings_menu::{
     adjust_fall_speed_ms, adjust_field_width, adjust_move_cooldown_ms, adjust_rewind_stock_max,
     adjust_shake_duration_ms, adjust_sound_volume_percent, adjust_spawn_rate_setting,
 };
-use crate::battle::BattleState;
+use crate::battle::{BattleOutcome, BattleState};
 use crate::constants::{
     ATTRACT_MODE_IDLE_MS, FRAME_INTERVAL_MS, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
 };
@@ -665,7 +665,7 @@ pub fn tick_playing(
 /// `Ignored`にすることで無効化を表す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BattleInput {
-    /// 対戦を中断してタイトルへ戻る。
+    /// 決着後に結果表示から抜けてタイトルへ戻る。決着前は無視する(#303)。
     Quit,
     /// このフレームの自分の入力として`BattleState::advance`へ渡す5操作。
     Local(InputAction),
@@ -718,19 +718,17 @@ pub fn tick_battle(
 
     // 決着後は結果表示だけの画面になる(#256)。ここを抜ける操作は「タイトルへ戻る」
     // のみで、盤面の操作・音声トグルはもう意味を持たない。
-    if state.outcome().is_some() && actions.iter().any(|&action| leaves_battle_result(action)) {
+    if battle_leaves_screen(state.outcome(), &actions) {
         state.notify_bye();
         return Ok(Some(ScreenTransition::ToTitleDiscardingGame));
     }
 
     for &action in &actions {
         match classify_battle_input(action) {
-            // 対戦を中断してタイトルへ戻る。相手を待たせないよう、抜けることを
-            // 伝えてから戻る(#256。相手側は不戦勝として決着する)。
-            BattleInput::Quit => {
-                state.notify_bye();
-                return Ok(Some(ScreenTransition::ToTitleDiscardingGame));
-            }
+            // 決着前のEscは無視する(#303)。以前はここで即タイトルへ戻していたが、
+            // 対戦相手を置いて抜けられてしまうため、決着後の`battle_leaves_screen`に
+            // よる離脱だけを残した。
+            BattleInput::Quit => {}
             BattleInput::ToggleMusic => {
                 app.settings.music_enabled = !app.settings.music_enabled;
                 // 対戦画面ではタイトル用BGMは鳴らないため、プレイ中BGMのみ即時反映する。
@@ -767,13 +765,13 @@ pub fn tick_battle(
     let se_on = app.se_enabled.load(Ordering::Relaxed);
     let outcome = state.outcome();
     terminal.draw(|frame| {
-        // N人対戦(#273)でも、この段階では相手パネルにindex 1の1人だけを表示する
-        // (N人分の表示は#270/#276の範囲)。
+        // N人対戦(#273)では自分(index 0)以外の全員を相手パネルへ並べ、盤面にも
+        // ゴーストとして重ねる(#290/#301)。`games`と`player_names`は同じ並び。
         ui::render::draw_battle(
             frame,
             state.predicted_game(),
-            &state.games[1],
-            &state.player_names[1],
+            &state.games[1..],
+            &state.player_names[1..],
             music_on,
             se_on,
             outcome,
@@ -791,6 +789,13 @@ fn leaves_battle_result(action: InputAction) -> bool {
         action,
         InputAction::Confirm | InputAction::TogglePause | InputAction::Quit
     )
+}
+
+/// このフレームの入力で対戦画面を抜けるか(#303)。決着前(`outcome`が`None`)はどの操作でも
+/// 抜けない。自分が力尽きても対戦は全員の結果がそろうまで続くため、その間は結果表示でなく
+/// 待機中の案内を出す(#302)。
+fn battle_leaves_screen(outcome: Option<BattleOutcome>, actions: &[InputAction]) -> bool {
+    outcome.is_some() && actions.iter().any(|&action| leaves_battle_result(action))
 }
 
 /// 対戦相手を探すロビー(`Screen::NetworkLobby`)の1フレーム(#256。spec.md 12.1)。
@@ -1340,7 +1345,7 @@ mod tests {
     #[test]
     fn battle_accepts_the_audio_toggles_and_the_quit_action() {
         // 音声トグルはローカル専用でシミュレーションに影響しないため常時受け付ける。
-        // Escは対戦の中断(タイトルへ戻る)として扱う。
+        // Escは決着後に結果表示から抜ける操作として扱う(決着前は無視。#303)。
         assert_eq!(
             classify_battle_input(InputAction::ToggleMusic),
             BattleInput::ToggleMusic
@@ -1445,5 +1450,47 @@ mod tests {
                 "{action:?}では結果表示から抜けないはず"
             );
         }
+    }
+
+    #[test]
+    fn escape_does_not_leave_the_battle_before_the_outcome_is_decided() {
+        // #303: 決着前のEscでは対戦から抜けない(相手を置いて抜けられてしまうため)。
+        // 自分が力尽くしても待機表示のまま全員の結果を待つ(#302)。
+        for action in [
+            InputAction::Quit,
+            InputAction::Confirm,
+            InputAction::TogglePause,
+        ] {
+            assert!(
+                !battle_leaves_screen(None, &[action]),
+                "{action:?}は決着前には対戦画面を抜けないはず"
+            );
+        }
+    }
+
+    #[test]
+    fn the_battle_screen_is_left_after_the_outcome_is_decided() {
+        // 決着後は従来通り、Enter/Space/Escで結果表示から抜ける(#256)。
+        for action in [
+            InputAction::Confirm,
+            InputAction::TogglePause,
+            InputAction::Quit,
+        ] {
+            assert!(
+                battle_leaves_screen(Some(BattleOutcome::Ranked(1)), &[action]),
+                "{action:?}は決着後に対戦画面を抜けるはず"
+            );
+        }
+    }
+
+    #[test]
+    fn the_battle_screen_is_not_left_without_an_exit_key() {
+        // 決着後でも、盤面操作キーや入力なしのフレームでは抜けない。
+        assert!(!battle_leaves_screen(Some(BattleOutcome::Ranked(1)), &[]));
+        assert!(!battle_leaves_screen(
+            Some(BattleOutcome::Ranked(1)),
+            &[InputAction::MoveLeft, InputAction::Drill]
+        ));
+        assert!(!battle_leaves_screen(None, &[]));
     }
 }

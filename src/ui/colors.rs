@@ -223,6 +223,21 @@ pub const PLAYER_FG: Color = Color::Rgb(255, 170, 40);
 /// 押し潰されて「潰れた」演出中のプレイヤーの前景色(TERM独自拡張、9章)。
 pub const CRUSH_FLASH_FG: Color = Color::Rgb(255, 60, 60);
 
+/// 対戦で自分の盤面に重ねる相手ゴーストの前景色(#301)。自分のスプライト(`PLAYER_FG`)と
+/// 紛れないよう暖色を避け、参加者ごとに使い分ける。対戦人数の上限は4人なので、
+/// 自分以外の3人ぶん用意する。
+const BATTLE_GHOST_FG: [Color; 3] = [
+    Color::Rgb(110, 200, 255),
+    Color::Rgb(190, 150, 255),
+    Color::Rgb(140, 230, 160),
+];
+
+/// 参加者index(自分を除いた0始まり)に対応する相手ゴーストの前景色(#301)。
+/// 想定人数を超えたindexが来ても落ちないよう巡回させる。
+pub fn battle_ghost_fg(index: usize) -> Color {
+    BATTLE_GHOST_FG[index % BATTLE_GHOST_FG.len()]
+}
+
 /// パネル枠線(フィールド/HUD双方の罫線に使う)。
 pub const PANEL_BORDER: Color = Color::Rgb(90, 90, 100);
 /// パネル文字色。
