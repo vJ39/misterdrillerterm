@@ -249,6 +249,10 @@ pub struct HandshakeResult {
 ///
 /// タイムアウト処理(`INVITE_TIMEOUT_MS`等)は#256の範囲のためここでは行わず、
 /// `TcpStream`の読み書きはブロッキングのままとする。
+///
+/// #276でロビーがN人対戦のルーム(`room`モジュール)経由に切り替わったため、本体からは
+/// 呼ばれなくなった。2人ぶんのハンドシェイクの取り決めを確かめるテストからのみ使う。
+#[allow(dead_code)]
 pub fn run_host_handshake(
     stream: &mut TcpStream,
     my_name: &str,
@@ -288,6 +292,9 @@ pub fn run_host_handshake(
 /// TCPクライアント役(INVITEした側)のハンドシェイク。ホストの設定・シード・開始時刻を
 /// そのまま受け取って従う(受け取った設定は対戦セッション中のみ適用し、自分の
 /// `settings.json`へは保存しない)。
+///
+/// `run_host_handshake`と同様、#276以降はテストからのみ使う。
+#[allow(dead_code)]
 pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result<HandshakeResult> {
     write_message(
         stream,

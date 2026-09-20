@@ -343,6 +343,12 @@ impl Discovery {
         self.hello_targets = vec![addr];
     }
 
+    /// 同上のN人版(#276)。3人・4人のロビーを互いに向け合わせるため、自分以外の
+    /// 全員を宛先にする。
+    pub(crate) fn set_hello_targets(&mut self, addrs: Vec<SocketAddr>) {
+        self.hello_targets = addrs;
+    }
+
     /// 次の`tick`でHELLOを送らせる。1秒間隔を実時間で待たずに候補を揃えるため。
     pub(crate) fn resend_hello_now(&mut self) {
         self.last_hello_sent = Instant::now() - Duration::from_millis(HELLO_BROADCAST_INTERVAL_MS);

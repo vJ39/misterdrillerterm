@@ -29,7 +29,6 @@ use crate::net::{self, BattleConfig, GameMessage, RoomMember, TCP_CONNECT_TIMEOU
 /// 戻り値の`HandshakeResult`は2人版と同じ型だが、`opponent_name`はN人版では意味を持た
 /// ないため空にする(参加者名は`RoomRoster`の`members`が持ち、呼び出し元は自分が組み立てた
 /// `guest_names`をそのまま使える)。
-#[allow(dead_code)] // #276でロビーから呼ぶまではテストからのみ使う。
 pub fn start_room_as_host(
     guest_room_streams: &mut [TcpStream],
     guest_names: &[String],
@@ -94,17 +93,32 @@ pub fn start_room_as_host(
 }
 
 /// 参加者側。主催者へ接続して`JoinRoom`を送り、`RoomRoster`以降を受け取ってから
-/// フルメッシュを確立する(設計書5節)。
+/// フルメッシュを確立する(設計書5節)。`connect_and_join_room`と`await_room_start`を
+/// 順に呼ぶだけの薄い関数(#276。ロビーUIは開始を待つ区間だけ別スレッド化するため、
+/// この2関数を分けて個別に呼ぶ)。
 ///
 /// 戻り値は(自分以外とのメッシュ接続。room内インデックス順, 自分以外の名前を同じ順で
 /// 並べたもの, ハンドシェイク結果)。`HandshakeResult::opponent_name`は主催者側と同じ理由で
 /// 空にする(名前は2つ目の戻り値が持つ)。
-#[allow(dead_code)] // #276でロビーから呼ぶまではテストからのみ使う。
+#[allow(dead_code)] // ロビーは2つに分けて呼ぶため、この薄い関数はテストからのみ使う。
 pub fn join_room_as_guest(
     host_addr: SocketAddr,
     my_name: &str,
     my_mesh_listener: &TcpListener,
 ) -> io::Result<(Vec<TcpStream>, Vec<String>, net::HandshakeResult)> {
+    let room_stream = connect_and_join_room(host_addr, my_name, my_mesh_listener)?;
+    await_room_start(room_stream, my_name, my_mesh_listener)
+}
+
+/// 参加者側の前半。主催者へ接続して`JoinRoom`を送るだけの、即座に完了する処理
+/// (#276)。開始(`RoomRoster`以降)を待つ`await_room_start`は主催者がいつ開始するか
+/// 分からず無期限に待つ処理のため、ロビーUIはこちらだけをメインループでブロッキング
+/// 呼び出しし、`await_room_start`は別スレッドに載せる。
+pub fn connect_and_join_room(
+    host_addr: SocketAddr,
+    my_name: &str,
+    my_mesh_listener: &TcpListener,
+) -> io::Result<TcpStream> {
     let mesh_port = my_mesh_listener.local_addr()?.port();
     let mut room_stream =
         TcpStream::connect_timeout(&host_addr, Duration::from_millis(TCP_CONNECT_TIMEOUT_MS))?;
@@ -115,7 +129,17 @@ pub fn join_room_as_guest(
             mesh_port,
         },
     )?;
+    Ok(room_stream)
+}
 
+/// 参加者側の後半。`connect_and_join_room`が返した接続で`RoomRoster`以降を受け取り、
+/// フルメッシュを確立する(#276)。主催者の開始操作を待つため無期限にブロックし得る。
+pub fn await_room_start(
+    mut room_stream: TcpStream,
+    my_name: &str,
+    my_mesh_listener: &TcpListener,
+) -> io::Result<(Vec<TcpStream>, Vec<String>, net::HandshakeResult)> {
+    let host_addr = room_stream.peer_addr()?;
     let (mut members, my_index) = match net::read_message(&mut room_stream)? {
         GameMessage::RoomRoster {
             members,

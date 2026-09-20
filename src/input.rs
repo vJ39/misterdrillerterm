@@ -34,6 +34,9 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // (TERM独自拡張。ユーザー指摘: 「メニューから進むのEnter」「他のボタンで
         // 進んではいけない」)。
         KeyCode::Enter => InputAction::Confirm,
+        // N人対戦のルーム開始(#276)。Enterは「選択中の候補へ招待」のままにして、
+        // 誤操作で開始してしまわないよう別のキーに分ける(設計書3節)。
+        KeyCode::Tab => InputAction::StartRoom,
         // フレーム巻き戻し(TERM独自拡張。#233)。押しやすい位置のBackspaceと、
         // Undoを連想できるUキーの両方に割り当てる(どちらも他のショートカットと衝突しない)。
         KeyCode::Backspace | KeyCode::Char('u') | KeyCode::Char('U') => InputAction::Rewind,
@@ -382,10 +385,51 @@ mod tests {
         // ユーザー指摘: 「ポーズ解除は、Pだけじゃなく、ショートカット設定されていない
         // 任意のキー入力でも解除されるように」。既知のショートカットに割り当てられて
         // いないキーはUnboundKeyになる(main.rs側で一時停止中の再開トリガーに使う)。
-        assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::UnboundKey);
+        // Tabは#276でルーム開始に割り当てたため、ここでは別の未割り当てキーで確かめる。
+        assert_eq!(
+            action_from_key_code(KeyCode::Insert),
+            InputAction::UnboundKey
+        );
         assert_eq!(
             action_from_key_code(KeyCode::Char('y')),
             InputAction::UnboundKey
         );
+    }
+
+    #[test]
+    fn action_from_key_code_maps_tab_to_starting_a_room() {
+        // #276: ロビーで集めた参加者と対戦を開始する操作。
+        assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::StartRoom);
+    }
+
+    #[test]
+    fn the_start_room_key_does_not_collide_with_any_other_shortcut() {
+        // ルーム開始(Tab)は他のどのキーにも割り当てられていないこと。特にロビーで
+        // 同時に使うEnter(招待)・Esc(戻る)・矢印(選択)と別物であること。
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Backspace,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Char('z'),
+            KeyCode::Char('p'),
+            KeyCode::Char('u'),
+            KeyCode::Char('m'),
+            KeyCode::Char('e'),
+            KeyCode::Char('s'),
+            KeyCode::Char('h'),
+            KeyCode::Char('n'),
+        ] {
+            assert_ne!(
+                action_from_key_code(code),
+                InputAction::StartRoom,
+                "{code:?}がルーム開始と衝突している"
+            );
+        }
     }
 }

@@ -139,6 +139,9 @@ pub enum InputAction {
     /// `Game`ではなく`rewind::RewindHistory`(Gameの外)なので、この解釈もmain.rsが担う。
     /// `Game`自身は起動可否(`can_start_rewind`)と復元(`restore_for_rewind`)だけを提供する
     Rewind,
+    /// Tabキー: 集めた参加者でN人対戦のルームを開始する(#276)。ロビー画面でのみ意味を
+    /// 持つため、この解釈も`Game`の外側=`lobby::LobbyState`が担う
+    StartRoom,
 }
 
 /// ゲーム全体の進行状態。
@@ -1600,6 +1603,13 @@ impl Game {
     /// この間は移動・掘削入力を無視する。
     fn is_input_frozen(&self) -> bool {
         self.is_dying() || self.dodge_stage != DodgeStage::None
+    }
+
+    /// 直近で実際にくり抜いた(通知済みの)チェックポイントの区切り番号。描画側
+    /// (`src/ui/render.rs`)が、まだ到達していないチェックポイントより先の
+    /// 100mゾーンを隠すかどうかの判定に使うため公開する(#197/#281)。
+    pub fn last_checkpoint_reported(&self) -> usize {
+        self.last_checkpoint_reported
     }
 
     // -----------------------------------------------------------------------

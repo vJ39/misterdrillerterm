@@ -16,8 +16,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use crate::battle::BattleOutcome;
 use crate::constants::{
     BOMB_DANGER_MS, BOMB_ROLL_MS, BONUS_FLOOR_DEPTH_M, CHECKPOINT_SAFE_ZONE_M, CHECKPOINT_STEP_M,
-    DEBUG_INCOMING_ATTACK_POWER, INCOMING_ROCK_WARNING_MS, OXYGEN_MAX, STAR_MELT_DURATION_MS,
-    STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
+    CHECKPOINT_ZONE_GAP_M, DEBUG_INCOMING_ATTACK_POWER, INCOMING_ROCK_WARNING_MS, OXYGEN_MAX,
+    STAR_MELT_DURATION_MS, STAR_SPARKLE_PERIOD_MS, STAR_VISIBLE_GRACE_MS,
 };
 use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
@@ -432,7 +432,7 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
     ];
 
     match lobby.phase() {
-        LobbyPhase::Discovering => {
+        LobbyPhase::Discovering { .. } => {
             lines.push(heading("== 見つかった相手 =="));
             if lobby.peers().is_empty() {
                 lines.push(line("さがしています...".to_string()));
@@ -447,10 +447,26 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
                     )));
                 }
             }
+            // ルームを開いている(1人以上迎え入れた)場合は参加者と開始操作を出す(#276)。
+            let guests = lobby.hosted_guests();
+            if !guests.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(heading("== ルームの参加者 =="));
+                lines.push(line(format!("  {} (自分)", lobby.my_name())));
+                for guest in guests {
+                    lines.push(line(format!("  {}", guest.name())));
+                }
+            }
             lines.push(Line::from(""));
             lines.push(line(
                 "↑↓: 選択 / Enter: 対戦を申し込む / Esc: タイトルへ".to_string(),
             ));
+            if !guests.is_empty() {
+                lines.push(line(format!(
+                    "Tab: この{}人で対戦をはじめる",
+                    guests.len() + 1
+                )));
+            }
         }
         LobbyPhase::AwaitingInviteResponse { target, .. } => {
             lines.push(line(format!(
@@ -468,11 +484,16 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
             lines.push(Line::from(""));
             lines.push(line("Enter: 受ける / Esc: ことわる".to_string()));
         }
-        LobbyPhase::ConnectingAsHost { opponent_name, .. } => {
-            lines.push(line(format!("「{opponent_name}」の接続を待っています...")));
+        LobbyPhase::AcceptingGuestConnection { guest_name, .. } => {
+            lines.push(line(format!("「{guest_name}」の接続を待っています...")));
         }
-        LobbyPhase::ConnectingAsClient { opponent_name, .. } => {
-            lines.push(line(format!("「{opponent_name}」へ接続しています...")));
+        LobbyPhase::ConnectingToHost { host_name, .. } => {
+            lines.push(line(format!("「{host_name}」へ接続しています...")));
+        }
+        LobbyPhase::WaitingForRoomStart { .. } => {
+            lines.push(line(
+                "ルームに参加しました。開始を待っています...".to_string(),
+            ));
         }
         LobbyPhase::Notice { message, .. } => {
             lines.push(line(message.clone()));
@@ -1336,6 +1357,10 @@ fn draw_static_field(
 
             let cell = if moved_map.contains_key(&(board_row, col)) {
                 BoardCell::Empty
+            } else if is_unrevealed_future_zone(board_row, game.last_checkpoint_reported()) {
+                // まだ掘り抜いていないチェックポイントのギャップより先(次の100mゾーン)は、
+                // そこに何が生成されていても見せない(TERM独自拡張。#197/#281)。
+                BoardCell::Empty
             } else if board_row < game.board.depth_rows() {
                 game.board.cell(board_row, col)
             } else {
@@ -2056,6 +2081,25 @@ fn is_checkpoint_safe_zone_row(board_row: usize) -> bool {
         return false;
     }
     board_row < checkpoint_start + CHECKPOINT_SAFE_ZONE_M
+}
+
+/// `board_row`が、まだ掘り抜いていないチェックポイントのギャップより先(次の
+/// 100mゾーン)に含まれるかどうか(TERM独自拡張。#197/#281。ユーザー指摘: 「この
+/// 地面の上を掘ったら次の100mゾーンに進めるようにしたい。それまで次の100mゾーン
+/// はブロック配置しない。進んだら配置する」)。盤面自体はゲーム開始時に事前生成
+/// 済みのままだが、描画側でこの判定がtrueの行は中身によらずEmpty扱いにして隠す。
+/// チェックポイントの地面・ギャップ帯自体(`is_checkpoint_safe_zone_row`が担当)は
+/// 掘る対象として見えている必要があるため対象外(ギャップの先だけを隠す)。
+fn is_unrevealed_future_zone(board_row: usize, last_checkpoint_reported: usize) -> bool {
+    if board_row < CHECKPOINT_STEP_M {
+        return false;
+    }
+    let checkpoint = board_row / CHECKPOINT_STEP_M;
+    if checkpoint <= last_checkpoint_reported {
+        return false;
+    }
+    let gap_end = checkpoint * CHECKPOINT_STEP_M + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M;
+    board_row >= gap_end
 }
 
 // --- 9.3 色ブロックの塊表現(接続マスク・丸み縁取り・ハイライト/陰影) ---
@@ -3045,6 +3089,40 @@ mod tests {
     }
 
     #[test]
+    fn is_unrevealed_future_zone_hides_only_the_gap_and_beyond_of_a_not_yet_reached_checkpoint() {
+        // #197/#281: ユーザー指摘: 「この地面の上を掘ったら次の100mゾーンに進める
+        // ようにしたい。それまで次の100mゾーンはブロック配置しない」。まだ到達
+        // していない(last_checkpoint_reported未満の)チェックポイントについて、
+        // 地面・ギャップ帯自体(掘る対象として見える必要がある)は隠さず、
+        // ギャップの先(次の100mゾーン)だけを隠す。
+        let gap_end = 100 + CHECKPOINT_SAFE_ZONE_M + CHECKPOINT_ZONE_GAP_M;
+        assert!(
+            !is_unrevealed_future_zone(100, 0),
+            "地面帯自体は隠さないはず"
+        );
+        assert!(
+            !is_unrevealed_future_zone(gap_end - 1, 0),
+            "ギャップの最後の行までは隠さないはず"
+        );
+        assert!(
+            is_unrevealed_future_zone(gap_end, 0),
+            "ギャップの直後(次の100mゾーン)は隠すはず"
+        );
+        assert!(
+            is_unrevealed_future_zone(199, 0),
+            "次の100mゾーンの奥まで隠すはず"
+        );
+        // 既にそのチェックポイントに到達済み(last_checkpoint_reported>=1)なら隠さない。
+        assert!(
+            !is_unrevealed_future_zone(gap_end, 1),
+            "到達済みチェックポイントの先は隠さないはず"
+        );
+        // 最初のチェックポイント(100m)より手前は常に表示。
+        assert!(!is_unrevealed_future_zone(0, 0));
+        assert!(!is_unrevealed_future_zone(99, 0));
+    }
+
+    #[test]
     fn rows_below_the_board_bottom_are_drawn_as_bedrock_ground_before_clearing() {
         // #261の回帰防止。盤面外(ゴールより深い行)は、ゲーム状態がPlayingのままでも
         // クリア前から地底の地面ビジュアルで表示されるはず。到達した瞬間に突然
@@ -3745,6 +3823,57 @@ mod tests {
             screen_shows(&text, "自分: me"),
             "自分の表示名が出ていない:\n{text}"
         );
+    }
+
+    #[test]
+    fn the_lobby_shows_the_room_members_and_how_to_start_once_a_guest_joined() {
+        // #276: ゲストを迎え入れたら参加者一覧と開始操作(Tab)が出る。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+        lobby.add_peer(DiscoveredPeer::for_test(
+            "Player-1a2b",
+            IpAddr::from(Ipv4Addr::new(192, 168, 0, 2)),
+            39394,
+        ));
+        lobby.set_phase(LobbyPhase::Discovering {
+            guests: vec![
+                crate::lobby::HostedGuest::for_test("Player-3c4d"),
+                crate::lobby::HostedGuest::for_test("Player-5e6f"),
+            ],
+        });
+
+        let text = render_network_lobby(&lobby);
+
+        assert!(
+            screen_shows(&text, "== ルームの参加者 =="),
+            "参加者一覧の見出しが出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "me (自分)"),
+            "参加者一覧に自分が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Player-3c4d") && screen_shows(&text, "Player-5e6f"),
+            "迎え入れたゲストが出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Tab: この3人で対戦をはじめる"),
+            "開始操作の案内が出ていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_lobby_tells_a_guest_that_it_is_waiting_for_the_host_to_start() {
+        // #276: ゲスト側は主催者の開始操作を待つ間、何を待っているか分かるようにする。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+        let (_result_tx, result_rx) = std::sync::mpsc::channel();
+        lobby.set_phase(LobbyPhase::WaitingForRoomStart { result_rx });
+
+        assert!(screen_shows(
+            &render_network_lobby(&lobby),
+            "ルームに参加しました。開始を待っています..."
+        ));
     }
 
     #[test]

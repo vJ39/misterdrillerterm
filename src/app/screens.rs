@@ -482,6 +482,8 @@ pub fn tick_playing(
                 }
             }
             InputAction::Confirm => {}
+            // ルーム開始(Tab)はロビー画面専用の操作なので、プレイ中は何も起きない(#276)。
+            InputAction::StartRoom => {}
             // 移動・向き・掘削の5操作は`apply_input`へ統一する(TERM独自拡張。
             // #218)。オートプレイの仮想入力と全く同じ経路を通ることで、
             // AIだけが使える裏口が生まれないようにする。人が実際に操作した

@@ -232,6 +232,10 @@ impl BattleState {
     ///
     /// N人対応のハンドシェイク(#275)ができるまで既存のロビーフローをこのシグネチャの
     /// まま使い続けられるよう、組み立ての本体は`from_peer_streams`(#274)へ委譲する。
+    ///
+    /// #276でロビーがN人対戦のルーム経由(`from_peer_streams`直呼び)になったため、本体
+    /// からは呼ばれなくなった。2人ぶんの組み立てを確かめるテストからのみ使う。
+    #[allow(dead_code)]
     pub fn from_handshake(
         handshake: net::HandshakeResult,
         stream: TcpStream,
