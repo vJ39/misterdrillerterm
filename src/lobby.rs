@@ -107,7 +107,15 @@ pub enum LobbyPhase {
         result_rx: mpsc::Receiver<io::Result<RoomStartResult>>,
     },
     /// 拒否・タイムアウト・接続失敗を短く伝える。時間が経つと探索へ戻る。
-    Notice { message: String, shown_at: Instant },
+    ///
+    /// `guests`は主催者側で既に迎え入れていたゲスト(#284。招待や接続の失敗1つで
+    /// ルーム全体を解散させないよう、通知を挟んでも持ち越す)。ゲスト側の失敗
+    /// (このロビー自身がまだ誰も迎えていない)では空になる。
+    Notice {
+        message: String,
+        shown_at: Instant,
+        guests: Vec<HostedGuest>,
+    },
 }
 
 /// ロビーの1フレームの結果。
@@ -228,7 +236,8 @@ impl LobbyState {
                     };
                 }
                 Some(PacketEffect::InviteDeclined) => {
-                    self.phase = notice("相手に断られました");
+                    let guests = self.take_guests();
+                    self.phase = notice("相手に断られました", guests);
                 }
                 None => {}
             }
@@ -307,7 +316,7 @@ impl LobbyState {
                 InputAction::Confirm => {
                     let host = from.clone();
                     if self.discovery.send_accept(&host).is_err() {
-                        self.phase = notice(CONNECT_FAILED_MESSAGE);
+                        self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
                         return None;
                     }
                     // 承諾した側はゲスト(TCPクライアント役)になる(設計書1節)。
@@ -347,8 +356,10 @@ impl LobbyState {
                 LobbyOutcome::Stay
             }
             LobbyPhase::AwaitingInviteResponse { sent_at, .. } => {
+                let sent_at = *sent_at;
                 if sent_at.elapsed() >= Duration::from_millis(INVITE_TIMEOUT_MS) {
-                    self.phase = notice("応答がありませんでした");
+                    let guests = self.take_guests();
+                    self.phase = notice("応答がありませんでした", guests);
                 }
                 LobbyOutcome::Stay
             }
@@ -363,8 +374,10 @@ impl LobbyState {
             }
             LobbyPhase::WaitingForRoomStart { .. } => self.receive_room_start(),
             LobbyPhase::Notice { shown_at, .. } => {
+                let shown_at = *shown_at;
                 if shown_at.elapsed() >= Duration::from_millis(NOTICE_DISPLAY_MS) {
-                    self.phase = discovering();
+                    let guests = self.take_guests();
+                    self.phase = LobbyPhase::Discovering { guests };
                 }
                 LobbyOutcome::Stay
             }
@@ -382,14 +395,23 @@ impl LobbyState {
                     guests.push(guest);
                     self.phase = LobbyPhase::Discovering { guests };
                 }
-                Err(_) => self.phase = notice(CONNECT_FAILED_MESSAGE),
+                Err(_) => {
+                    // このゲストの接続には失敗したが、既に迎え入れていた他のゲストは
+                    // 持ち越す(#284)。
+                    let guests = self.take_guests();
+                    self.phase = notice(CONNECT_FAILED_MESSAGE, guests);
+                }
             },
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 if started.elapsed() >= Duration::from_millis(TCP_CONNECT_TIMEOUT_MS) {
-                    self.phase = notice(CONNECT_FAILED_MESSAGE);
+                    let guests = self.take_guests();
+                    self.phase = notice(CONNECT_FAILED_MESSAGE, guests);
                 }
             }
-            Err(_) => self.phase = notice(CONNECT_FAILED_MESSAGE),
+            Err(_) => {
+                let guests = self.take_guests();
+                self.phase = notice(CONNECT_FAILED_MESSAGE, guests);
+            }
         }
     }
 
@@ -421,7 +443,7 @@ impl LobbyState {
         match started {
             Ok((streams, handshake)) => self.battle_from_room(streams, guest_names, handshake),
             Err(_) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE);
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
                 LobbyOutcome::Stay
             }
         }
@@ -440,7 +462,7 @@ impl LobbyState {
         let (room_stream, mesh_listener) = match joined {
             Ok(joined) => joined,
             Err(_) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE);
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
                 return LobbyOutcome::Stay;
             }
         };
@@ -472,7 +494,7 @@ impl LobbyState {
             }
             // 待ち受けスレッドが失敗した場合と、結果を送らずに終わった場合。
             Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE);
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
                 LobbyOutcome::Stay
             }
             Err(mpsc::TryRecvError::Empty) => LobbyOutcome::Stay,
@@ -503,7 +525,7 @@ impl LobbyState {
         ) {
             Ok(state) => LobbyOutcome::Battle(Box::new(state)),
             Err(_) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE);
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
                 LobbyOutcome::Stay
             }
         }
@@ -515,7 +537,8 @@ impl LobbyState {
         match &mut self.phase {
             LobbyPhase::Discovering { guests }
             | LobbyPhase::AwaitingInviteResponse { guests, .. }
-            | LobbyPhase::AcceptingGuestConnection { guests, .. } => std::mem::take(guests),
+            | LobbyPhase::AcceptingGuestConnection { guests, .. }
+            | LobbyPhase::Notice { guests, .. } => std::mem::take(guests),
             _ => Vec::new(),
         }
     }
@@ -568,11 +591,13 @@ fn discovering() -> LobbyPhase {
     LobbyPhase::Discovering { guests: Vec::new() }
 }
 
-/// 短い通知フェーズを作る。
-fn notice(message: &str) -> LobbyPhase {
+/// 短い通知フェーズを作る。`guests`は通知を抜けた後、探索フェーズへそのまま
+/// 持ち越す(#284)。
+fn notice(message: &str, guests: Vec<HostedGuest>) -> LobbyPhase {
     LobbyPhase::Notice {
         message: message.to_string(),
         shown_at: Instant::now(),
+        guests,
     }
 }
 
@@ -1028,11 +1053,31 @@ mod tests {
         lobby.phase = LobbyPhase::Notice {
             message: "テスト".to_string(),
             shown_at: Instant::now() - Duration::from_millis(NOTICE_DISPLAY_MS),
+            guests: Vec::new(),
         };
 
         lobby.update(&[], test_config());
 
         assert!(matches!(lobby.phase(), LobbyPhase::Discovering { .. }));
+    }
+
+    #[test]
+    fn a_notice_carries_the_already_hosted_guests_back_to_discovering() {
+        // #284: 招待の失敗・タイムアウト・接続失敗1つで、既に迎え入れていた
+        // ゲストまでルームから失われないようにする。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.phase = LobbyPhase::Notice {
+            message: "テスト".to_string(),
+            shown_at: Instant::now() - Duration::from_millis(NOTICE_DISPLAY_MS),
+            guests: vec![HostedGuest::for_test("already-joined")],
+        };
+
+        lobby.update(&[], test_config());
+
+        assert!(
+            matches!(lobby.phase(), LobbyPhase::Discovering { guests } if guests.len() == 1 && guests[0].name() == "already-joined"),
+            "通知を抜けた後も既に迎えていたゲストが残っているはず"
+        );
     }
 
     #[test]

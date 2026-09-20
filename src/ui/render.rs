@@ -3903,6 +3903,7 @@ mod tests {
         lobby.set_phase(LobbyPhase::Notice {
             message: "相手に断られました".to_string(),
             shown_at: std::time::Instant::now(),
+            guests: Vec::new(),
         });
 
         assert!(screen_shows(
