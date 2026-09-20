@@ -48,10 +48,6 @@ const ROOM_MAX_PLAYERS: usize = 4;
 /// 超えないようにするため、上限は「最大人数-1」(=3人。合計2〜4人)。
 const AI_OPPONENT_COUNT_RANGE: std::ops::RangeInclusive<usize> = 1..=(ROOM_MAX_PLAYERS - 1);
 
-/// `room::await_room_start`の結果(自分以外とのメッシュ接続, 自分以外の名前, ハンドシェイク)。
-/// 別スレッドからチャネルで受け取るため型に名前を付ける。
-pub type RoomStartResult = (Vec<TcpStream>, Vec<String>, net::HandshakeResult);
-
 /// 主催者が既に迎え入れたゲスト1人ぶん(設計書2節)。
 ///
 /// 設計書では非公開structだが、公開enum`LobbyPhase`のフィールドに出てくるため
@@ -93,7 +89,14 @@ pub struct LobbyState {
 pub enum LobbyPhase {
     /// 候補を探しながら参加リクエストを待っている通常状態。`guests`が空でなければ、
     /// 既にルームを開いていて、さらに参加リクエストを受けられる状態(#293)。
-    Discovering { guests: Vec<HostedGuest> },
+    ///
+    /// `ai_count`はこのルームへ混ぜるAIの人数(#300。初期0)。ホストがここで増減し、
+    /// 開始操作(Tab)のときに`room::start_room_as_host`へ渡す。#296のAI対戦(V)と違い
+    /// 通信ありのルームの話で、人間の参加者と混在させられる。
+    Discovering {
+        guests: Vec<HostedGuest>,
+        ai_count: usize,
+    },
     /// 自分から参加リクエストを送り、相手の応答を待っている(#293で名前は維持)。
     AwaitingInviteResponse {
         target: DiscoveredPeer,
@@ -129,7 +132,7 @@ pub enum LobbyPhase {
     /// ホストへ接続・`JoinRoom`送信済みで、開始(`RoomRoster`以降)を別スレッドで待っている。
     /// このフェーズでStartRoom操作を受け付け、ホストへ開始要求を送る(#293)。
     WaitingForRoomStart {
-        result_rx: mpsc::Receiver<io::Result<RoomStartResult>>,
+        result_rx: mpsc::Receiver<io::Result<room::RoomStartResult>>,
         host_peer: DiscoveredPeer,
     },
     /// AIと対戦する人数を選んでいる(#296)。`ai_count`は1〜3(合計2〜4人)。
@@ -228,11 +231,19 @@ impl LobbyState {
     /// 既にルームへ迎え入れたゲスト(参加者一覧の表示用)。ゲストを持たないフェーズでは空。
     pub fn hosted_guests(&self) -> &[HostedGuest] {
         match &self.phase {
-            LobbyPhase::Discovering { guests }
+            LobbyPhase::Discovering { guests, .. }
             | LobbyPhase::AwaitingInviteResponse { guests, .. }
             | LobbyPhase::IncomingInvite { guests, .. }
             | LobbyPhase::AcceptingGuestConnection { guests, .. } => guests,
             _ => &[],
+        }
+    }
+
+    /// このルームへ混ぜるAI(#300)の人数。持たないフェーズでは0(AIを追加しない)。
+    pub fn room_ai_count(&self) -> usize {
+        match &self.phase {
+            LobbyPhase::Discovering { ai_count, .. } => *ai_count,
+            _ => 0,
         }
     }
 
@@ -307,7 +318,7 @@ impl LobbyState {
         match (&self.phase, packet.packet_type) {
             // 参加リクエストが届いた。ゲストが既にいても受け付ける(N人対戦なので、
             // 満員(`ROOM_MAX_PLAYERS`)になるまでは追加で迎え入れられる。#293)。
-            (LobbyPhase::Discovering { guests }, PacketType::Invite) => {
+            (LobbyPhase::Discovering { guests, .. }, PacketType::Invite) => {
                 let from = self.peer_of(packet)?;
                 if guests.len() + 1 >= ROOM_MAX_PLAYERS {
                     Some(PacketEffect::DeclineWhileHosting(from))
@@ -350,7 +361,7 @@ impl LobbyState {
                 Some(PacketEffect::InviteDeclined)
             }
             // ゲストからの開始要求。迎え入れたゲストが1人もいなければ意味が無いので無視する。
-            (LobbyPhase::Discovering { guests }, PacketType::RequestStart)
+            (LobbyPhase::Discovering { guests, .. }, PacketType::RequestStart)
             | (LobbyPhase::AcceptingGuestConnection { guests, .. }, PacketType::RequestStart) => {
                 if guests.is_empty() {
                     None
@@ -395,6 +406,10 @@ impl LobbyState {
                         self.phase = LobbyPhase::SelectingAiOpponentCount { ai_count: 1 };
                     }
                 }
+                // このルームへ混ぜるAIの枠の増減(#300)。#296のVと違い通信ありの
+                // ルームの話なので、ゲストがいてもいなくても操作できる。
+                InputAction::IncreaseRoomAiCount => self.adjust_room_ai_count(true),
+                InputAction::DecreaseRoomAiCount => self.adjust_room_ai_count(false),
                 InputAction::Quit => {
                     // 相手の候補リストから即座に消えるよう、抜ける前にBYEを流す。
                     self.discovery.send_bye();
@@ -407,7 +422,7 @@ impl LobbyState {
             LobbyPhase::AwaitingInviteResponse { .. } => {
                 if action == InputAction::Quit {
                     let guests = self.take_guests();
-                    self.phase = LobbyPhase::Discovering { guests };
+                    self.phase = discovering_with(guests);
                 }
             }
             LobbyPhase::IncomingInvite { from, .. } => match action {
@@ -462,7 +477,7 @@ impl LobbyState {
                     }
                     InputAction::Quit => {
                         let guests = self.take_guests();
-                        self.phase = LobbyPhase::Discovering { guests };
+                        self.phase = discovering_with(guests);
                     }
                     _ => {}
                 }
@@ -568,6 +583,8 @@ impl LobbyState {
         // 開始したら募集は終わり(spec.md 12.1)。
         self.discovery.send_bye();
 
+        // AIの枠(#300)はフェーズが変わる前に読む(`take_guests`で`Discovering`を抜ける)。
+        let ai_count = self.room_ai_count();
         let guests = self.take_guests();
         let mut guest_room_streams = Vec::with_capacity(guests.len());
         let mut guest_names = Vec::with_capacity(guests.len());
@@ -582,12 +599,19 @@ impl LobbyState {
             &mut guest_room_streams,
             &guest_names,
             &guest_mesh_addrs,
+            ai_count,
             &self.my_name,
             &self.mesh_listener,
             config,
         );
         match started {
-            Ok((streams, handshake)) => self.battle_from_room(streams, guest_names, handshake),
+            Ok((streams, handshake)) => {
+                // AIはrosterのゲストの後ろに並ぶ(#300)。参加者名もその並びに合わせる。
+                let mut other_names = guest_names;
+                other_names.extend((1..=ai_count).map(room::ai_member_name));
+                // ホストのroom内インデックスは常に0(設計書4節)。
+                self.battle_from_room(streams, other_names, 0, handshake)
+            }
             Err(_) => {
                 self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new(), Vec::new());
                 LobbyOutcome::Stay
@@ -651,8 +675,8 @@ impl LobbyState {
         };
 
         match received {
-            Ok(Ok((streams, other_names, handshake))) => {
-                self.battle_from_room(streams, other_names, handshake)
+            Ok(Ok((streams, other_names, my_index, handshake))) => {
+                self.battle_from_room(streams, other_names, my_index, handshake)
             }
             // 待ち受けスレッドが失敗した場合と、結果を送らずに終わった場合。
             Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -665,10 +689,14 @@ impl LobbyState {
 
     /// 確立したメッシュ接続と参加者名(自分以外、room内インデックス順)から対戦状態を
     /// 組み立てる。盤面は全員が同じシード・同じ設定で作る(spec.md 12.2)。
+    ///
+    /// `streams`の`None`はAIの枠(#300)で、`my_index`は自分のroom内インデックス
+    /// (ホストは常に0)。どちらも`BattleState`が代理送信の宛先変換に使う。
     fn battle_from_room(
         &mut self,
-        streams: Vec<TcpStream>,
+        streams: Vec<Option<TcpStream>>,
         other_names: Vec<String>,
+        my_index: usize,
         handshake: net::HandshakeResult,
     ) -> LobbyOutcome {
         let player_count = other_names.len() + 1;
@@ -683,6 +711,7 @@ impl LobbyState {
             games,
             player_names,
             streams,
+            my_index,
             handshake.start_at_unix_ms,
         ) {
             Ok(state) => LobbyOutcome::Battle(Box::new(state)),
@@ -697,7 +726,7 @@ impl LobbyState {
     /// 持ちcloneできないため、フェーズを移すときはこれで移送する。
     fn take_guests(&mut self) -> Vec<HostedGuest> {
         match &mut self.phase {
-            LobbyPhase::Discovering { guests }
+            LobbyPhase::Discovering { guests, .. }
             | LobbyPhase::AwaitingInviteResponse { guests, .. }
             | LobbyPhase::IncomingInvite { guests, .. }
             | LobbyPhase::AcceptingGuestConnection { guests, .. }
@@ -738,12 +767,12 @@ impl LobbyState {
             for peer in &pending {
                 let _ = self.discovery.send_decline(peer);
             }
-            self.phase = LobbyPhase::Discovering { guests };
+            self.phase = discovering_with(guests);
             return;
         }
         let mut pending = pending;
         self.phase = if pending.is_empty() {
-            LobbyPhase::Discovering { guests }
+            discovering_with(guests)
         } else {
             let from = pending.remove(0);
             LobbyPhase::IncomingInvite {
@@ -776,6 +805,23 @@ impl LobbyState {
         };
     }
 
+    /// このルームへ混ぜるAI(#300)の人数を1人増やす/減らす。
+    ///
+    /// 上限は「自分+ゲスト+AIが`ROOM_MAX_PLAYERS`に収まる人数」。`Discovering`以外の
+    /// フェーズでは何もしない(AIの枠を持たないため)。
+    fn adjust_room_ai_count(&mut self, increase: bool) {
+        let LobbyPhase::Discovering { guests, ai_count } = &mut self.phase else {
+            return;
+        };
+        let max = ROOM_MAX_PLAYERS.saturating_sub(1 + guests.len());
+        let next = if increase {
+            *ai_count + 1
+        } else {
+            ai_count.saturating_sub(1)
+        };
+        *ai_count = next.min(max);
+    }
+
     fn move_selection(&mut self, forward: bool) {
         let len = self.discovery.peers().len();
         if len == 0 {
@@ -800,7 +846,18 @@ impl LobbyState {
 
 /// ゲストを迎えていない探索フェーズ。
 fn discovering() -> LobbyPhase {
-    LobbyPhase::Discovering { guests: Vec::new() }
+    discovering_with(Vec::new())
+}
+
+/// 迎え入れ済みのゲストを持って探索フェーズへ戻る。
+///
+/// AIの枠(#300)は`LobbyPhase::Discovering`だけが持つ値のため、他のフェーズを経由して
+/// 戻ってきたときは0(AIを追加しない)に戻る。
+fn discovering_with(guests: Vec<HostedGuest>) -> LobbyPhase {
+    LobbyPhase::Discovering {
+        guests,
+        ai_count: 0,
+    }
 }
 
 /// 短い通知フェーズを作る。`guests`は通知を抜けた後、探索フェーズへそのまま
@@ -1069,6 +1126,12 @@ mod tests {
     /// `names`と同じ順で返す。探索→参加リクエスト→許可→ルーム参加→開始(Tab)→メッシュ
     /// 確立まで実際の通信で進める。
     fn run_room_of(names: &[&str]) -> Vec<Vec<String>> {
+        run_room_of_with_ai(names, 0)
+    }
+
+    /// `run_room_of`のAIあり版(#300)。ホストは全員が加わった後にAIを`ai_count`人
+    /// 追加(I)してから開始する。
+    fn run_room_of_with_ai(names: &[&str], ai_count: usize) -> Vec<Vec<String>> {
         let mut lobbies = facing_lobbies_of(names);
         discover_all(&mut lobbies);
         for (lobby, name) in lobbies.iter().zip(names) {
@@ -1097,6 +1160,17 @@ mod tests {
             joined,
             names[1..],
             "迎え入れた順はリクエストを送った順のはず"
+        );
+
+        // AIの枠(#300)は全員が加わった後に増やす(ゲストを迎える途中で`Discovering`を
+        // 抜けるため、その間に増やしても0へ戻る)。
+        for _ in 0..ai_count {
+            host.update(&[InputAction::IncreaseRoomAiCount], test_config());
+        }
+        assert_eq!(
+            host.room_ai_count(),
+            ai_count,
+            "前提: ホストはAIを{ai_count}人ぶん追加できているはず"
         );
 
         // 開始操作(Tab)はメッシュ確立までブロックするため、ゲスト側は別スレッドで回す。
@@ -1164,12 +1238,13 @@ mod tests {
                 HostedGuest::for_test("g2"),
                 HostedGuest::for_test("g3"),
             ],
+            ai_count: 0,
         });
 
         lobby.update(&[InputAction::Confirm], test_config());
 
         assert!(
-            matches!(lobby.phase(), LobbyPhase::Discovering { guests } if guests.len() == 3),
+            matches!(lobby.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 3),
             "上限に達している間はConfirmしても応答待ちへ移らないはず"
         );
     }
@@ -1367,6 +1442,7 @@ mod tests {
                 HostedGuest::for_test("g2"),
                 HostedGuest::for_test("g3"),
             ],
+            ai_count: 0,
         });
 
         invite_by_name(&mut other, "host");
@@ -1380,7 +1456,7 @@ mod tests {
         }
 
         assert!(
-            matches!(host.phase(), LobbyPhase::Discovering { guests } if guests.len() == 3),
+            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 3),
             "満員のホストは確認画面へ移らず、集めたルームを保ったままのはず"
         );
         assert!(
@@ -1397,6 +1473,7 @@ mod tests {
         discover_each_other(&mut host, &mut other);
         host.set_phase(LobbyPhase::Discovering {
             guests: vec![HostedGuest::for_test("joined")],
+            ai_count: 0,
         });
 
         invite_by_name(&mut other, "host");
@@ -1519,7 +1596,7 @@ mod tests {
         lobby.update(&[], test_config());
 
         assert!(
-            matches!(lobby.phase(), LobbyPhase::Discovering { guests } if guests.len() == 1 && guests[0].name() == "already-joined"),
+            matches!(lobby.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 1 && guests[0].name() == "already-joined"),
             "通知を抜けた後も既に迎えていたゲストが残っているはず"
         );
     }
@@ -1618,7 +1695,7 @@ mod tests {
         }
 
         assert!(
-            matches!(host.phase(), LobbyPhase::Discovering { guests } if guests.is_empty()),
+            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.is_empty()),
             "開始要求は無視され、探索を続けているはず"
         );
     }
@@ -1690,6 +1767,7 @@ mod tests {
                 HostedGuest::for_test("already-1"),
                 HostedGuest::for_test("already-2"),
             ],
+            ai_count: 0,
         });
 
         invite_by_name(guest_a, "host");
@@ -1730,6 +1808,126 @@ mod tests {
         assert!(
             matches!(declined.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
             "満員後に順番が回ってきた側は断られるはず"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ルームへ混ぜるAI(#300)。#296のAI対戦(V)とは別で、通信ありのルームに
+    // 「接続を持たない参加者」を足す。
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_room_starts_with_no_ai_and_the_keys_add_and_remove_one_at_a_time() {
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::Discovering {
+            guests: vec![HostedGuest::for_test("g1")],
+            ai_count: 0,
+        });
+        assert_eq!(lobby.room_ai_count(), 0, "初期値はAIなし");
+
+        lobby.update(&[InputAction::IncreaseRoomAiCount], test_config());
+        assert_eq!(lobby.room_ai_count(), 1);
+
+        lobby.update(&[InputAction::IncreaseRoomAiCount], test_config());
+        assert_eq!(lobby.room_ai_count(), 2, "自分+ゲスト1人+AI2人=4人まで");
+
+        lobby.update(&[InputAction::DecreaseRoomAiCount], test_config());
+        assert_eq!(lobby.room_ai_count(), 1);
+
+        lobby.update(&[InputAction::DecreaseRoomAiCount], test_config());
+        lobby.update(&[InputAction::DecreaseRoomAiCount], test_config());
+        assert_eq!(lobby.room_ai_count(), 0, "0より下へは減らないはず");
+    }
+
+    #[test]
+    fn the_ai_count_stops_so_that_the_room_stays_within_its_capacity() {
+        // 自分+ゲスト+AIが`ROOM_MAX_PLAYERS`(4人)に収まる人数で止まる。
+        for guest_count in 0..ROOM_MAX_PLAYERS {
+            let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+            let guests = (0..guest_count)
+                .map(|index| HostedGuest::for_test(&format!("g{index}")))
+                .collect();
+            lobby.set_phase(LobbyPhase::Discovering {
+                guests,
+                ai_count: 0,
+            });
+
+            for _ in 0..ROOM_MAX_PLAYERS + 1 {
+                lobby.update(&[InputAction::IncreaseRoomAiCount], test_config());
+            }
+
+            assert_eq!(
+                lobby.room_ai_count(),
+                ROOM_MAX_PLAYERS - 1 - guest_count,
+                "ゲスト{guest_count}人なら残り枠ぶんまでしか増えないはず"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ai_count_keys_do_nothing_outside_the_room() {
+        // AIの枠を持つのは`Discovering`だけ。#296の人数選択(V)の値を巻き込まないこと。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 1 });
+
+        lobby.update(&[InputAction::IncreaseRoomAiCount], test_config());
+
+        assert!(
+            matches!(
+                lobby.phase(),
+                LobbyPhase::SelectingAiOpponentCount { ai_count: 1 }
+            ),
+            "#296の人数選択は動かないはず"
+        );
+        assert_eq!(lobby.room_ai_count(), 0, "ルームのAIの枠も0のままのはず");
+    }
+
+    #[test]
+    fn a_room_with_an_ai_lists_it_after_the_guests_for_everyone() {
+        // ホスト+ゲスト1人+AI1人。AIはrosterの末尾に並び、ゲストからも同じ名前で見える
+        // (代理送信のroom内インデックスが全員で一致している必要があるため)。
+        let names = run_room_of_with_ai(&["host", "guest"], 1);
+
+        assert_eq!(
+            names[0],
+            vec![
+                "host".to_string(),
+                "guest".to_string(),
+                room::ai_member_name(1)
+            ]
+        );
+        assert_eq!(
+            names[1],
+            vec![
+                "guest".to_string(),
+                "host".to_string(),
+                room::ai_member_name(1)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_room_can_be_filled_up_with_more_than_one_ai() {
+        // ホスト+ゲスト1人+AI2人で`ROOM_MAX_PLAYERS`(4人)ぴったり。
+        let names = run_room_of_with_ai(&["host", "guest"], 2);
+
+        assert_eq!(
+            names[0],
+            vec![
+                "host".to_string(),
+                "guest".to_string(),
+                room::ai_member_name(1),
+                room::ai_member_name(2)
+            ]
+        );
+        assert_eq!(
+            names[1],
+            vec![
+                "guest".to_string(),
+                "host".to_string(),
+                room::ai_member_name(1),
+                room::ai_member_name(2)
+            ]
         );
     }
 }

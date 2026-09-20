@@ -39,6 +39,10 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         KeyCode::Tab => InputAction::StartRoom,
         // AI対戦モードの開始(#296)。V=vs AI。
         KeyCode::Char('v') | KeyCode::Char('V') => InputAction::StartAiBattle,
+        // ルームへ混ぜるAIの人数(#300)。I=Increase、D=Decrease。#296のVとは別物
+        // (Vは通信を使わないAI対戦の開始、こちらは通信ありのルームの枠の増減)。
+        KeyCode::Char('i') | KeyCode::Char('I') => InputAction::IncreaseRoomAiCount,
+        KeyCode::Char('d') | KeyCode::Char('D') => InputAction::DecreaseRoomAiCount,
         // フレーム巻き戻し(TERM独自拡張。#233)。押しやすい位置のBackspaceと、
         // Undoを連想できるUキーの両方に割り当てる(どちらも他のショートカットと衝突しない)。
         KeyCode::Backspace | KeyCode::Char('u') | KeyCode::Char('U') => InputAction::Rewind,
@@ -543,6 +547,81 @@ mod tests {
                 action_from_key_code(key),
                 InputAction::StartAiBattle,
                 "{key:?}がAI対戦の開始に奪われている"
+            );
+        }
+    }
+
+    #[test]
+    fn action_from_key_code_maps_the_room_ai_count_keys() {
+        // #300: I=増やす、D=減らす(大文字小文字とも)。
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('i')),
+            InputAction::IncreaseRoomAiCount
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('I')),
+            InputAction::IncreaseRoomAiCount
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('d')),
+            InputAction::DecreaseRoomAiCount
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('D')),
+            InputAction::DecreaseRoomAiCount
+        );
+    }
+
+    #[test]
+    fn the_room_ai_count_keys_do_not_collide_with_any_other_shortcut() {
+        // #300でI/Dキーを追加する際、既存のショートカットを奪っていないことを確認する。
+        // 特にロビーで同時に使うEnter(申し込む)・Esc(戻る)・矢印(選択)・Tab(ルーム開始)・
+        // V(#296のAI対戦)と別物であること。
+        let existing_keys = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Char('z'),
+            KeyCode::Char('p'),
+            KeyCode::Char('u'),
+            KeyCode::Char('m'),
+            KeyCode::Char('e'),
+            KeyCode::Char('s'),
+            KeyCode::Char('h'),
+            KeyCode::Char('c'),
+            KeyCode::Char('l'),
+            KeyCode::Char('a'),
+            KeyCode::Char('r'),
+            KeyCode::Char('k'),
+            KeyCode::Char('b'),
+            KeyCode::Char('o'),
+            KeyCode::Char('t'),
+            KeyCode::Char('g'),
+            KeyCode::Char('v'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Char('-'),
+            KeyCode::Char('='),
+            KeyCode::Char(','),
+            KeyCode::Char('.'),
+        ];
+        for key in existing_keys {
+            assert_ne!(
+                action_from_key_code(key),
+                InputAction::IncreaseRoomAiCount,
+                "{key:?}がAIの人数を増やす操作に奪われている"
+            );
+            assert_ne!(
+                action_from_key_code(key),
+                InputAction::DecreaseRoomAiCount,
+                "{key:?}がAIの人数を減らす操作に奪われている"
             );
         }
     }

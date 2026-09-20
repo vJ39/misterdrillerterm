@@ -67,6 +67,9 @@ pub enum GameMessage {
     /// TCPが順序を保証するため、送った順=適用される順になる。
     Input {
         action: NetAction,
+        /// 代理対象のroom内インデックス。`None`なら送信者自身の入力。
+        /// `Some`はホストがAI(#300)の入力を代理送信する場合のみ使う。
+        proxy_for: Option<usize>,
     },
     /// 生存確認のみ(spec.md 12.4)。一定時間これも`Input`も届かなければ切断とみなす。
     Heartbeat,
@@ -74,10 +77,14 @@ pub enum GameMessage {
     /// 自分がまだPlayingのときだけ適用する(spec.md 12.8)。
     Attack {
         amount: u32,
+        /// `Input`と同じ意味。`Some`はホストがAI(#300)の妨害岩を代理送信する場合のみ。
+        proxy_for: Option<usize>,
     },
     Result {
         reached_goal: bool,
         time_ms: u64,
+        /// `Input`と同じ意味。`Some`はホストがAI(#300)の結果を代理送信する場合のみ。
+        proxy_for: Option<usize>,
     },
     Bye,
 }
@@ -88,8 +95,9 @@ pub enum GameMessage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomMember {
     pub name: String,
-    /// メッシュ接続の受け口(IP+ポート)。
-    pub mesh_addr: SocketAddr,
+    /// メッシュ接続の受け口(IP+ポート)。`None`はAI(#300。ホストがローカルで操作し、
+    /// 入力・妨害岩・結果を代理送信する追加参加者。実際のTCP接続を持たない)。
+    pub mesh_addr: Option<SocketAddr>,
 }
 
 /// 1章の`InputAction`のうちネットワーク同期に必要な要素のみを送る(spec.md 12.2)。
@@ -603,12 +611,17 @@ mod tests {
             members: vec![
                 RoomMember {
                     name: "主催者".to_string(),
-                    mesh_addr: "127.0.0.1:39394".parse().unwrap(),
+                    mesh_addr: Some("127.0.0.1:39394".parse().unwrap()),
                 },
                 RoomMember {
                     name: "参加者".to_string(),
                     // IPv6の参加者が混じっても同じ並びで運べること。
-                    mesh_addr: "[::1]:39395".parse().unwrap(),
+                    mesh_addr: Some("[::1]:39395".parse().unwrap()),
+                },
+                RoomMember {
+                    // #300: 接続先を持たないAIの枠も同じ並びで運べること。
+                    name: "AI 1".to_string(),
+                    mesh_addr: None,
                 },
             ],
             your_index: 1,
@@ -622,12 +635,31 @@ mod tests {
         });
         assert_round_trips(&GameMessage::Input {
             action: NetAction::Drill,
+            proxy_for: None,
         });
         assert_round_trips(&GameMessage::Heartbeat);
-        assert_round_trips(&GameMessage::Attack { amount: 3 });
+        assert_round_trips(&GameMessage::Attack {
+            amount: 3,
+            proxy_for: None,
+        });
         assert_round_trips(&GameMessage::Result {
             reached_goal: true,
             time_ms: 56_789,
+            proxy_for: None,
+        });
+        // #300: AIの代理送信(room内インデックス付き)も同じフレーミングで運べること。
+        assert_round_trips(&GameMessage::Input {
+            action: NetAction::MoveLeft,
+            proxy_for: Some(3),
+        });
+        assert_round_trips(&GameMessage::Attack {
+            amount: 5,
+            proxy_for: Some(2),
+        });
+        assert_round_trips(&GameMessage::Result {
+            reached_goal: false,
+            time_ms: 12_345,
+            proxy_for: Some(1),
         });
         assert_round_trips(&GameMessage::Bye);
     }
@@ -922,6 +954,7 @@ mod tests {
             &mut client,
             &GameMessage::Input {
                 action: NetAction::Drill,
+                proxy_for: None,
             },
         )
         .unwrap();
@@ -934,7 +967,8 @@ mod tests {
         assert!(matches!(
             recv_event(&rx),
             NetworkEvent::Message(GameMessage::Input {
-                action: NetAction::Drill
+                action: NetAction::Drill,
+                proxy_for: None
             })
         ));
         assert!(

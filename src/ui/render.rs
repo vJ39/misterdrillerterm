@@ -68,9 +68,6 @@ const PLAYER_NAME_INPUT_BOX_H: u16 = 8;
 /// ダイアログ等、中央に出る他のオーバーレイと重ならないようにするため)。
 const REWIND_OVERLAY_H: u16 = 4;
 
-/// 対戦画面(#252)の相手パネルで1人ぶんに使う行数(名前・深度/ライフ・進捗バー)。
-const BATTLE_OPPONENT_PANEL_ROWS_PER_PLAYER: u16 = 3;
-
 /// 対戦の待機中オーバーレイ(#302)の横幅(`centered_rect`のパーセント指定)。覆い隠す対象の
 /// GameOverダイアログ(幅40%)より広く、かつ相手パネル(#290)を余計に隠さない程度に留める。
 /// 縦幅はダイアログ側の`game_over_overlay_percent_y`から引くため、ここには持たない。
@@ -325,16 +322,23 @@ pub fn draw_battle(
 
     let plan = compute_layout(area, game_local.board.width());
 
-    // 他の参加者の位置を自分の盤面へ重ねる(#301)。相手パネルより先に描き、パネルと
-    // 重なる位置のゴーストはパネルの裏に隠れるようにする。
+    // 相手パネル(#290)が画面下端を占める行数。ゴースト(#301)の画面外矢印は本来
+    // 盤面の下端に出るが、それだとパネルの裏に隠れて見えなくなる(実機で発見)。
+    // パネルの開始位置より下には矢印を描かせないことで、常に見える位置へ収める。
+    let panel_area = bottom_anchored_rect(
+        90,
+        battle_opponent_panel_h(other_games.len()),
+        plan.game_frame,
+    );
     draw_opponent_ghosts(
         frame.buffer_mut(),
         plan.field_rect,
         plan.visible_rows,
         game_local,
         other_games,
+        panel_area.y,
     );
-    draw_battle_opponent_panel(frame, plan.game_frame, other_games, opponent_names);
+    draw_battle_opponent_panel(frame, panel_area, other_games, opponent_names);
 
     // 自分が力尽きても、対戦は全員の結果がそろうまで決着しない(#289)。その間は通常プレイの
     // GameOverダイアログ(タイトルへ戻る/その場から復活)の操作を`tick_battle`が受け付け
@@ -363,18 +367,19 @@ pub fn draw_battle(
     }
 }
 
-/// 相手パネルの高さ(行数)。自分以外の参加者ぶんを縦に積み、上下ボーダー2行を足す(#290)。
-/// 巻き戻し中オーバーレイと同じく画面下端に寄せる。
+/// 相手パネルの高さ(行数)。自分以外の参加者を1人1行で縦に積み、上下ボーダー2行を
+/// 足す(#290/#305)。巻き戻し中オーバーレイと同じく画面下端に寄せる。
 fn battle_opponent_panel_h(opponent_count: usize) -> u16 {
-    opponent_count as u16 * BATTLE_OPPONENT_PANEL_ROWS_PER_PLAYER + 2
+    opponent_count as u16 + 2
 }
 
-/// 相手パネル(#252)。自分以外の全参加者を1人3行(名前・深度/ライフ・進捗バー)で縦に
-/// 積む(#290)。見出しの色と番号は自分の盤面のゴースト(#301)と揃えて、どの行がどの
-/// ゴーストなのかを対応づけられるようにする。
+/// 相手パネル(#252)。自分以外の全参加者を1人1行(名前・深度・ライフ・進捗率)に圧縮して
+/// 縦に積む(#290/#305。3人以上だと3行×人数が画面を占有しすぎたため、1行化した)。
+/// 見出しの色と番号は自分の盤面のゴースト(#301)と揃えて、どの行がどのゴーストなのかを
+/// 対応づけられるようにする。
 fn draw_battle_opponent_panel(
     frame: &mut Frame,
-    game_frame: Rect,
+    panel_area: Rect,
     other_games: &[Game],
     opponent_names: &[String],
 ) {
@@ -382,13 +387,8 @@ fn draw_battle_opponent_panel(
         return;
     }
 
-    let panel_area =
-        bottom_anchored_rect(90, battle_opponent_panel_h(other_games.len()), game_frame);
     frame.render_widget(Clear, panel_area);
 
-    let text_style = Style::default()
-        .fg(colors::PANEL_TEXT)
-        .bg(colors::LETTERBOX_BG);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -398,8 +398,7 @@ fn draw_battle_opponent_panel(
         )
         .style(Style::default().bg(colors::LETTERBOX_BG));
 
-    let mut lines =
-        Vec::with_capacity(other_games.len() * BATTLE_OPPONENT_PANEL_ROWS_PER_PLAYER as usize);
+    let mut lines = Vec::with_capacity(other_games.len());
     for (index, game) in other_games.iter().enumerate() {
         // `other_games`と`opponent_names`は同じindexで対応する。
         let name = opponent_names.get(index).map_or("", String::as_str);
@@ -408,22 +407,15 @@ fn draw_battle_opponent_panel(
             .bg(colors::LETTERBOX_BG);
         let depth_m = game.player.depth_m();
         let ratio = battle_progress_ratio(depth_m, game.depth_goal_m());
+        let percent = (ratio * 100.0).round() as u32;
 
         lines.push(Line::from(Span::styled(
-            format!("[{}] OPPONENT: {name}", ghost_marker_glyph(index)),
-            heading_style,
-        )));
-        lines.push(Line::from(Span::styled(
             format!(
-                "DEPTH {depth_m} m   LIVES \u{2665} \u{d7}{}",
+                "[{}] {name}  {depth_m}m \u{2665}\u{d7}{}  {percent}%",
+                ghost_marker_glyph(index),
                 game.player.lives
             ),
-            text_style,
-        )));
-        // 進捗バーは酸素ゲージ(9.7)と同じ`[####░░░░░░] 42%`の書式を使う。
-        lines.push(Line::from(Span::styled(
-            air_gauge_string(ratio, (ratio * 100.0).round() as u32),
-            text_style,
+            heading_style,
         )));
     }
 
@@ -543,6 +535,12 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
             }
             // 相手が見つからなくても遊べる入口(#296)。通信は使わない。
             lines.push(line("V: AIと対戦".to_string()));
+            // 人間の参加者にAIを混ぜる枠(#300)。1つ上のV(通信を使わないAI対戦)とは
+            // 別物なので、「このルームに」「通信あり」と書いて取り違えを防ぐ。
+            lines.push(line(format!(
+                "I/D: このルームにAIを追加(通信あり) 今{}人",
+                lobby.room_ai_count()
+            )));
         }
         LobbyPhase::SelectingAiOpponentCount { ai_count } => {
             lines.push(heading("== AIと対戦 =="));
@@ -1752,6 +1750,7 @@ fn draw_opponent_ghosts(
     visible_rows: usize,
     game_local: &Game,
     other_games: &[Game],
+    panel_top_y: u16,
 ) {
     if other_games.is_empty() || visible_rows == 0 {
         return;
@@ -1772,7 +1771,15 @@ fn draw_opponent_ghosts(
             None => {
                 // 自分より浅い位置なら上端、深い位置なら下端に矢印を出す。
                 let above = (row as f32) < cam_row_f;
-                draw_off_screen_ghost_marker(buf, inner, visible_rows, col, marker, fg, above);
+                draw_off_screen_ghost_marker(
+                    buf,
+                    inner,
+                    visible_rows,
+                    col,
+                    (marker, fg),
+                    above,
+                    panel_top_y,
+                );
             }
         }
     }
@@ -1795,15 +1802,19 @@ fn draw_ghost_sprite(buf: &mut Buffer, x: u16, y: u16, marker: char, fg: Color) 
 }
 
 /// 可視範囲の外にいる相手を、その列の画面上端(`above`)または下端に矢印で示す(#301)。
+/// 下向き矢印は相手パネル(#290)より上(`panel_top_y`未満)に収める。パネルは盤面の下端に
+/// 重なるように置かれるため、そのままだと矢印がパネルの裏に隠れて見えなくなる
+/// (実機で発見)。
 fn draw_off_screen_ghost_marker(
     buf: &mut Buffer,
     inner: Rect,
     visible_rows: usize,
     col: usize,
-    marker: char,
-    fg: Color,
+    glyph: (char, Color),
     above: bool,
+    panel_top_y: u16,
 ) {
+    let (marker, fg) = glyph;
     let x = inner.x + col as u16 * CELL_W;
     if x + CELL_W > inner.x + inner.width {
         return;
@@ -1813,7 +1824,11 @@ fn draw_off_screen_ghost_marker(
     if grid_h == 0 {
         return;
     }
-    let y = if above { inner.y } else { inner.y + grid_h - 1 };
+    let y = if above {
+        inner.y
+    } else {
+        (inner.y + grid_h - 1).min(panel_top_y.saturating_sub(1))
+    };
     let arrow = if above { '\u{2191}' } else { '\u{2193}' };
     for (dx, ch) in [arrow, marker, marker, arrow].into_iter().enumerate() {
         put_fg(buf, x + dx as u16, y, ch, fg);
@@ -4120,6 +4135,7 @@ mod tests {
                 crate::lobby::HostedGuest::for_test("Player-3c4d"),
                 crate::lobby::HostedGuest::for_test("Player-5e6f"),
             ],
+            ai_count: 0,
         });
 
         let text = render_network_lobby(&lobby);
@@ -4362,7 +4378,7 @@ mod tests {
                 "{rank}位: 抜け方の案内が出ていない:\n{text}"
             );
             assert!(
-                screen_shows(&text, "OPPONENT: opponent"),
+                screen_shows(&text, "opponent"),
                 "{rank}位: 相手パネルは結果表示中も残るはず:\n{text}"
             );
         }
@@ -4407,16 +4423,16 @@ mod tests {
 
         for (index, name) in names.iter().enumerate() {
             assert!(
-                screen_shows(&text, &format!("OPPONENT: {name}")),
+                screen_shows(&text, name),
                 "{name}の名前がパネルに出ていない:\n{text}"
             );
             let depth_m = others[index].player.depth_m();
             assert!(
-                screen_shows(&text, &format!("DEPTH {depth_m} m")),
+                screen_shows(&text, &format!("{depth_m}m")),
                 "{name}の深度({depth_m}m)がパネルに出ていない:\n{text}"
             );
             assert!(
-                screen_shows(&text, &format!("\u{d7}{}", others[index].player.lives)),
+                screen_shows(&text, &format!("\u{2665}\u{d7}{}", others[index].player.lives)),
                 "{name}のライフがパネルに出ていない:\n{text}"
             );
         }
@@ -4424,10 +4440,10 @@ mod tests {
 
     #[test]
     fn the_battle_opponent_panel_grows_with_the_number_of_players() {
-        // パネルの高さは人数ぶん(1人3行)+上下ボーダー2行。
-        assert_eq!(battle_opponent_panel_h(1), 5);
-        assert_eq!(battle_opponent_panel_h(2), 8);
-        assert_eq!(battle_opponent_panel_h(3), 11);
+        // パネルの高さは人数ぶん(1人1行、#305)+上下ボーダー2行。
+        assert_eq!(battle_opponent_panel_h(1), 3);
+        assert_eq!(battle_opponent_panel_h(2), 4);
+        assert_eq!(battle_opponent_panel_h(3), 5);
     }
 
     #[test]
@@ -4465,7 +4481,15 @@ mod tests {
 
         let field_rect = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(field_rect);
-        draw_opponent_ghosts(&mut buf, field_rect, visible_rows, &local, &others);
+        draw_opponent_ghosts(
+            &mut buf,
+            field_rect,
+            visible_rows,
+            &local,
+            &others,
+            // 相手パネルを置かない場合と同じく、盤面の下端まで矢印を出せる位置にする。
+            field_rect.bottom(),
+        );
 
         let inner = Block::default().borders(Borders::ALL).inner(field_rect);
         for (index, other) in others.iter().enumerate() {
@@ -4508,7 +4532,15 @@ mod tests {
             cell_screen_pos(inner, cam_row_f, visible_rows, 101, 3).expect("可視範囲内のはず");
         fill_block(&mut buf, x, y, colors::ROCK_BG_INTACT);
 
-        draw_opponent_ghosts(&mut buf, field_rect, visible_rows, &local, &others);
+        draw_opponent_ghosts(
+            &mut buf,
+            field_rect,
+            visible_rows,
+            &local,
+            &others,
+            // 相手パネルを置かない場合と同じく、盤面の下端まで矢印を出せる位置にする。
+            field_rect.bottom(),
+        );
 
         assert_eq!(
             buf.cell(Position::new(x, y)).unwrap().bg,
@@ -4528,7 +4560,15 @@ mod tests {
 
         let field_rect = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(field_rect);
-        draw_opponent_ghosts(&mut buf, field_rect, visible_rows, &local, &others);
+        draw_opponent_ghosts(
+            &mut buf,
+            field_rect,
+            visible_rows,
+            &local,
+            &others,
+            // 相手パネルを置かない場合と同じく、盤面の下端まで矢印を出せる位置にする。
+            field_rect.bottom(),
+        );
 
         let inner = Block::default().borders(Borders::ALL).inner(field_rect);
         let symbol_at = |buf: &Buffer, x: u16, y: u16| {

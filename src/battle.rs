@@ -54,10 +54,17 @@ pub struct BattleState {
     /// このフレームまでに自分(`games[0]`)が発生させた`GameEvent`(#295)。呼び出し元
     /// (`tick_battle`)がSE再生に使うため、消費されるまで溜めておく。
     pending_local_events: Vec<GameEvent>,
-    /// ローカルAI対戦(#296)のAI操作主体。`games[1..]`と同じ並びで対応する。空なら
-    /// 通常のローカル専用/通信ありの対戦(AIなし)。`peers`と両方Someになることはない
-    /// (AI対戦は通信を使わないため)。
-    ai_pilots: Vec<Autopilot>,
+    /// AI操作主体。`games[1..]`と同じ並びで対応し、AIの枠だけ`Some`。空なら
+    /// AIのいない対戦(ローカル専用/通信あり)。
+    ///
+    /// ローカルAI対戦(#296)では全要素が`Some`になる。#300でルームへAIを追加できるように
+    /// したため、`peers`と両方`Some`(通信ありのルームにAIが混ざる)という組み合わせも
+    /// あり得る。その場合`Some`なのはホスト(room内インデックス0)だけで、ゲストは
+    /// ホストからの代理送信でAIの盤面を進めるため`None`のままにする(両方が`decide`を
+    /// 呼ぶと同じAIの操作が二重に適用されてしまう)。
+    ai_pilots: Vec<Option<Autopilot>>,
+    /// AIの枠ごとの`Result`代理送信済みフラグ(#300)。`ai_pilots`と同じ並びで対応する。
+    ai_result_sent: Vec<bool>,
     /// 各参加者の表示名。`games`と同じindexで対応する(index 0が自分)。
     pub player_names: Vec<String>,
     /// 確定した順位(1が1位)。`games`と同じindexで対応する。全参加者が結果
@@ -70,7 +77,16 @@ pub struct BattleState {
     /// 自分以外の各参加者との通信路(#274)。`peers[i]`は`games[i+1]`に対応する
     /// (自分が`games[0]`なので、`games[1..]`と`peers[0..]`が1対1)。`None`なら通信なしで、
     /// 他の参加者は操作されないローカル専用の動作(#252/#273のテストと#296のAI対戦の前提)。
-    peers: Option<Vec<PeerLink>>,
+    ///
+    /// `peers[i]`が`None`なら`games[i+1]`はAI(#300)で、TCP接続を持たない。
+    peers: Option<Vec<Option<PeerLink>>>,
+    /// 自分のroom内インデックス(#300)。`games`上のindexとroom内インデックスの変換
+    /// (`games_index_for_room_index`/`room_index_for_games_index`)に使う。通信なしの
+    /// 対戦では意味を持たないため0。
+    my_room_index: usize,
+    /// 対戦開始時刻(ハンドシェイクの`StartCountdown`の値)。AI(#300)の`Result`を代理送信
+    /// するときの経過時間の算出に使う(`PeerLink::start_at_unix_ms`と同じ値)。
+    start_at_unix_ms: u64,
 }
 
 /// 対戦相手1人との通信路(#274。#254の`NetworkLink`を複数保持できるよう改名した)。
@@ -138,10 +154,13 @@ impl BattleState {
             games,
             pending_local_events: Vec::new(),
             ai_pilots: Vec::new(),
+            ai_result_sent: Vec::new(),
             player_names,
             ranks: vec![None; player_count],
             outcome: None,
             peers: None,
+            my_room_index: 0,
+            start_at_unix_ms: 0,
         }
     }
 
@@ -153,7 +172,11 @@ impl BattleState {
         // AIは無敵に頼らず素で戦わせる(#221の通常AIをそのまま使う)。`Autopilot::new`の
         // 引数は「オートプレイを抜けるときに戻す無敵状態」で、対戦では抜ける操作が
         // 無いため常にfalseでよい。
-        let ai_pilots = ai_games.iter().map(|_| Autopilot::new(false)).collect();
+        let ai_pilots: Vec<Option<Autopilot>> = ai_games
+            .iter()
+            .map(|_| Some(Autopilot::new(false)))
+            .collect();
+        let ai_result_sent = vec![false; ai_pilots.len()];
         let mut games = Vec::with_capacity(ai_games.len() + 1);
         games.push(human_game);
         games.extend(ai_games);
@@ -167,10 +190,13 @@ impl BattleState {
             games,
             pending_local_events: Vec::new(),
             ai_pilots,
+            ai_result_sent,
             player_names,
             ranks: vec![None; player_count],
             outcome: None,
             peers: None,
+            my_room_index: 0,
+            start_at_unix_ms: 0,
         }
     }
 
@@ -180,12 +206,17 @@ impl BattleState {
     /// 自分以外の各参加者との接続(`games`のindex 1..と対応する順)。`start_at_unix_ms`は
     /// ハンドシェイクで合意した開始時刻(`Result`送信時の経過時間の算出に使う)。
     ///
+    /// #300: `streams[i]`が`None`なら`games[i+1]`はAI(接続を持たない追加参加者)。ホスト
+    /// (`my_index`が0)だけがそのAIをローカルで動かし、入力・妨害岩・結果を代理送信する。
+    /// `my_index`は自分のroom内インデックスで、代理送信の宛先変換に使う。
+    ///
     /// 接続の確立自体(誰が誰へ繋ぐか・configとseedの配布)は呼び出し元の責務で、N人分の
     /// ハンドシェイクは段階C(#275)で実装する。
     pub fn from_peer_streams(
         games: Vec<Game>,
         player_names: Vec<String>,
-        streams: Vec<TcpStream>,
+        streams: Vec<Option<TcpStream>>,
+        my_index: usize,
         start_at_unix_ms: u64,
     ) -> io::Result<Self> {
         debug_assert_eq!(
@@ -199,20 +230,60 @@ impl BattleState {
             "接続は自分以外の参加者ぶん必要"
         );
         let player_count = games.len();
+        // #300: AIの枠(接続なし)を動かすのはホストだけ。ゲストはホストからの代理送信で
+        // その盤面を進めるため`Autopilot`を持たない。
+        let ai_pilots: Vec<Option<Autopilot>> = streams
+            .iter()
+            .map(|stream| {
+                // `Autopilot::new`の引数は`new_local_vs_ai`と同じ理由で常にfalse。
+                (stream.is_none() && my_index == 0).then(|| Autopilot::new(false))
+            })
+            .collect();
+        let ai_result_sent = vec![false; ai_pilots.len()];
         let peers = streams
             .into_iter()
-            .map(|stream| PeerLink::new(stream, start_at_unix_ms))
-            .collect::<io::Result<Vec<_>>>()?;
+            .map(|stream| {
+                stream
+                    .map(|stream| PeerLink::new(stream, start_at_unix_ms))
+                    .transpose()
+            })
+            .collect::<io::Result<Vec<Option<PeerLink>>>>()?;
 
         Ok(Self {
             games,
             pending_local_events: Vec::new(),
-            ai_pilots: Vec::new(),
+            ai_pilots,
+            ai_result_sent,
             player_names,
             ranks: vec![None; player_count],
             outcome: None,
             peers: Some(peers),
+            my_room_index: my_index,
+            start_at_unix_ms,
         })
+    }
+
+    /// room内インデックスを自分の`games`上のindexへ変換する(#300)。自分は常に`games[0]`で、
+    /// 自分より前のroom内インデックスは1つ後ろへずれる。
+    fn games_index_for_room_index(&self, room_index: usize) -> usize {
+        if room_index == self.my_room_index {
+            0
+        } else if room_index < self.my_room_index {
+            room_index + 1
+        } else {
+            room_index
+        }
+    }
+
+    /// `games`上のindexをroom内インデックスへ変換する(#300。`games_index_for_room_index`の逆)。
+    fn room_index_for_games_index(&self, games_index: usize) -> usize {
+        if games_index == 0 {
+            self.my_room_index
+        } else if games_index <= self.my_room_index {
+            games_index - 1
+        } else {
+            games_index
+        }
     }
 
     /// #253のハンドシェイク結果と確立済みのTCPストリームから、2人対戦の状態を
@@ -240,10 +311,12 @@ impl BattleState {
         ];
         let player_names = vec![my_name.to_string(), handshake.opponent_name];
 
+        // 2人版にAI(#300)は混ざらないため、自分のroom内インデックスは0でよい。
         Self::from_peer_streams(
             games,
             player_names,
-            vec![stream],
+            vec![Some(stream)],
+            0,
             handshake.start_at_unix_ms,
         )
     }
@@ -273,7 +346,8 @@ impl BattleState {
         let Some(peers) = &mut self.peers else {
             return;
         };
-        for peer in peers.iter_mut() {
+        // #300: AIの枠(`None`)は接続を持たないため飛ばす。
+        for peer in peers.iter_mut().flatten() {
             if peer.disconnected {
                 continue;
             }
@@ -357,14 +431,33 @@ impl BattleState {
             self.broadcast_local_input(action);
         }
 
-        // ローカルAI対戦(#296)。1フレームにつき1回分の判断をさせ、その場で
-        // `games[i + 1]`へ直接適用する。decide()が返す複数アクション(向き変更+掘削の
-        // 組み合わせ等)はまとめて適用してよい。
-        for (i, pilot) in self.ai_pilots.iter_mut().enumerate() {
+        // ローカルAI対戦(#296)とルームへ追加したAI(#300)。1フレームにつき1回分の判断を
+        // させ、その場で`games[i + 1]`へ直接適用する。decide()が返す複数アクション
+        // (向き変更+掘削の組み合わせ等)はまとめて適用してよい。
+        //
+        // #300: 通信ありならホストがAIの操作を全peerへ代理送信する。`broadcast`は
+        // `&mut self`が必要で`ai_pilots`の借用中には呼べないため、送るぶんを溜めてから
+        // ループを抜けて送る。
+        let networked = self.peers.is_some();
+        let mut proxy_inputs: Vec<(usize, InputAction)> = Vec::new();
+        for (i, pilot_slot) in self.ai_pilots.iter_mut().enumerate() {
+            let Some(pilot) = pilot_slot else {
+                continue;
+            };
             let ai_actions = pilot.decide(&self.games[i + 1]);
             for ai_action in ai_actions {
                 self.games[i + 1].apply_input(ai_action);
+                if networked {
+                    proxy_inputs.push((i + 1, ai_action));
+                }
             }
+        }
+        for (games_index, action) in proxy_inputs {
+            let Some(action) = Option::<NetAction>::from(action) else {
+                continue;
+            };
+            let proxy_for = Some(self.room_index_for_games_index(games_index));
+            self.broadcast(&GameMessage::Input { action, proxy_for });
         }
 
         // 全員を同じdeltaで進める。ウィンドウ非アクティブ等で大きく空いたフレームは
@@ -392,7 +485,11 @@ impl BattleState {
         let Some(action) = Option::<NetAction>::from(action) else {
             return;
         };
-        self.broadcast(&GameMessage::Input { action });
+        self.broadcast(&GameMessage::Input {
+            action,
+            // 自分自身の入力なので代理送信ではない(#300)。
+            proxy_for: None,
+        });
     }
 
     /// 未切断の全peerへ同じメッセージを送る(#274)。届かなくても相手側は受信の途絶で
@@ -401,7 +498,8 @@ impl BattleState {
         let Some(peers) = &mut self.peers else {
             return;
         };
-        for peer in peers.iter_mut() {
+        // #300: AIの枠(`None`)は接続を持たないため飛ばす。
+        for peer in peers.iter_mut().flatten() {
             if peer.disconnected {
                 continue;
             }
@@ -416,14 +514,29 @@ impl BattleState {
     /// 状態を見て適用するため、送る側は相手の状態を気にしない。自分が持っている他の
     /// 参加者のコピーが溜めたぶんは、正式な`Attack`メッセージと二重に数えないよう
     /// 取り出して捨てる。
+    ///
+    /// #300: ただしAIの枠は他の誰も`Attack`を送ってくれないため、ホストが自分と同じ
+    /// ルール(0より大きいときだけ)で代理送信する。
     fn exchange_attack_power(&mut self) {
         if self.peers.is_some() {
             let amount = self.games[0].take_pending_attack_power();
-            for game in &mut self.games[1..] {
-                let _ = game.take_pending_attack_power();
+            let mut proxy_attacks: Vec<(usize, u32)> = Vec::new();
+            for i in 1..self.games.len() {
+                let pending = self.games[i].take_pending_attack_power();
+                let is_my_ai = self.ai_pilots.get(i - 1).is_some_and(Option::is_some);
+                if is_my_ai && pending > 0 {
+                    proxy_attacks.push((i, pending));
+                }
             }
             if amount > 0 {
-                self.broadcast(&GameMessage::Attack { amount });
+                self.broadcast(&GameMessage::Attack {
+                    amount,
+                    proxy_for: None,
+                });
+            }
+            for (games_index, amount) in proxy_attacks {
+                let proxy_for = Some(self.room_index_for_games_index(games_index));
+                self.broadcast(&GameMessage::Attack { amount, proxy_for });
             }
             return;
         }
@@ -451,6 +564,8 @@ impl BattleState {
     /// そろっていれば順位を確定し、確定していれば自分の結果を送る。
     fn check_results(&mut self) {
         self.settle_disconnected_peers();
+        // #300: AIの枠の結果は、自分の決着とは関係なくその枠が決着した時点で送る。
+        self.maybe_send_ai_results();
         self.update_ranks();
         if self.outcome.is_some() {
             self.maybe_send_results();
@@ -465,8 +580,10 @@ impl BattleState {
     fn settle_disconnected_peers(&mut self) {
         let peer_count = self.peers.as_ref().map_or(0, Vec::len);
         for i in 0..peer_count {
-            let disconnected =
-                self.peers.as_ref().expect("通信ありの経路でのみ呼ばれる")[i].disconnected;
+            // #300: AIの枠(`None`)は接続を持たないため切断し得ない。
+            let disconnected = self.peers.as_ref().expect("通信ありの経路でのみ呼ばれる")[i]
+                .as_ref()
+                .is_some_and(|peer| peer.disconnected);
             if !disconnected || self.ranks[i + 1].is_some() {
                 continue;
             }
@@ -482,7 +599,8 @@ impl BattleState {
         let Some(peers) = &mut self.peers else {
             return;
         };
-        for peer in peers.iter_mut() {
+        // #300: AIの枠(`None`)は接続を持たないため飛ばす。
+        for peer in peers.iter_mut().flatten() {
             if peer.disconnected || peer.last_heartbeat_sent.elapsed() < interval {
                 continue;
             }
@@ -502,33 +620,45 @@ impl BattleState {
             return;
         }
         let heartbeat_timeout = Duration::from_millis(HEARTBEAT_TIMEOUT_MS);
-        // (games上のindex, 適用する操作)。届いた順に並ぶ。
-        let mut remote_inputs: Vec<(usize, InputAction)> = Vec::new();
+        // (送信元peerのgames上のindex, 代理対象のroom内インデックス, 適用する操作)。
+        // 届いた順に並ぶ。`games`上のindexへの変換は`peers`の借用を解いた後に行う(#300)。
+        let mut remote_inputs: Vec<(usize, Option<usize>, InputAction)> = Vec::new();
         // 全peerから届いた妨害岩の合計(#247/#297)。誰から来たかは区別しない。
         let mut incoming_attack: u32 = 0;
-        // (games上のindex, ゴール到達したか)。
-        let mut remote_results: Vec<(usize, bool)> = Vec::new();
+        // (送信元peerのgames上のindex, 代理対象のroom内インデックス, ゴール到達したか)。
+        let mut remote_results: Vec<(usize, Option<usize>, bool)> = Vec::new();
 
         let peers = self.peers.as_mut().expect("通信ありの経路でのみ呼ばれる");
-        for (i, peer) in peers.iter_mut().enumerate() {
+        // #300: AIの枠(`None`)は受信キューを持たないため、`enumerate`の位置だけ保ったまま飛ばす。
+        for (i, peer) in peers
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, peer_slot)| peer_slot.as_mut().map(|peer| (i, peer)))
+        {
             while let Ok(event) = peer.event_rx.try_recv() {
                 match event {
-                    NetworkEvent::Message(GameMessage::Input { action }) => {
+                    NetworkEvent::Message(GameMessage::Input { action, proxy_for }) => {
                         peer.last_remote_activity = Instant::now();
                         if let Some(action) = Option::<InputAction>::from(action) {
-                            remote_inputs.push((i + 1, action));
+                            remote_inputs.push((i + 1, proxy_for, action));
                         }
                     }
                     NetworkEvent::Message(GameMessage::Heartbeat) => {
                         peer.last_remote_activity = Instant::now();
                     }
-                    NetworkEvent::Message(GameMessage::Attack { amount }) => {
+                    // 妨害岩は受け取った側が自分の盤面へ積むため、誰の代理送信
+                    // (`proxy_for`)かで適用先は変わらない(#300)。
+                    NetworkEvent::Message(GameMessage::Attack { amount, .. }) => {
                         peer.last_remote_activity = Instant::now();
                         incoming_attack = incoming_attack.saturating_add(amount);
                     }
-                    NetworkEvent::Message(GameMessage::Result { reached_goal, .. }) => {
+                    NetworkEvent::Message(GameMessage::Result {
+                        reached_goal,
+                        proxy_for,
+                        ..
+                    }) => {
                         peer.last_remote_activity = Instant::now();
-                        remote_results.push((i + 1, reached_goal));
+                        remote_results.push((i + 1, proxy_for, reached_goal));
                     }
                     NetworkEvent::Message(GameMessage::Bye) | NetworkEvent::Disconnected => {
                         peer.disconnected = true;
@@ -545,7 +675,8 @@ impl BattleState {
             }
         }
 
-        for (index, action) in remote_inputs {
+        for (peer_games_index, proxy_for, action) in remote_inputs {
+            let index = self.apply_target_index(peer_games_index, proxy_for);
             // 他の参加者ぶんのイベントはSE再生に使わないため捨てる(#295)。
             self.games[index].apply_input(action);
         }
@@ -559,7 +690,8 @@ impl BattleState {
         // 相手が自己申告した結果は、自分が持つその参加者のコピーより優先する(12.4)。
         // 盤面は各自が独立に進めるため、自分のコピー側がまだプレイ中のまま止まることが
         // あり、そのままでは`update_ranks`の「全員の結果がそろう」条件を満たせない。
-        for (index, reached_goal) in remote_results {
+        for (peer_games_index, proxy_for, reached_goal) in remote_results {
+            let index = self.apply_target_index(peer_games_index, proxy_for);
             if self.games[index].status != GameStatus::Playing {
                 continue;
             }
@@ -571,6 +703,23 @@ impl BattleState {
         }
     }
 
+    /// 受信したメッセージを適用する`games`上のindexを決める(#300)。
+    ///
+    /// `proxy_for`が`Some`ならホストがAIの代理で送ってきたものなので、そのroom内
+    /// インデックスに対応する盤面へ。`None`なら従来通り送信元(このpeer)の盤面へ。
+    /// 変換した結果が範囲外の場合は、壊れた値で別の参加者の盤面を動かさないよう
+    /// 送信元の盤面へ落とす。
+    fn apply_target_index(&self, peer_games_index: usize, proxy_for: Option<usize>) -> usize {
+        let Some(room_index) = proxy_for else {
+            return peer_games_index;
+        };
+        let index = self.games_index_for_room_index(room_index);
+        if index == 0 || index >= self.games.len() {
+            return peer_games_index;
+        }
+        index
+    }
+
     /// 決着直後に自分の`Result`を、未切断の各peerへ1回だけ送る(12.4。勝敗判定の根拠では
     /// なく相互確認用)。
     fn maybe_send_results(&mut self) {
@@ -578,7 +727,8 @@ impl BattleState {
         let Some(peers) = &mut self.peers else {
             return;
         };
-        for peer in peers.iter_mut() {
+        // #300: AIの枠(`None`)は接続を持たないため飛ばす。
+        for peer in peers.iter_mut().flatten() {
             if peer.result_sent || peer.disconnected {
                 continue;
             }
@@ -590,8 +740,42 @@ impl BattleState {
                 &GameMessage::Result {
                     reached_goal,
                     time_ms,
+                    // 自分自身の結果なので代理送信ではない(#300)。
+                    proxy_for: None,
                 },
             );
+        }
+    }
+
+    /// ルームへ追加したAI(#300)の`Result`を、その枠が決着した時に一度だけ代理送信する。
+    ///
+    /// AIの枠は他の参加者から見ると「ホストが操作する追加の参加者」で、自己申告の
+    /// `Result`を送ってくるのはホストだけ。これが無いと他の参加者の`update_ranks`が
+    /// 「全員が結果を出しそろった」条件を満たせない。自分の`Result`(`maybe_send_results`)と
+    /// 違い、自分の決着とは無関係にその枠が決着した時点で送る。
+    fn maybe_send_ai_results(&mut self) {
+        if self.peers.is_none() {
+            return;
+        }
+        for i in 0..self.ai_pilots.len() {
+            if self.ai_pilots[i].is_none() || self.ai_result_sent[i] {
+                continue;
+            }
+            let reached_goal = match self.games[i + 1].status {
+                GameStatus::Cleared => true,
+                GameStatus::GameOver => false,
+                // まだ決着していない枠は次のフレームへ持ち越す。
+                _ => continue,
+            };
+            self.ai_result_sent[i] = true;
+
+            let time_ms = net::unix_time_ms().saturating_sub(self.start_at_unix_ms);
+            let proxy_for = Some(self.room_index_for_games_index(i + 1));
+            self.broadcast(&GameMessage::Result {
+                reached_goal,
+                time_ms,
+                proxy_for,
+            });
         }
     }
 }
@@ -1264,7 +1448,9 @@ mod tests {
     /// 通信ありの状態が持つ`PeerLink`のうち`index`番目(`games[index + 1]`に対応)を
     /// 取り出す。
     fn link_at(state: &BattleState, index: usize) -> &PeerLink {
-        &state.peers.as_ref().expect("通信ありの対戦状態のはず")[index]
+        state.peers.as_ref().expect("通信ありの対戦状態のはず")[index]
+            .as_ref()
+            .expect("AIの枠(#300)ではなく人間との接続のはず")
     }
 
     /// 2人対戦で唯一の`PeerLink`を取り出す(#254のテスト群用)。
@@ -1436,7 +1622,14 @@ mod tests {
 
             // Attackに続けてByeを送る。TCPは順序を保ち、受信は届いたぶんを1周で読み切る
             // ため、切断扱いになった時点でAttackも処理済みとみなせる。
-            net::write_message(&mut peer, &GameMessage::Attack { amount: 8 }).unwrap();
+            net::write_message(
+                &mut peer,
+                &GameMessage::Attack {
+                    amount: 8,
+                    proxy_for: None,
+                },
+            )
+            .unwrap();
             net::write_message(&mut peer, &GameMessage::Bye).unwrap();
 
             for _ in 0..MAX_PUMPS {
@@ -1488,6 +1681,7 @@ mod tests {
                 &GameMessage::Result {
                     reached_goal,
                     time_ms: 0,
+                    proxy_for: None,
                 },
             )
             .unwrap();
@@ -1647,13 +1841,20 @@ mod tests {
                 .map(|_| new_game_from_battle_config(seed, &config))
                 .collect();
             let player_names: Vec<String> = order.iter().map(|&p| format!("p{p}")).collect();
-            let streams: Vec<TcpStream> = order[1..]
+            let streams: Vec<Option<TcpStream>> = order[1..]
                 .iter()
-                .map(|&p| row[p].take().expect("各ペアに1本ずつ用意している"))
+                .map(|&p| Some(row[p].take().expect("各ペアに1本ずつ用意している")))
                 .collect();
             states.push(
-                BattleState::from_peer_streams(games, player_names, streams, start_at_unix_ms)
-                    .unwrap(),
+                BattleState::from_peer_streams(
+                    games,
+                    player_names,
+                    streams,
+                    // 参加者番号とルーム内インデックスを同じ並びで扱う。
+                    h,
+                    start_at_unix_ms,
+                )
+                .unwrap(),
             );
         }
         states
@@ -1668,7 +1869,7 @@ mod tests {
         let mut raw_peers = Vec::with_capacity(n - 1);
         for _ in 1..n {
             let (mine, theirs) = loopback_pair();
-            host_streams.push(mine);
+            host_streams.push(Some(mine));
             raw_peers.push(theirs);
         }
 
@@ -1676,9 +1877,14 @@ mod tests {
             .map(|_| new_game_from_battle_config(seed, &config))
             .collect();
         let player_names: Vec<String> = (0..n).map(|p| format!("p{p}")).collect();
-        let state =
-            BattleState::from_peer_streams(games, player_names, host_streams, net::unix_time_ms())
-                .unwrap();
+        let state = BattleState::from_peer_streams(
+            games,
+            player_names,
+            host_streams,
+            0,
+            net::unix_time_ms(),
+        )
+        .unwrap();
         (state, raw_peers)
     }
 
@@ -1727,7 +1933,10 @@ mod tests {
                     message,
                     GameMessage::Attack { .. }
                 )),
-                GameMessage::Attack { amount: 1 },
+                GameMessage::Attack {
+                    amount: 1,
+                    proxy_for: None,
+                },
                 "peer{index}: 壊した1ブロックぶんがそのまま届くはず"
             );
         }
@@ -2070,6 +2279,502 @@ mod tests {
             "AIは自力でゴールできるはず(到達行={} / ゴール行={})",
             state.games[1].player.row,
             TEST_GOAL_M - 1
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ルームへ混ぜたAI(#300)。AIはホストの手元でだけ動き、ホストがその入力・妨害岩・
+    // 結果を全員へ代理送信する。ゲストから見ると「接続を持たない追加の参加者」になる。
+    // -----------------------------------------------------------------------
+
+    /// room内インデックス`p`の表示名。人間は`p0`,`p1`,...とし、AIはルームが付ける名前
+    /// (`room::ai_member_name`)に合わせる。ルームの並びと同じくAIは人間の後ろに来る。
+    fn room_member_name(human_count: usize, p: usize) -> String {
+        if p < human_count {
+            format!("p{p}")
+        } else {
+            crate::room::ai_member_name(p - human_count + 1)
+        }
+    }
+
+    /// 人間`human_count`人+AI`ai_count`人のルームで、参加者`my_index`(人間)の
+    /// `BattleState`を作る。AIはroom内インデックスの末尾に並ぶ(#300)。
+    ///
+    /// 他の人間ぶんは生のTCPストリームで返し、代理送信の中身を覗いたり偽のメッセージを
+    /// 送りつけたりできるようにする。AIは人間より後ろに並ぶため、`raw_peers[i]`は
+    /// `games[i + 1]`にいる人間に対応する。
+    fn battle_with_ai_slots(
+        human_count: usize,
+        ai_count: usize,
+        my_index: usize,
+        seed: u64,
+    ) -> (BattleState, Vec<TcpStream>) {
+        let config = test_battle_config();
+        let total = human_count + ai_count;
+        // `games`の並び(index 0が自分、残りはroom内インデックス順)。
+        let order: Vec<usize> = std::iter::once(my_index)
+            .chain((0..total).filter(|&p| p != my_index))
+            .collect();
+
+        let mut streams = Vec::with_capacity(total - 1);
+        let mut raw_peers = Vec::new();
+        for &p in &order[1..] {
+            if p < human_count {
+                let (mine, theirs) = loopback_pair();
+                streams.push(Some(mine));
+                raw_peers.push(theirs);
+            } else {
+                // AIの枠は接続を持たない(#300)。
+                streams.push(None);
+            }
+        }
+
+        let games: Vec<Game> = order
+            .iter()
+            .map(|_| new_game_from_battle_config(seed, &config))
+            .collect();
+        let player_names: Vec<String> = order
+            .iter()
+            .map(|&p| room_member_name(human_count, p))
+            .collect();
+        let state = BattleState::from_peer_streams(
+            games,
+            player_names,
+            streams,
+            my_index,
+            net::unix_time_ms(),
+        )
+        .unwrap();
+        (state, raw_peers)
+    }
+
+    /// 人間`human_count`人+AI`ai_count`人のルームを、人間どうしのフルメッシュ接続込みで
+    /// 組む(`connected_mesh`のAI混在版)。戻り値のindexはroom内インデックスで、人間ぶん
+    /// (`0..human_count`)だけが並ぶ。
+    fn connected_mesh_with_ai(human_count: usize, ai_count: usize, seed: u64) -> Vec<BattleState> {
+        let config = test_battle_config();
+        let total = human_count + ai_count;
+        // `sockets[a][b]`=参加者aから参加者bへ向かう接続。AIは接続を持たないため
+        // 人間ぶんだけ張る(#300)。
+        let mut sockets: Vec<Vec<Option<TcpStream>>> = (0..human_count)
+            .map(|_| (0..human_count).map(|_| None).collect())
+            .collect();
+        for (a, b) in (0..human_count).flat_map(|a| ((a + 1)..human_count).map(move |b| (a, b))) {
+            let (to_b, to_a) = loopback_pair();
+            sockets[a][b] = Some(to_b);
+            sockets[b][a] = Some(to_a);
+        }
+
+        // 開始時刻はハンドシェイク(#275)で合意する値の代わり。
+        let start_at_unix_ms = net::unix_time_ms();
+        let mut states = Vec::with_capacity(human_count);
+        for (h, mut row) in sockets.into_iter().enumerate() {
+            let order = participant_order(total, h);
+            let games: Vec<Game> = order
+                .iter()
+                .map(|_| new_game_from_battle_config(seed, &config))
+                .collect();
+            let player_names: Vec<String> = order
+                .iter()
+                .map(|&p| room_member_name(human_count, p))
+                .collect();
+            let streams: Vec<Option<TcpStream>> = order[1..]
+                .iter()
+                .map(|&p| {
+                    (p < human_count).then(|| row[p].take().expect("各ペアに1本ずつ用意している"))
+                })
+                .collect();
+            states.push(
+                BattleState::from_peer_streams(games, player_names, streams, h, start_at_unix_ms)
+                    .unwrap(),
+            );
+        }
+        states
+    }
+
+    /// 盤面とプレイヤーの状態が一致しているか。同じ初期盤面へ同じ操作が同じ順で適用された
+    /// かどうかを突き合わせるために使う。
+    fn same_board_and_player(a: &Game, b: &Game) -> bool {
+        a.player.row == b.player.row
+            && a.player.col == b.player.col
+            && a.player.facing == b.player.facing
+            && a.board.rows == b.board.rows
+    }
+
+    #[test]
+    fn room_indexes_and_games_indexes_convert_back_and_forth_for_everyone() {
+        // #300: 代理送信はroom内インデックスで適用先を指すため、受け取った側は自分の
+        // `games`の並びへ変換する必要がある。視点(`my_index`)ごとにずれ方が変わるので、
+        // 全員ぶんの視点で往復が一致することを確認する。
+        const HUMANS: usize = 3;
+        const AIS: usize = 1;
+
+        for my_index in 0..HUMANS {
+            let (state, _peers) = battle_with_ai_slots(HUMANS, AIS, my_index, 30001);
+            assert_eq!(
+                state.games.len(),
+                HUMANS + AIS,
+                "my_index={my_index}: AIぶんも含めた全員の盤面を持つはず"
+            );
+            assert_eq!(
+                state.games_index_for_room_index(my_index),
+                0,
+                "my_index={my_index}: 自分はいつでもgames[0]のはず"
+            );
+
+            for games_index in 0..state.games.len() {
+                let room_index = state.room_index_for_games_index(games_index);
+                assert_eq!(
+                    state.games_index_for_room_index(room_index),
+                    games_index,
+                    "my_index={my_index}: games[{games_index}]の変換が往復しない"
+                );
+            }
+
+            for room_index in 0..(HUMANS + AIS) {
+                // 自分より前にいる参加者は自分を飛ばすぶん1つ後ろへずれ、後ろにいる
+                // 参加者はそのままの位置に来る。
+                let expected = if room_index == my_index {
+                    0
+                } else if room_index < my_index {
+                    room_index + 1
+                } else {
+                    room_index
+                };
+                assert_eq!(
+                    state.games_index_for_room_index(room_index),
+                    expected,
+                    "my_index={my_index}: room内インデックス{room_index}の変換先が違う"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_proxied_input_lands_on_the_ai_slot_instead_of_the_sender() {
+        // #300: ホストはAIの入力を`proxy_for`付きで送る。受け取った側が変換を誤ると、
+        // 送ってきたホストの盤面が動いてしまう(AIの盤面は止まったまま残る)。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        // ゲスト(room内インデックス1)の視点。games[1]がホスト、games[2]がAIになる。
+        let (mut guest, mut peers) = battle_with_ai_slots(HUMANS, AIS, 1, 30002);
+        assert_eq!(
+            guest.games_index_for_room_index(AI_ROOM_INDEX),
+            2,
+            "前提: AIはgames[2]にいるはず"
+        );
+        for game in guest.games.iter_mut() {
+            open_both_sides(game);
+        }
+        let col = guest.games[0].player.col;
+
+        net::write_message(
+            &mut peers[0],
+            &GameMessage::Input {
+                action: NetAction::MoveRight,
+                proxy_for: Some(AI_ROOM_INDEX),
+            },
+        )
+        .unwrap();
+
+        for _ in 0..MAX_PUMPS {
+            // 盤面を進めずに受信だけ回す(配送待ちで酸素を消費させない)。
+            guest.advance(Duration::ZERO, None);
+            if guest.games[2].player.col == col + 1 {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            guest.games[2].player.col,
+            col + 1,
+            "代理送信された入力はAIの枠へ届くはず"
+        );
+        assert_eq!(
+            guest.games[1].player.col, col,
+            "送ってきたホストの盤面は動かないはず"
+        );
+    }
+
+    #[test]
+    fn a_proxied_result_settles_the_ai_slot_instead_of_the_sender() {
+        // #300: AIの結末もホストが代理送信する。これが無いとゲスト側でAIの盤面が
+        // プレイ中のまま残り、全員の結果がそろわず順位が確定しない(12.4と同じ理屈)。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        let (mut guest, mut peers) = battle_with_ai_slots(HUMANS, AIS, 1, 30003);
+
+        net::write_message(
+            &mut peers[0],
+            &GameMessage::Result {
+                reached_goal: true,
+                time_ms: 1_234,
+                proxy_for: Some(AI_ROOM_INDEX),
+            },
+        )
+        .unwrap();
+
+        for _ in 0..MAX_PUMPS {
+            guest.advance(Duration::ZERO, None);
+            if guest.games[2].status != GameStatus::Playing {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            guest.games[2].status,
+            GameStatus::Cleared,
+            "代理送信された結果はAIの枠へ反映されるはず"
+        );
+        assert_eq!(
+            guest.games[1].status,
+            GameStatus::Playing,
+            "送ってきたホストの盤面は決着していないはず"
+        );
+    }
+
+    #[test]
+    fn a_proxied_attack_is_piled_on_my_own_board_like_any_other_attack() {
+        // #300: 妨害岩は「受け取った側が自分の盤面へ積む」ルール(spec.md 12.8)なので、
+        // 誰の代理送信かで積む先は変わらない。`proxy_for`が付いていても、自分が
+        // プレイ中なら自分の盤面へ届く。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        let (mut guest, mut peers) = battle_with_ai_slots(HUMANS, AIS, 1, 30004);
+        assert!(
+            !has_incoming_attack(&guest.games[0]),
+            "前提: まだ妨害を受けていないはず"
+        );
+
+        net::write_message(
+            &mut peers[0],
+            &GameMessage::Attack {
+                amount: 8,
+                proxy_for: Some(HUMANS),
+            },
+        )
+        .unwrap();
+
+        for _ in 0..MAX_PUMPS {
+            guest.advance(Duration::ZERO, None);
+            if has_incoming_attack(&guest.games[0]) {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert!(
+            has_incoming_attack(&guest.games[0]),
+            "AIが出した妨害岩も自分の盤面へ積まれるはず"
+        );
+    }
+
+    #[test]
+    fn only_the_host_runs_the_ai_and_the_guests_wait_for_the_proxy() {
+        // #300: AIの判断を両側で回すとゲスト側で二重に適用されてしまうため、
+        // `Autopilot`を持つのはホスト(room内インデックス0)だけにする。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+
+        let (host, _host_peers) = battle_with_ai_slots(HUMANS, AIS, 0, 30005);
+        assert_eq!(
+            host.ai_pilots
+                .iter()
+                .filter(|pilot| pilot.is_some())
+                .count(),
+            AIS,
+            "ホストはAIぶんのオートプレイを持つはず"
+        );
+        assert!(
+            // `ai_pilots[0]`は`games[1]`=もう1人の人間に対応する。
+            host.ai_pilots[0].is_none(),
+            "人間の相手にオートプレイを持たせてはいけない"
+        );
+
+        let (guest, _guest_peers) = battle_with_ai_slots(HUMANS, AIS, 1, 30005);
+        assert!(
+            guest.ai_pilots.iter().all(Option::is_none),
+            "ゲストはAIを動かさず、代理送信された入力を待つはず"
+        );
+    }
+
+    #[test]
+    fn the_host_proxies_the_ai_input_to_every_guest() {
+        // #300: ホストはAIの判断を自分の手元へ適用しつつ、同じ操作を全ゲストへ
+        // `proxy_for`付きで送る。これが無いとゲスト側のAIの盤面が止まって見える。
+        const HUMANS: usize = 3;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        let (mut host, mut peers) = battle_with_ai_slots(HUMANS, AIS, 0, 30006);
+        for peer in peers.iter_mut() {
+            peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        }
+
+        // AIが1フレームで何も判断しないこともあるため、数フレームぶん回してから読む。
+        // 自分の操作(`local_action`)は渡していないので、届く`Input`は代理送信だけ。
+        for _ in 0..30 {
+            host.pump_frame(None);
+        }
+
+        for (index, peer) in peers.iter_mut().enumerate() {
+            let message =
+                read_message_matching(peer, |message| matches!(message, GameMessage::Input { .. }));
+            let GameMessage::Input { proxy_for, .. } = message else {
+                unreachable!("Inputだけを選んで読んでいる");
+            };
+            assert_eq!(
+                proxy_for,
+                Some(AI_ROOM_INDEX),
+                "peer{index}: AIの入力はroom内インデックス{AI_ROOM_INDEX}の代理として届くはず"
+            );
+        }
+    }
+
+    #[test]
+    fn the_host_proxies_the_ai_result_exactly_once() {
+        // #300: AIの枠が決着したら、その時点で1回だけ`Result`を代理送信する。毎フレーム
+        // 送ると、ゲスト側で同じ結末を何度も受け取ることになる。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        let (mut host, mut peers) = battle_with_ai_slots(HUMANS, AIS, 0, 30007);
+        peers[0]
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // AIの枠(games[2])を決着させる。AIの手並みに左右されないよう、ゴール到達の
+        // 結果を直接作る。
+        host.games[2].status = GameStatus::Cleared;
+        host.pump_frame(None);
+
+        let message = read_message_matching(&mut peers[0], |message| {
+            matches!(message, GameMessage::Result { .. })
+        });
+        assert!(
+            matches!(
+                message,
+                GameMessage::Result {
+                    reached_goal: true,
+                    proxy_for: Some(AI_ROOM_INDEX),
+                    ..
+                }
+            ),
+            "AIの結末がroom内インデックス{AI_ROOM_INDEX}の代理として届くはず(届いたのは{message:?})"
+        );
+
+        // さらに回しても2通目は来ない。自分(ホスト)の決着はまだなので、自分ぶんの
+        // `Result`も混ざらない。
+        for _ in 0..30 {
+            host.pump_frame(None);
+        }
+        peers[0]
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let mut extra_results = 0;
+        while let Ok(message) = net::read_message(&mut peers[0]) {
+            if matches!(message, GameMessage::Result { .. }) {
+                extra_results += 1;
+            }
+        }
+        assert_eq!(extra_results, 0, "同じ結末が2回以上送られている");
+    }
+
+    #[test]
+    fn an_ai_slot_never_counts_as_a_disconnected_peer() {
+        // #300: AIの枠は接続を持たないため切断し得ない。Heartbeatの送信先にも数えず、
+        // タイムアウト判定でも触らない(触ると、いるはずのAIが勝手に脱落する)。
+        const HUMANS: usize = 2;
+        const AIS: usize = 2;
+        let (mut host, _peers) = battle_with_ai_slots(HUMANS, AIS, 0, 30008);
+        assert_eq!(
+            host.peers
+                .as_ref()
+                .expect("通信ありの対戦状態のはず")
+                .iter()
+                .filter(|peer| peer.is_none())
+                .count(),
+            AIS,
+            "前提: AIぶんは接続なしの枠のはず"
+        );
+
+        for _ in 0..30 {
+            host.pump_frame(None);
+        }
+
+        // ホストから見るとAIの枠はgames[HUMANS..]に並ぶ(自分がroom内インデックス0)。
+        for games_index in HUMANS..HUMANS + AIS {
+            assert_eq!(
+                host.games[games_index].status,
+                GameStatus::Playing,
+                "AIの枠(games[{games_index}])が切断扱いで倒されている"
+            );
+        }
+    }
+
+    #[test]
+    fn a_room_with_two_humans_and_one_ai_looks_the_same_from_every_viewpoint() {
+        // #300: 人間2人+AI1人のルームを実際の接続で組み、ホストが代理送信したAIの操作が
+        // ゲストの手元で同じ盤面になることを見る。参加者の並び(表示名)も全員で揃うはず。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        const TOTAL: usize = HUMANS + AIS;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        const SEED: u64 = 30009;
+        let mut states = connected_mesh_with_ai(HUMANS, AIS, SEED);
+        assert_eq!(states.len(), HUMANS, "`BattleState`を持つのは人間だけ");
+
+        for (h, state) in states.iter().enumerate() {
+            assert_eq!(
+                state.games.len(),
+                TOTAL,
+                "参加者{h}: AIぶんも含めた全員の盤面を持つはず"
+            );
+            for p in 0..TOTAL {
+                assert_eq!(
+                    state.player_names[games_index_of(TOTAL, h, p)],
+                    room_member_name(HUMANS, p),
+                    "参加者{h}の視点で、room内インデックス{p}の表示名がずれている"
+                );
+            }
+        }
+
+        let ai_on_host = games_index_of(TOTAL, 0, AI_ROOM_INDEX);
+        let ai_on_guest = games_index_of(TOTAL, 1, AI_ROOM_INDEX);
+        let host_on_guest = games_index_of(TOTAL, 1, 0);
+        let guest_on_host = games_index_of(TOTAL, 0, 1);
+
+        // 人間2人は何も操作せず、AIだけがホストの手元で動く。全員を同じ回数・同じ
+        // 経過時間で進めるので、「誰にも操作されていない盤面」は同じ手順で進めた
+        // `untouched`と一致するはず。差が出る枠=操作が届いた枠になる。
+        const FRAMES: usize = 60;
+        let mut untouched = new_game_from_battle_config(SEED, &test_battle_config());
+        for _ in 0..FRAMES {
+            for state in states.iter_mut() {
+                state.pump_frame(None);
+            }
+            untouched.update(TEST_FRAME_DELTA);
+            // 代理送信が相手へ届く隙を作る。
+            pump_interval();
+        }
+
+        assert!(
+            !same_board_and_player(&states[0].games[ai_on_host], &untouched),
+            "前提: ホストの手元でAIが操作されているはず"
+        );
+        assert!(
+            !same_board_and_player(&states[1].games[ai_on_guest], &untouched),
+            "ゲストの手元のAIの盤面が動いていない(代理送信が届いていない)"
+        );
+        assert!(
+            same_board_and_player(&states[1].games[host_on_guest], &untouched),
+            "AIの操作がゲストの手元にあるホストの盤面へ紛れ込んでいる"
+        );
+        assert!(
+            same_board_and_player(&states[0].games[guest_on_host], &untouched),
+            "AIの操作がホストの手元にあるゲストの盤面へ紛れ込んでいる"
         );
     }
 }

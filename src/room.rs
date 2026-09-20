@@ -18,6 +18,18 @@ use rand::RngExt;
 
 use crate::net::{self, BattleConfig, GameMessage, RoomMember, TCP_CONNECT_TIMEOUT_MS};
 
+/// 参加者側がルーム参加を終えた結果(自分以外とのメッシュ接続。room内インデックス順,
+/// 自分以外の名前を同じ順で並べたもの, 自分のroom内インデックス, ハンドシェイク結果)。
+///
+/// メッシュ接続が`None`の枠はAI(#300。接続を持たない追加の参加者)。ロビーが別スレッドから
+/// チャネルで受け取るため、型に名前を付けておく。
+pub type RoomStartResult = (
+    Vec<Option<TcpStream>>,
+    Vec<String>,
+    usize,
+    net::HandshakeResult,
+);
+
 /// 主催者側。既に`JoinRoom`を受け取った各ゲストとの接続(`guest_room_streams`。
 /// `JoinRoom`を受信した順=room内インデックス1,2,3...と対応)へ`RoomRoster`・対戦設定・
 /// シード・開始時刻を配布し、フルメッシュのメッシュ接続(自分以外、room内インデックス順)を
@@ -26,6 +38,9 @@ use crate::net::{self, BattleConfig, GameMessage, RoomMember, TCP_CONNECT_TIMEOU
 /// `guest_names`/`guest_mesh_addrs`は`guest_room_streams`と同じ順で、それぞれ`JoinRoom`の
 /// `name`と、「接続元のIP+`JoinRoom`の`mesh_port`」を呼び出し元が組み立てたもの。
 ///
+/// `ai_count`はこのルームへ追加するAI(#300)の人数。ゲストの後ろへ`mesh_addr`が`None`の
+/// `RoomMember`として並べ、ホストがローカルで操作して入力・妨害岩・結果を代理送信する。
+///
 /// 戻り値の`HandshakeResult`は2人版と同じ型だが、`opponent_name`はN人版では意味を持た
 /// ないため空にする(参加者名は`RoomRoster`の`members`が持ち、呼び出し元は自分が組み立てた
 /// `guest_names`をそのまま使える)。
@@ -33,10 +48,11 @@ pub fn start_room_as_host(
     guest_room_streams: &mut [TcpStream],
     guest_names: &[String],
     guest_mesh_addrs: &[SocketAddr],
+    ai_count: usize,
     my_name: &str,
     my_mesh_listener: &TcpListener,
     config: BattleConfig,
-) -> io::Result<(Vec<TcpStream>, net::HandshakeResult)> {
+) -> io::Result<(Vec<Option<TcpStream>>, net::HandshakeResult)> {
     if guest_room_streams.len() != guest_names.len()
         || guest_room_streams.len() != guest_mesh_addrs.len()
     {
@@ -47,15 +63,22 @@ pub fn start_room_as_host(
     }
 
     // 主催者はroom内インデックス0。以降は`JoinRoom`を受け取った順。
-    let mut members = Vec::with_capacity(guest_names.len() + 1);
+    let mut members = Vec::with_capacity(guest_names.len() + 1 + ai_count);
     members.push(RoomMember {
         name: my_name.to_string(),
-        mesh_addr: my_mesh_listener.local_addr()?,
+        mesh_addr: Some(my_mesh_listener.local_addr()?),
     });
     for (name, &mesh_addr) in guest_names.iter().zip(guest_mesh_addrs) {
         members.push(RoomMember {
             name: name.clone(),
-            mesh_addr,
+            mesh_addr: Some(mesh_addr),
+        });
+    }
+    // #300: AIはゲストの後ろへ。接続先を持たない枠として全員へ同じ並びで配る。
+    for n in 1..=ai_count {
+        members.push(RoomMember {
+            name: ai_member_name(n),
+            mesh_addr: None,
         });
     }
 
@@ -97,15 +120,14 @@ pub fn start_room_as_host(
 /// 順に呼ぶだけの薄い関数(#276。ロビーUIは開始を待つ区間だけ別スレッド化するため、
 /// この2関数を分けて個別に呼ぶ)。
 ///
-/// 戻り値は(自分以外とのメッシュ接続。room内インデックス順, 自分以外の名前を同じ順で
-/// 並べたもの, ハンドシェイク結果)。`HandshakeResult::opponent_name`は主催者側と同じ理由で
-/// 空にする(名前は2つ目の戻り値が持つ)。
+/// 戻り値は`RoomStartResult`。
+/// `HandshakeResult::opponent_name`は主催者側と同じ理由で空にする(名前は2つ目の戻り値が持つ)。
 #[allow(dead_code)] // ロビーは2つに分けて呼ぶため、この薄い関数はテストからのみ使う。
 pub fn join_room_as_guest(
     host_addr: SocketAddr,
     my_name: &str,
     my_mesh_listener: &TcpListener,
-) -> io::Result<(Vec<TcpStream>, Vec<String>, net::HandshakeResult)> {
+) -> io::Result<RoomStartResult> {
     let room_stream = connect_and_join_room(host_addr, my_name, my_mesh_listener)?;
     await_room_start(room_stream, my_name, my_mesh_listener)
 }
@@ -138,7 +160,7 @@ pub fn await_room_start(
     mut room_stream: TcpStream,
     my_name: &str,
     my_mesh_listener: &TcpListener,
-) -> io::Result<(Vec<TcpStream>, Vec<String>, net::HandshakeResult)> {
+) -> io::Result<RoomStartResult> {
     let host_addr = room_stream.peer_addr()?;
     let (mut members, my_index) = match net::read_message(&mut room_stream)? {
         GameMessage::RoomRoster {
@@ -158,7 +180,15 @@ pub fn await_room_start(
             ),
         ));
     }
-    members[0].mesh_addr = resolve_host_mesh_addr(members[0].mesh_addr, host_addr);
+    // #300: `members[0]`は常に主催者(人間)なので`mesh_addr`は必ず`Some`。AIの枠は
+    // ゲストの後ろにしか現れないため、ここが`None`ならrosterが壊れている。
+    let Some(host_mesh_addr) = members[0].mesh_addr else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "members[0](主催者)にメッシュ接続の宛先が無い",
+        ));
+    };
+    members[0].mesh_addr = Some(resolve_host_mesh_addr(host_mesh_addr, host_addr));
 
     let config = match net::read_message(&mut room_stream)? {
         GameMessage::StartConfig(config) => config,
@@ -188,6 +218,7 @@ pub fn await_room_start(
     Ok((
         streams,
         other_names,
+        my_index,
         net::HandshakeResult {
             opponent_name: String::new(),
             config,
@@ -203,12 +234,14 @@ pub fn await_room_start(
 ///
 /// 役割は「room内インデックスが小さい方がTCPサーバ役」という決定的な規則で決まるため、
 /// 全員が同じ`members`を見ていれば通信なしに一致する(設計書3節)。
+///
+/// #300: AI(`mesh_addr`が`None`)の枠は接続を張らず、戻り値の同じ位置に`None`を置く。
 fn establish_full_mesh(
     members: &[RoomMember],
     my_index: usize,
     my_name: &str,
     mesh_listener: &TcpListener,
-) -> io::Result<Vec<TcpStream>> {
+) -> io::Result<Vec<Option<TcpStream>>> {
     // この関数はブロッキングI/Oで完結する前提。ロビーのlistener(`lobby.rs`)は
     // 非ブロッキングに設定されているため、accept前にブロッキングへ戻す。
     mesh_listener.set_nonblocking(false)?;
@@ -218,10 +251,12 @@ fn establish_full_mesh(
     // 自分より小さいインデックスへは自分から繋ぐ(クライアント役)。相手は自分が選んで
     // いるのでインデックスは既知で、`Hello`は名前の確認(繋ぎ先の取り違え検出)に使う。
     for (index, member) in members.iter().enumerate().take(my_index) {
-        let mut stream = TcpStream::connect_timeout(
-            &member.mesh_addr,
-            Duration::from_millis(TCP_CONNECT_TIMEOUT_MS),
-        )?;
+        // #300: AI(`mesh_addr`が`None`)は実際のTCP接続を持たないため繋がない。
+        let Some(mesh_addr) = member.mesh_addr else {
+            continue;
+        };
+        let mut stream =
+            TcpStream::connect_timeout(&mesh_addr, Duration::from_millis(TCP_CONNECT_TIMEOUT_MS))?;
         // 2人版`run_client_handshake`と同じ順序(先に送ってから受け取る)。
         net::write_message(
             &mut stream,
@@ -248,7 +283,14 @@ fn establish_full_mesh(
     // 自分より後ろに同名の参加者が複数いる場合、この照合では本人を区別できない
     // (まだ埋まっていない最初の一致へ入れる)。自分の特定は`your_index`で行える一方、
     // peerの特定は名前しか手がかりが無いという設計上の制約(#275設計書3節)。
-    for _ in (my_index + 1)..members.len() {
+    //
+    // #300: AI(`mesh_addr`が`None`)は繋いでこないため、受け入れる本数から除く。
+    let incoming_count = members
+        .iter()
+        .skip(my_index + 1)
+        .filter(|member| member.mesh_addr.is_some())
+        .count();
+    for _ in 0..incoming_count {
         let (mut stream, _) = mesh_listener.accept()?;
         // listenerが非ブロッキングだった場合、環境によっては受理したストリームもそれを
         // 引き継ぐ(`lobby.rs`と同じ理由で明示的に戻す)。
@@ -266,7 +308,12 @@ fn establish_full_mesh(
             .iter()
             .enumerate()
             .skip(my_index + 1)
-            .find(|(index, member)| member.name == peer_name && connections[*index].is_none())
+            // #300: AIの枠は名前が一致しても接続の受け入れ先にはならない。
+            .find(|(index, member)| {
+                member.mesh_addr.is_some()
+                    && member.name == peer_name
+                    && connections[*index].is_none()
+            })
             .map(|(index, _)| index)
             .ok_or_else(|| {
                 io::Error::new(
@@ -282,13 +329,27 @@ fn establish_full_mesh(
         if index == my_index {
             continue;
         }
-        streams.push(connection.ok_or_else(|| {
+        // #300: AIの枠は接続を持たないまま`None`で並びに残す(対戦側が`games[1..]`の
+        // どの位置がAIかを、この並びから知る)。人間の枠が空なら従来通りエラー。
+        if members[index].mesh_addr.is_none() {
+            streams.push(None);
+            continue;
+        }
+        streams.push(Some(connection.ok_or_else(|| {
             io::Error::other(format!(
                 "room内インデックス{index}との接続が確立できていない"
             ))
-        })?);
+        })?));
     }
     Ok(streams)
+}
+
+/// ルームへ追加したAI(#300)の表示名。`number`は1始まり。
+///
+/// rosterを組む側(この`room`)と、対戦の参加者名を組む側(`lobby`)の両方で使うため関数に
+/// しておく(名前がずれると、ホストの参加者一覧と他の参加者が見るrosterが食い違う)。
+pub fn ai_member_name(number: usize) -> String {
+    format!("AI {number}")
 }
 
 /// メッシュ接続の`Hello`を1件受け取り、相手の名前を返す。
@@ -342,8 +403,8 @@ mod tests {
     /// 1人ぶんのルーム参加結果。
     struct Participant {
         name: String,
-        /// 自分以外とのメッシュ接続(room内インデックス順)。
-        streams: Vec<TcpStream>,
+        /// 自分以外とのメッシュ接続(room内インデックス順)。`None`はAIの枠(#300)。
+        streams: Vec<Option<TcpStream>>,
         /// 自分以外の名前(`streams`と同じ順)。
         other_names: Vec<String>,
         handshake: net::HandshakeResult,
@@ -351,12 +412,17 @@ mod tests {
 
     /// `names`(index 0が主催者)の人数でルームを1つ成立させ、room内インデックス順の
     /// 参加結果を返す。
+    fn run_room(names: &[String]) -> Vec<Participant> {
+        run_room_with_ai(names, 0)
+    }
+
+    /// `run_room`のAIあり版(#300)。人間`names`の後ろへAIを`ai_count`人追加する。
     ///
     /// ルーム参加接続のacceptは呼び出し元の責務(設計書4節)なので、ここがその役を担う。
     /// ゲストのroom内インデックスは主催者が`JoinRoom`を受け取った順で決まるため、
     /// 順序を確定させるためゲストは1人ずつ参加させる(`JoinRoom`送信後は`RoomRoster`待ちで
     /// ブロックするので、次のゲストを起こす前にインデックスが確定する)。
-    fn run_room(names: &[String]) -> Vec<Participant> {
+    fn run_room_with_ai(names: &[String], ai_count: usize) -> Vec<Participant> {
         let room_listener = loopback_listener();
         let room_addr = room_listener.local_addr().unwrap();
         let host_mesh_listener = loopback_listener();
@@ -370,7 +436,7 @@ mod tests {
             let name = name.clone();
             guest_threads.push(thread::spawn(move || {
                 let mesh_listener = loopback_listener();
-                let (streams, other_names, handshake) =
+                let (streams, other_names, _my_index, handshake) =
                     join_room_as_guest(room_addr, &name, &mesh_listener).unwrap();
                 Participant {
                     name,
@@ -395,16 +461,19 @@ mod tests {
             &mut guest_room_streams,
             &guest_names,
             &guest_mesh_addrs,
+            ai_count,
             &names[0],
             &host_mesh_listener,
             test_config(),
         )
         .unwrap();
 
+        let mut other_names = guest_names;
+        other_names.extend((1..=ai_count).map(ai_member_name));
         let mut participants = vec![Participant {
             name: names[0].clone(),
             streams: host_streams,
-            other_names: guest_names,
+            other_names,
             handshake: host_handshake,
         }];
         for guest in guest_threads {
@@ -443,15 +512,24 @@ mod tests {
     /// 全員が自分のroom内インデックスを名乗り合い、`streams[i]`が期待した相手に
     /// 繋がっていることを確かめる(本数と順序の検証)。メッシュ接続を消費するため、
     /// 対戦を進めるテストとは別のルームで行う。
-    fn assert_streams_are_in_room_index_order(participants: &mut [Participant]) {
-        let total = participants.len();
+    /// `ai_count`はルームへ追加したAI(#300)の人数。AIは人間の後ろに並ぶため、各参加者の
+    /// `streams`の末尾`ai_count`個が接続なしの枠になる。
+    fn assert_streams_are_in_room_index_order(participants: &mut [Participant], ai_count: usize) {
+        let total = participants.len() + ai_count;
         for (my_index, participant) in participants.iter_mut().enumerate() {
             assert_eq!(
                 participant.streams.len(),
                 total - 1,
-                "参加者{my_index}は自分以外の全員と接続を持つはず"
+                "参加者{my_index}は自分以外の全員ぶんの枠を持つはず"
             );
-            for stream in participant.streams.iter_mut() {
+            for (stream_index, slot) in participant.streams.iter().enumerate() {
+                assert_eq!(
+                    slot.is_none(),
+                    stream_index >= total - 1 - ai_count,
+                    "参加者{my_index}のstreams[{stream_index}]: AIの枠(#300)だけが接続なしのはず"
+                );
+            }
+            for stream in participant.streams.iter_mut().flatten() {
                 net::write_message(
                     stream,
                     &GameMessage::Hello {
@@ -463,7 +541,10 @@ mod tests {
         }
 
         for (my_index, participant) in participants.iter_mut().enumerate() {
-            for (stream_index, stream) in participant.streams.iter_mut().enumerate() {
+            for (stream_index, slot) in participant.streams.iter_mut().enumerate() {
+                let Some(stream) = slot else {
+                    continue;
+                };
                 let expected = peer_index(my_index, stream_index);
                 let received = read_hello(stream).unwrap();
                 assert_eq!(
@@ -479,14 +560,14 @@ mod tests {
     fn a_three_player_room_connects_everyone_in_room_index_order() {
         let mut participants = run_room(&numbered_names(3));
 
-        assert_streams_are_in_room_index_order(&mut participants);
+        assert_streams_are_in_room_index_order(&mut participants, 0);
     }
 
     #[test]
     fn a_four_player_room_connects_everyone_in_room_index_order() {
         let mut participants = run_room(&numbered_names(4));
 
-        assert_streams_are_in_room_index_order(&mut participants);
+        assert_streams_are_in_room_index_order(&mut participants, 0);
     }
 
     #[test]
@@ -494,7 +575,7 @@ mod tests {
         // 2人でも同じ経路で成立する(主催者が接続を受け、参加者が繋ぐ側になる)。
         let mut participants = run_room(&numbered_names(2));
 
-        assert_streams_are_in_room_index_order(&mut participants);
+        assert_streams_are_in_room_index_order(&mut participants, 0);
     }
 
     #[test]
@@ -545,7 +626,7 @@ mod tests {
 
         let mut participants = run_room(&names);
 
-        assert_streams_are_in_room_index_order(&mut participants);
+        assert_streams_are_in_room_index_order(&mut participants, 0);
         assert_eq!(participants[1].other_names, vec!["dup", "solo"]);
         assert_eq!(participants[2].other_names, vec!["dup", "dup"]);
     }
@@ -562,7 +643,8 @@ mod tests {
 
         let mut states: Vec<BattleState> = participants
             .into_iter()
-            .map(|participant| {
+            .enumerate()
+            .map(|(my_index, participant)| {
                 let games: Vec<Game> = (0..N)
                     .map(|_| new_game_from_battle_config(seed, &config))
                     .collect();
@@ -572,6 +654,7 @@ mod tests {
                     games,
                     player_names,
                     participant.streams,
+                    my_index,
                     participant.handshake.start_at_unix_ms,
                 )
                 .unwrap()
@@ -680,11 +763,11 @@ mod tests {
                         members: vec![
                             RoomMember {
                                 name: "host".to_string(),
-                                mesh_addr: "127.0.0.1:39394".parse().unwrap(),
+                                mesh_addr: Some("127.0.0.1:39394".parse().unwrap()),
                             },
                             RoomMember {
                                 name: "guest".to_string(),
-                                mesh_addr: "127.0.0.1:39395".parse().unwrap(),
+                                mesh_addr: Some("127.0.0.1:39395".parse().unwrap()),
                             },
                         ],
                         your_index,
@@ -714,6 +797,7 @@ mod tests {
             &mut [],
             &["guest".to_string()],
             &[],
+            0,
             "host",
             &host_mesh_listener,
             test_config(),
@@ -745,11 +829,135 @@ mod tests {
         let mesh_listener = loopback_listener();
         let members = vec![RoomMember {
             name: "host".to_string(),
-            mesh_addr: mesh_listener.local_addr().unwrap(),
+            mesh_addr: Some(mesh_listener.local_addr().unwrap()),
         }];
 
         let streams = establish_full_mesh(&members, 0, "host", &mesh_listener).unwrap();
 
         assert!(streams.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // ルームへ追加したAI(#300)。AIはTCP接続を持たない枠として`members`に並ぶため、
+    // メッシュ確立では「繋ぎに行かない・受け入れ本数に数えない・並びには残す」となる。
+    // -----------------------------------------------------------------------
+
+    /// メッシュ接続のクライアント役。`addr`へ繋いで`Hello`を送り、相手の`Hello`を待つ
+    /// (`establish_full_mesh`が自分より小さいインデックスへ行う手順と同じ)。
+    fn spawn_mesh_client(addr: SocketAddr, name: String) -> thread::JoinHandle<TcpStream> {
+        thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            net::write_message(&mut stream, &GameMessage::Hello { name }).unwrap();
+            read_hello(&mut stream).unwrap();
+            stream
+        })
+    }
+
+    /// メッシュ接続のサーバ役。1件受け入れて`Hello`を受け取り、自分の`Hello`を返す
+    /// (`establish_full_mesh`が自分より大きいインデックスへ行う手順と同じ)。
+    fn spawn_mesh_server(listener: TcpListener, name: String) -> thread::JoinHandle<TcpStream> {
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_hello(&mut stream).unwrap();
+            net::write_message(&mut stream, &GameMessage::Hello { name }).unwrap();
+            stream
+        })
+    }
+
+    #[test]
+    fn a_full_mesh_leaves_the_ai_slot_empty_and_connects_only_the_humans() {
+        // 主催者の視点。ゲスト1人+AI1人なら、受け入れるのは人間の1本だけ。AIを受け入れ
+        // 本数に数えると、来ない接続をacceptし続けて対戦が始まらなくなる。
+        let my_listener = loopback_listener();
+        let my_addr = my_listener.local_addr().unwrap();
+        let guest_listener = loopback_listener();
+        let members = vec![
+            RoomMember {
+                name: "host".to_string(),
+                mesh_addr: Some(my_addr),
+            },
+            RoomMember {
+                name: "guest".to_string(),
+                mesh_addr: Some(guest_listener.local_addr().unwrap()),
+            },
+            RoomMember {
+                name: ai_member_name(1),
+                mesh_addr: None,
+            },
+        ];
+        let guest = spawn_mesh_client(my_addr, "guest".to_string());
+
+        let streams = establish_full_mesh(&members, 0, "host", &my_listener).unwrap();
+        let _guest_side = guest.join().unwrap();
+
+        assert_eq!(streams.len(), 2, "自分以外の全員ぶんの枠が並ぶはず");
+        assert!(streams[0].is_some(), "人間のゲストとは接続を張るはず");
+        assert!(
+            streams[1].is_none(),
+            "AIの枠は接続なしのまま並びに残るはず(対戦側がこの位置でAIを見分ける)"
+        );
+    }
+
+    #[test]
+    fn a_full_mesh_never_dials_an_ai_member() {
+        // 参加者の視点。自分より小さいインデックスへは自分から繋ぐが、AIの枠は宛先を
+        // 持たないため繋ぎに行かず、並びの位置だけ空けて残す。
+        // (実際のrosterではAIは最後に並ぶ。ここは繋ぎに行かない分岐そのものの確認。)
+        let my_listener = loopback_listener();
+        let host_listener = loopback_listener();
+        let host_addr = host_listener.local_addr().unwrap();
+        let members = vec![
+            RoomMember {
+                name: "host".to_string(),
+                mesh_addr: Some(host_addr),
+            },
+            RoomMember {
+                name: ai_member_name(1),
+                mesh_addr: None,
+            },
+            RoomMember {
+                name: "me".to_string(),
+                mesh_addr: Some(my_listener.local_addr().unwrap()),
+            },
+        ];
+        let host = spawn_mesh_server(host_listener, "host".to_string());
+
+        let streams = establish_full_mesh(&members, 2, "me", &my_listener).unwrap();
+        let _host_side = host.join().unwrap();
+
+        assert_eq!(streams.len(), 2, "自分以外の全員ぶんの枠が並ぶはず");
+        assert!(streams[0].is_some(), "主催者とは接続を張るはず");
+        assert!(streams[1].is_none(), "AIの枠へは繋ぎに行かないはず");
+    }
+
+    #[test]
+    fn a_room_with_an_ai_still_connects_the_humans_in_room_index_order() {
+        // 人間3人+AI1人。AIが混ざっても人間どうしの接続の本数・順序は変わらない。
+        let mut participants = run_room_with_ai(&numbered_names(3), 1);
+
+        assert_streams_are_in_room_index_order(&mut participants, 1);
+    }
+
+    #[test]
+    fn everyone_sees_the_added_ai_at_the_end_of_the_roster() {
+        // AIは主催者がrosterの末尾へ追加する。ゲストが受け取る`RoomRoster`でも同じ並びに
+        // なっていないと、代理送信(#300)のroom内インデックスが指す相手が食い違う。
+        const AI_COUNT: usize = 2;
+        let names = numbered_names(2);
+        let participants = run_room_with_ai(&names, AI_COUNT);
+
+        for (my_index, participant) in participants.iter().enumerate() {
+            let mut expected: Vec<String> = names
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != my_index)
+                .map(|(_, name)| name.clone())
+                .collect();
+            expected.extend((1..=AI_COUNT).map(ai_member_name));
+            assert_eq!(
+                participant.other_names, expected,
+                "参加者{my_index}はAIを人間の後ろに並べた名前一覧を受け取るはず"
+            );
+        }
     }
 }

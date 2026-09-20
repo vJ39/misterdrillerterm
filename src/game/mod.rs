@@ -144,6 +144,12 @@ pub enum InputAction {
     /// Vキー: 対戦相手探索ロビーで、通信を使わずローカルでAIと対戦を開始する(#296)。
     /// ロビー画面でのみ意味を持つため、この解釈も`Game`の外側=`lobby::LobbyState`が担う
     StartAiBattle,
+    /// Iキー: これから始めるルームへ追加するAIの人数を1人増やす(#300)。#296の`StartAiBattle`と
+    /// 違い、通信ありのルームに人間の参加者と混ぜて入れるAIの枠を増やす操作。
+    /// ロビー画面でのみ意味を持つため、この解釈も`Game`の外側=`lobby::LobbyState`が担う
+    IncreaseRoomAiCount,
+    /// Dキー: `IncreaseRoomAiCount`で増やしたAIの人数を1人減らす(#300)
+    DecreaseRoomAiCount,
 }
 
 /// ゲーム全体の進行状態。
