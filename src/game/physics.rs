@@ -264,8 +264,28 @@ fn is_overhead_unstable(
     player_pos: (usize, usize),
     solid: &[Pos],
 ) -> bool {
-    fall_hazard_status(board, gravity, target, player_pos, solid)
-        .is_some_and(|status| status.unsupported && !status.shaking)
+    let Some(status) = fall_hazard_status(board, gravity, target, player_pos, solid) else {
+        return false;
+    };
+    // 揺れ中の猶予(#26)は、掘削で1マス消したその場で安全になる単発ブロックを想定した
+    // ものだった。塊がさらに上へ続いている場合、掘削の連打で段を1つずつ消しながら
+    // 塊全体を掘り抜けてしまい、本来なら押し潰されるべき状況を無条件に回避できて
+    // しまっていた(ユーザー指摘: 「2マス目以上上空にあるものは掘れない仕様のはず」)。
+    // targetのさらに真上に危険なブロックが控えている場合は、揺れの猶予を適用しない。
+    status.unsupported && (!status.shaking || has_hazard_directly_above(board, target))
+}
+
+/// `pos`の直上のセルに、押し潰しの脅威になり得る種類のブロックがあるかどうか
+/// (TERM独自拡張)。AIR・アイテムは押し潰しの脅威にならない(既存の`fall_hazard_status`
+/// と同じ扱い)ため対象外とする。
+fn has_hazard_directly_above(board: &Board, pos: (usize, usize)) -> bool {
+    if pos.0 == 0 {
+        return false;
+    }
+    matches!(
+        board.cell(pos.0 - 1, pos.1),
+        Cell::Color(_) | Cell::Rock { .. } | Cell::Diamond | Cell::Star { .. }
+    )
 }
 
 /// セル`target`が「いずれ落ちてくる可能性がある」かどうか(TERM独自拡張。#218)。
@@ -1107,6 +1127,64 @@ mod tests {
         board.rows[0][player.col] = Cell::Diamond; // 直下(row0)を含め周囲は空=未支持
 
         let outcome = drill_facing(&mut board, &mut player, &GravityState::new(), &[]);
+
+        assert_eq!(outcome, DrillOutcome::CrushedByUnstableOverhead);
+    }
+
+    #[test]
+    fn is_overhead_unstable_still_allows_drilling_a_lone_shaking_block_with_nothing_above() {
+        // #26の既存仕様: 頭上1マスだけの単発ブロックが揺れている間は、その場を掘って
+        // 安全に処理できる(2マス目以上上空に何もないケース)。
+        let mut board = empty_board(3);
+        board.rows[0][5] = Cell::Color(ColorKind::Red); // 支えなし、単発
+        let mut player = Player::new();
+        player.row = 1;
+        player.col = 5;
+        player.facing = Direction::Up;
+        let mut gravity = GravityState::new();
+        process_gravity_tick(
+            &mut board,
+            &mut player,
+            &[],
+            &mut gravity,
+            false,
+            SHAKE_TICKS,
+        );
+        assert!(gravity.is_shaking((0, 5)), "前提: 揺れ始めているはず");
+
+        let outcome = drill_facing(&mut board, &mut player, &gravity, &[]);
+
+        assert_eq!(outcome, DrillOutcome::ColorDestroyed { blocks: 1 });
+    }
+
+    #[test]
+    fn is_overhead_unstable_crushes_when_a_second_block_still_looms_above_a_shaking_one() {
+        // ユーザー指摘: 「2マス目以上上空にあるものは掘れない仕様のはず」。頭上1マス目
+        // (target)が揺れていても、その真上にまだ同じ塊の続きが控えている場合は、揺れの
+        // 猶予を適用せず押し潰される。単発ブロックのための救済(#26)を、複数段積まれた
+        // 塊を掘削連打で全段掘り抜く手段にできてしまっていたバグの修正。
+        let mut board = empty_board(4);
+        board.rows[0][5] = Cell::Color(ColorKind::Blue); // 2マス目(さらに上空)
+        board.rows[1][5] = Cell::Color(ColorKind::Blue); // 1マス目(target、プレイヤーの直上)
+        let mut player = Player::new();
+        player.row = 2;
+        player.col = 5;
+        player.facing = Direction::Up;
+        let mut gravity = GravityState::new();
+        process_gravity_tick(
+            &mut board,
+            &mut player,
+            &[],
+            &mut gravity,
+            false,
+            SHAKE_TICKS,
+        );
+        assert!(
+            gravity.is_shaking((1, 5)),
+            "前提: target(1マス目)は揺れ始めているはず"
+        );
+
+        let outcome = drill_facing(&mut board, &mut player, &gravity, &[]);
 
         assert_eq!(outcome, DrillOutcome::CrushedByUnstableOverhead);
     }
