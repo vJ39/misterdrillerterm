@@ -433,6 +433,8 @@ pub enum PacketType {
     Decline,
     /// 探索/募集からの離脱通知。
     Bye,
+    /// ゲストからの開始要求(ホストの追認なしに即座に開始する。#293)。
+    RequestStart,
 }
 
 impl PacketType {
@@ -443,6 +445,7 @@ impl PacketType {
             PacketType::Accept => 0x03,
             PacketType::Decline => 0x04,
             PacketType::Bye => 0x05,
+            PacketType::RequestStart => 0x06,
         }
     }
 
@@ -453,6 +456,7 @@ impl PacketType {
             0x03 => Some(PacketType::Accept),
             0x04 => Some(PacketType::Decline),
             0x05 => Some(PacketType::Bye),
+            0x06 => Some(PacketType::RequestStart),
             _ => None,
         }
     }
@@ -467,7 +471,8 @@ impl PacketType {
 pub struct DiscoveryPacket {
     pub packet_type: PacketType,
     pub sender_id: Uuid,
-    /// HELLO/BYEでは全ゼロ(`Uuid::nil()`)。INVITE/ACCEPT/DECLINEでは相手の`sender_id`。
+    /// HELLO/BYEでは全ゼロ(`Uuid::nil()`)。INVITE/ACCEPT/DECLINE/REQUEST_STARTでは
+    /// 相手の`sender_id`。
     pub target_id: Uuid,
     pub player_name: String,
     /// このホストが対戦開始後にlistenするTCPポート。
@@ -1005,6 +1010,7 @@ mod tests {
             PacketType::Accept,
             PacketType::Decline,
             PacketType::Bye,
+            PacketType::RequestStart,
         ] {
             // HELLO/BYEは全ゼロ、招待系は相手のIDを載せる。
             let target_id = match packet_type {

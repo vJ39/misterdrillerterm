@@ -482,7 +482,7 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
             lines.push(Line::from(""));
             lines.push(line("Esc: 取り消す".to_string()));
         }
-        LobbyPhase::IncomingInvite { from } => {
+        LobbyPhase::IncomingInvite { from, .. } => {
             lines.push(line(format!(
                 "「{}」から対戦を申し込まれました",
                 from.player_name
@@ -500,6 +500,9 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
             lines.push(line(
                 "ルームに参加しました。開始を待っています...".to_string(),
             ));
+            lines.push(Line::from(""));
+            // 開始はゲストからも出せる(#293)。
+            lines.push(line("Tab: 自分から対戦をはじめる".to_string()));
         }
         LobbyPhase::Notice { message, .. } => {
             lines.push(line(message.clone()));
@@ -3957,16 +3960,30 @@ mod tests {
 
     #[test]
     fn the_lobby_tells_a_guest_that_it_is_waiting_for_the_host_to_start() {
-        // #276: ゲスト側は主催者の開始操作を待つ間、何を待っているか分かるようにする。
+        // #276: ゲスト側はホストの開始操作を待つ間、何を待っているか分かるようにする。
+        // #293: ゲスト自身も開始できるため、その案内も出す。
         let mut lobby = LobbyState::new_on_loopback("me".to_string())
             .expect("ループバックのソケットは確保できるはず");
         let (_result_tx, result_rx) = std::sync::mpsc::channel();
-        lobby.set_phase(LobbyPhase::WaitingForRoomStart { result_rx });
+        lobby.set_phase(LobbyPhase::WaitingForRoomStart {
+            result_rx,
+            host_peer: DiscoveredPeer::for_test(
+                "Player-1a2b",
+                IpAddr::from(Ipv4Addr::LOCALHOST),
+                39394,
+            ),
+        });
 
-        assert!(screen_shows(
-            &render_network_lobby(&lobby),
-            "ルームに参加しました。開始を待っています..."
-        ));
+        let text = render_network_lobby(&lobby);
+
+        assert!(
+            screen_shows(&text, "ルームに参加しました。開始を待っています..."),
+            "開始待ちの文面が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Tab: 自分から対戦をはじめる"),
+            "ゲスト側の開始操作の案内が出ていない:\n{text}"
+        );
     }
 
     #[test]
@@ -3975,6 +3992,8 @@ mod tests {
             .expect("ループバックのソケットは確保できるはず");
         lobby.set_phase(LobbyPhase::IncomingInvite {
             from: DiscoveredPeer::for_test("Player-1a2b", IpAddr::from(Ipv4Addr::LOCALHOST), 39394),
+            pending: Vec::new(),
+            guests: Vec::new(),
         });
 
         let text = render_network_lobby(&lobby);
@@ -3997,6 +4016,7 @@ mod tests {
             message: "相手に断られました".to_string(),
             shown_at: std::time::Instant::now(),
             guests: Vec::new(),
+            pending: Vec::new(),
         });
 
         assert!(screen_shows(

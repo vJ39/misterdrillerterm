@@ -1108,7 +1108,7 @@ Sキー(`ToggleSound`、1章)でSE・BGMを一括してON/OFF切り替えでき�
 
 | 用途 | プロトコル | ポート |
 |---|---|---|
-| 対戦相手探索(HELLO/INVITE/ACCEPT/DECLINE/BYE) | UDP | 39393 |
+| 対戦相手探索(HELLO/INVITE/ACCEPT/DECLINE/BYE/REQUEST_START) | UDP | 39393 |
 | ゲーム開始後の本接続(既定値。実際に使う値はHELLOパケットで相手に通知する) | TCP | 39394 |
 
 - ブロードキャスト送信先は`255.255.255.255:39393`(サブネット限定ブロードキャストが必要な環境向けに、各ネットワークインターフェースのIPv4アドレスから求めた directed broadcast アドレスへ個別送信するフォールバックも実装しておくことが望ましい)
@@ -1138,6 +1138,7 @@ Sキー(`ToggleSound`、1章)でSE・BGMを一括してON/OFF切り替えでき�
 | 0x03 | ACCEPT | 招待受諾 | 招待者のsender_id |
 | 0x04 | DECLINE | 招待拒否 | 招待者のsender_id |
 | 0x05 | BYE | 探索/募集からの離脱通知(候補リストからの即時除去用) | 全ゼロ |
+| 0x06 | REQUEST_START | ゲストからホストへの開始要求。ホストは追認せず即座に開始する(#293) | ホストのsender_id |
 
 #### 候補リストの管理
 

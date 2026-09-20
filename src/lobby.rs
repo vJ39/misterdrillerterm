@@ -1,15 +1,17 @@
-//! 対戦相手を探して招待をやり取りするロビー画面の状態(#256。spec.md 12.1)。
+//! 対戦相手を探して参加リクエストをやり取りするロビー画面の状態(#256。spec.md 12.1)。
 //!
-//! UDP探索(`discovery.rs`)の候補リストと、招待→ルーム参加→フルメッシュ確立(`room.rs`)→
-//! 対戦開始(`battle.rs`)までの流れを1つの状態機械にまとめる。入力の取り込みと描画は
-//! 画面側(`app::screens::tick_network_lobby`・`ui::render::draw_network_lobby`)が行い、
+//! UDP探索(`discovery.rs`)の候補リストと、参加リクエスト→ルーム参加→フルメッシュ確立
+//! (`room.rs`)→対戦開始(`battle.rs`)までの流れを1つの状態機械にまとめる。入力の取り込みと
+//! 描画は画面側(`app::screens::tick_network_lobby`・`ui::render::draw_network_lobby`)が行い、
 //! ここは「押された操作」と「経過時間」を受け取ってフェーズを進めることに専念する
 //! (ターミナルを持たずに結合テストできるようにするため)。
 //!
-//! N人対戦(#276。docs/multiplayer-4p-lobby-design.md)では役割が2人版から反転していて、
-//! **招待した側が常にルームの主催者(TCPサーバ役)**・承諾した側がゲスト(クライアント役)
-//! になる。主催者は承諾が返るたびにゲストを1人ずつ迎え入れ、集まったところで開始操作
-//! (Tab)を出す。
+//! 役割は「参加リクエストを送った側が常にゲスト(TCPクライアント役)・受けた側が
+//! ホスト(TCPサーバ役)」で固定する(#293。docs/multiplayer-lobby-join-request-redesign.md。
+//! #276で導入した「招待した側が主催者」から反転させたもの)。ホストは探索リストに
+//! いる間ずっと募集中で、届いたリクエストを1件ずつ確認してゲストを迎え入れる。
+//! 同時に複数届いた場合は`pending`へ積み、順番に確認する。対戦の開始操作(Tab)は
+//! ホストとゲストのどちらからでも出せる。
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -83,38 +85,58 @@ pub struct LobbyState {
 
 /// ロビーの進行段階。
 pub enum LobbyPhase {
-    /// 候補を探しながら招待を待っている通常状態。`guests`が空でなければ、既にルームを
-    /// 開いていて追加の招待を送れる状態(設計書2節)。
+    /// 候補を探しながら参加リクエストを待っている通常状態。`guests`が空でなければ、
+    /// 既にルームを開いていて、さらに参加リクエストを受けられる状態(#293)。
     Discovering { guests: Vec<HostedGuest> },
-    /// 自分から招待を送り、相手の応答を待っている。
+    /// 自分から参加リクエストを送り、相手の応答を待っている(#293で名前は維持)。
     AwaitingInviteResponse {
         target: DiscoveredPeer,
         sent_at: Instant,
         guests: Vec<HostedGuest>,
     },
-    /// 招待を受け取り、承諾するか聞いている。
-    IncomingInvite { from: DiscoveredPeer },
-    /// ACCEPTを受けたゲストのTCP接続を待っている(主催者側)。
+    /// 参加リクエストを受け取り、許可するか聞いている。
+    ///
+    /// `pending`は他に届いている未処理の参加リクエスト(#293。1件ずつ順番に処理し、
+    /// #291のように無応答で待たされる相手を出さない)。
+    IncomingInvite {
+        from: DiscoveredPeer,
+        pending: Vec<DiscoveredPeer>,
+        guests: Vec<HostedGuest>,
+    },
+    /// ACCEPTを返したゲストのTCP接続を待っている(ホスト側)。
+    ///
+    /// `pending`はここにも持たせ、接続待ち中に届いた参加リクエストを取り逃さない(#293)。
     AcceptingGuestConnection {
         guest_name: String,
         started: Instant,
+        pending: Vec<DiscoveredPeer>,
         guests: Vec<HostedGuest>,
     },
-    /// 招待を承諾し、主催者への接続を試みている(ゲスト側)。
-    ConnectingToHost { addr: SocketAddr, host_name: String },
-    /// 主催者へ接続・`JoinRoom`送信済みで、開始(`RoomRoster`以降)を別スレッドで待っている。
+    /// 参加リクエストが許可され、ホストへの接続を試みている(ゲスト側)。
+    ///
+    /// `host_peer`は開始要求(REQUEST_START)の送信先として持ち越す(#293)。
+    ConnectingToHost {
+        addr: SocketAddr,
+        host_name: String,
+        host_peer: DiscoveredPeer,
+    },
+    /// ホストへ接続・`JoinRoom`送信済みで、開始(`RoomRoster`以降)を別スレッドで待っている。
+    /// このフェーズでStartRoom操作を受け付け、ホストへ開始要求を送る(#293)。
     WaitingForRoomStart {
         result_rx: mpsc::Receiver<io::Result<RoomStartResult>>,
+        host_peer: DiscoveredPeer,
     },
     /// 拒否・タイムアウト・接続失敗を短く伝える。時間が経つと探索へ戻る。
     ///
-    /// `guests`は主催者側で既に迎え入れていたゲスト(#284。招待や接続の失敗1つで
+    /// `guests`はホスト側で既に迎え入れていたゲスト(#284。リクエストや接続の失敗1つで
     /// ルーム全体を解散させないよう、通知を挟んでも持ち越す)。ゲスト側の失敗
-    /// (このロビー自身がまだ誰も迎えていない)では空になる。
+    /// (このロビー自身がまだ誰も迎えていない)では空になる。`pending`も同じ理由で
+    /// 持ち越す(#293)。
     Notice {
         message: String,
         shown_at: Instant,
         guests: Vec<HostedGuest>,
+        pending: Vec<DiscoveredPeer>,
     },
 }
 
@@ -132,14 +154,19 @@ pub enum LobbyOutcome {
 /// 持ちcloneできないため、「現在のフェーズを見て決める」ところと「フェーズを入れ替える」
 /// ところを分ける(借用が重ならないようにするため)。
 enum PacketEffect {
-    /// 招待された。
+    /// 参加リクエストが届いた。許可するか聞く。
     IncomingInvite(DiscoveredPeer),
-    /// ルームを開いている最中に招待された。返信だけして状態は変えない。
+    /// ルームが満員の最中に参加リクエストが届いた。返信だけして状態は変えない。
     DeclineWhileHosting(DiscoveredPeer),
-    /// 招待が承諾された。ゲストの接続待ちへ移る。
-    InviteAccepted { guest_name: String },
-    /// 招待が断られた。
+    /// 別のリクエストの処理中に参加リクエストが届いた。順番待ちへ積む(#293)。
+    QueueRequest(DiscoveredPeer),
+    /// 自分の参加リクエストが許可された。ホストへの接続へ移る(#293で自分はゲスト)。
+    /// 接続先と開始要求の送信先の両方に使うため、相手の候補情報ごと載せる。
+    InviteAccepted(DiscoveredPeer),
+    /// 参加リクエストが断られた。
     InviteDeclined,
+    /// ゲストから開始要求が届いた。追認なしに即座に開始する(#293)。
+    StartRequested,
 }
 
 impl LobbyState {
@@ -193,16 +220,20 @@ impl LobbyState {
         match &self.phase {
             LobbyPhase::Discovering { guests }
             | LobbyPhase::AwaitingInviteResponse { guests, .. }
+            | LobbyPhase::IncomingInvite { guests, .. }
             | LobbyPhase::AcceptingGuestConnection { guests, .. } => guests,
             _ => &[],
         }
     }
 
     /// 1フレーム分進める。`actions`はこのフレームに届いた操作、`config`は自分が
-    /// 主催者になった場合に参加者へ強制適用する設定(spec.md 12.2)。
+    /// ホストになった場合に参加者へ強制適用する設定(spec.md 12.2)。
     pub fn update(&mut self, actions: &[InputAction], config: BattleConfig) -> LobbyOutcome {
         let packets = self.discovery.tick();
-        self.apply_packets(packets);
+        // ゲストからの開始要求で対戦が成立することがあるため、結果を持ち帰る(#293)。
+        if let Some(outcome) = self.apply_packets(packets, config) {
+            return outcome;
+        }
         self.clamp_selection();
 
         for &action in actions {
@@ -214,84 +245,121 @@ impl LobbyState {
         self.advance_phase()
     }
 
-    /// 受信した自分宛のINVITE/ACCEPT/DECLINEを、現在のフェーズに応じて反映する。
-    fn apply_packets(&mut self, packets: Vec<DiscoveryPacket>) {
+    /// 受信した自分宛のINVITE/ACCEPT/DECLINE/REQUEST_STARTを、現在のフェーズに応じて
+    /// 反映する。開始要求で対戦が成立した場合だけ`Some`を返す(#293)。
+    fn apply_packets(
+        &mut self,
+        packets: Vec<DiscoveryPacket>,
+        config: BattleConfig,
+    ) -> Option<LobbyOutcome> {
         for packet in packets {
             match self.packet_effect(&packet) {
                 Some(PacketEffect::IncomingInvite(from)) => {
-                    self.phase = LobbyPhase::IncomingInvite { from };
+                    let guests = self.take_guests();
+                    let pending = self.take_pending();
+                    self.phase = LobbyPhase::IncomingInvite {
+                        from,
+                        pending,
+                        guests,
+                    };
                 }
                 Some(PacketEffect::DeclineWhileHosting(from)) => {
-                    // 設計書に無い判断(#276の報告に記載): ルームを開いている最中の招待は
-                    // 自動で断る。承諾してしまうと迎え入れ済みのゲストの接続を捨てる=
-                    // 相手を黙って切断することになるため。
+                    // ルームが満員の最中の参加リクエストは自動で断る。無視すると相手は
+                    // タイムアウト(`INVITE_TIMEOUT_MS`)まで無応答で待たされるため。
                     let _ = self.discovery.send_decline(&from);
                 }
-                Some(PacketEffect::InviteAccepted { guest_name }) => {
-                    let guests = self.take_guests();
-                    self.phase = LobbyPhase::AcceptingGuestConnection {
-                        guest_name,
-                        started: Instant::now(),
-                        guests,
+                Some(PacketEffect::QueueRequest(from)) => self.push_pending(from),
+                Some(PacketEffect::InviteAccepted(host)) => {
+                    // 参加リクエストを送った側はゲスト(TCPクライアント役)になる(#293)。
+                    // ルームに入るので自分の募集はここで止める。
+                    self.discovery.send_bye();
+                    self.phase = LobbyPhase::ConnectingToHost {
+                        // 接続先はホストのIPと、HELLOで広告されていたTCPポート。
+                        addr: SocketAddr::new(host.addr, host.tcp_port),
+                        host_name: host.player_name.clone(),
+                        host_peer: host,
                     };
                 }
                 Some(PacketEffect::InviteDeclined) => {
                     let guests = self.take_guests();
-                    self.phase = notice("相手に断られました", guests);
+                    self.phase = notice("相手に断られました", guests, Vec::new());
                 }
+                // ホストの追認なしに即座に開始する(#293)。
+                Some(PacketEffect::StartRequested) => return Some(self.start_room(config)),
                 None => {}
             }
         }
+        None
     }
 
     /// パケット1つを現在のフェーズと突き合わせ、何をするか決める(状態は変えない)。
     fn packet_effect(&self, packet: &DiscoveryPacket) -> Option<PacketEffect> {
         match (&self.phase, packet.packet_type) {
-            // 招待された。送り主は候補リストに載っているはず(HELLOを1秒間隔で
-            // 流し合っているため)で、載っていなければ返信先が分からないので無視する。
+            // 参加リクエストが届いた。ゲストが既にいても受け付ける(N人対戦なので、
+            // 満員(`ROOM_MAX_PLAYERS`)になるまでは追加で迎え入れられる。#293)。
             (LobbyPhase::Discovering { guests }, PacketType::Invite) => {
-                let from = self
-                    .discovery
-                    .peers()
-                    .iter()
-                    .find(|peer| peer.sender_id == packet.sender_id)?
-                    .clone();
-                if guests.is_empty() {
-                    Some(PacketEffect::IncomingInvite(from))
-                } else {
+                let from = self.peer_of(packet)?;
+                if guests.len() + 1 >= ROOM_MAX_PLAYERS {
                     Some(PacketEffect::DeclineWhileHosting(from))
+                } else {
+                    Some(PacketEffect::IncomingInvite(from))
                 }
             }
-            // 既に別の招待の検討中(まだ受ける/断るの返事をしていない)に来た招待。
-            // 無視すると相手はタイムアウト(`INVITE_TIMEOUT_MS`)まで無応答で待たされる
-            // ため、ゲストがいる時と同様に即座に断る(#291で発覚)。
-            (LobbyPhase::IncomingInvite { from: current }, PacketType::Invite)
-                if current.sender_id != packet.sender_id =>
-            {
-                let from = self
-                    .discovery
-                    .peers()
-                    .iter()
-                    .find(|peer| peer.sender_id == packet.sender_id)?
-                    .clone();
-                Some(PacketEffect::DeclineWhileHosting(from))
+            // 別の参加リクエストの検討中(まだ許可/拒否の返事をしていない)に来たもの。
+            // 順番待ちへ積んで、今のリクエストを処理した後に確認する(#293)。
+            (
+                LobbyPhase::IncomingInvite {
+                    from: current,
+                    pending,
+                    ..
+                },
+                PacketType::Invite,
+            ) => {
+                // 同じ相手からの再送(HELLO間隔で何度も押された等)は積まない。
+                if current.sender_id == packet.sender_id || is_queued(pending, packet) {
+                    return None;
+                }
+                Some(PacketEffect::QueueRequest(self.peer_of(packet)?))
+            }
+            // ゲストの接続待ち中・通知表示中に来たものも取りこぼさず積む(#293)。
+            (LobbyPhase::AcceptingGuestConnection { pending, .. }, PacketType::Invite)
+            | (LobbyPhase::Notice { pending, .. }, PacketType::Invite) => {
+                if is_queued(pending, packet) {
+                    return None;
+                }
+                Some(PacketEffect::QueueRequest(self.peer_of(packet)?))
             }
             (LobbyPhase::AwaitingInviteResponse { target, .. }, PacketType::Accept)
                 if target.sender_id == packet.sender_id =>
             {
-                // 招待した側が主催者になるため、接続先(相手のポート)は使わない。
-                // ゲストの方が広告済みのポートへ接続してくる(設計書1節)。
-                Some(PacketEffect::InviteAccepted {
-                    guest_name: target.player_name.clone(),
-                })
+                Some(PacketEffect::InviteAccepted(target.clone()))
             }
             (LobbyPhase::AwaitingInviteResponse { target, .. }, PacketType::Decline)
                 if target.sender_id == packet.sender_id =>
             {
                 Some(PacketEffect::InviteDeclined)
             }
+            // ゲストからの開始要求。迎え入れたゲストが1人もいなければ意味が無いので無視する。
+            (LobbyPhase::Discovering { guests }, PacketType::RequestStart)
+            | (LobbyPhase::AcceptingGuestConnection { guests, .. }, PacketType::RequestStart) => {
+                if guests.is_empty() {
+                    None
+                } else {
+                    Some(PacketEffect::StartRequested)
+                }
+            }
             _ => None,
         }
+    }
+
+    /// パケットの送り主を候補リストから引く。HELLOを1秒間隔で流し合っているため
+    /// 載っているはずで、載っていなければ返信先が分からないので扱わない。
+    fn peer_of(&self, packet: &DiscoveryPacket) -> Option<DiscoveredPeer> {
+        self.discovery
+            .peers()
+            .iter()
+            .find(|peer| peer.sender_id == packet.sender_id)
+            .cloned()
     }
 
     /// 操作を1つ反映する。ロビーを抜ける・対戦が成立する場合だけ`Some`を返す。
@@ -317,43 +385,54 @@ impl LobbyState {
                 }
                 _ => {}
             },
-            // 招待のキャンセル。探索自体は続けるためBYEは送らない。迎え入れ済みの
-            // ゲストは持ち越す。
+            // 参加リクエストのキャンセル。探索自体は続けるためBYEは送らない。
+            // 迎え入れ済みのゲストは持ち越す。
             LobbyPhase::AwaitingInviteResponse { .. } => {
                 if action == InputAction::Quit {
                     let guests = self.take_guests();
                     self.phase = LobbyPhase::Discovering { guests };
                 }
             }
-            LobbyPhase::IncomingInvite { from } => match action {
-                // Enter=承諾、Esc=拒否(既存の入力体系に合わせる)。
+            LobbyPhase::IncomingInvite { from, .. } => match action {
+                // Enter=許可、Esc=拒否(既存の入力体系に合わせる)。
                 InputAction::Confirm => {
-                    let host = from.clone();
-                    if self.discovery.send_accept(&host).is_err() {
-                        self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
+                    let guest = from.clone();
+                    if self.discovery.send_accept(&guest).is_err() {
+                        let guests = self.take_guests();
+                        let pending = self.take_pending();
+                        self.phase = notice(CONNECT_FAILED_MESSAGE, guests, pending);
                         return None;
                     }
-                    // 承諾した側はゲスト(TCPクライアント役)になる(設計書1節)。
-                    // ルームに入るので自分の募集はここで止める(主催者側は追加の招待を
-                    // 送るため広告を続ける。止めるのは開始する時)。
-                    self.discovery.send_bye();
-                    self.phase = LobbyPhase::ConnectingToHost {
-                        // 接続先は主催者のIPと、HELLOで広告されていたTCPポート。
-                        addr: SocketAddr::new(host.addr, host.tcp_port),
-                        host_name: host.player_name,
+                    // 参加リクエストを受けた側はホスト(TCPサーバ役)のまま、相手の接続を
+                    // 待つ(#293)。募集は続けるのでBYEは送らない(止めるのは開始する時)。
+                    let guests = self.take_guests();
+                    let pending = self.take_pending();
+                    self.phase = LobbyPhase::AcceptingGuestConnection {
+                        guest_name: guest.player_name,
+                        started: Instant::now(),
+                        pending,
+                        guests,
                     };
                 }
                 InputAction::Quit => {
-                    let inviter = from.clone();
-                    let _ = self.discovery.send_decline(&inviter);
-                    self.phase = discovering();
+                    let requester = from.clone();
+                    let _ = self.discovery.send_decline(&requester);
+                    let guests = self.take_guests();
+                    let pending = self.take_pending();
+                    self.back_to_discovering(guests, pending);
                 }
                 _ => {}
             },
-            // 接続中・開始待ち・通知表示中は操作を受け付けない。
+            // ゲストからも開始できる。ホストへ開始要求を送るだけで、状態は変えない
+            // (開始はホストが配る`RoomRoster`以降で進む。#293)。
+            LobbyPhase::WaitingForRoomStart { host_peer, .. } => {
+                if action == InputAction::StartRoom {
+                    let _ = self.discovery.send_request_start(host_peer);
+                }
+            }
+            // 接続中・通知表示中は操作を受け付けない。
             LobbyPhase::AcceptingGuestConnection { .. }
             | LobbyPhase::ConnectingToHost { .. }
-            | LobbyPhase::WaitingForRoomStart { .. }
             | LobbyPhase::Notice { .. } => {}
         }
 
@@ -364,7 +443,7 @@ impl LobbyState {
     /// Tabキーの操作から呼ぶため、ここでは設定を受け取らない。
     fn advance_phase(&mut self) -> LobbyOutcome {
         match &self.phase {
-            // 招待を受けた側には期限を設けない(招待した側が`INVITE_TIMEOUT_MS`で
+            // 参加リクエストを受けた側には期限を設けない(送った側が`INVITE_TIMEOUT_MS`で
             // 諦めるため、両側に時計を持たせる必要は無い)。
             LobbyPhase::Discovering { .. } | LobbyPhase::IncomingInvite { .. } => {
                 LobbyOutcome::Stay
@@ -373,7 +452,7 @@ impl LobbyState {
                 let sent_at = *sent_at;
                 if sent_at.elapsed() >= Duration::from_millis(INVITE_TIMEOUT_MS) {
                     let guests = self.take_guests();
-                    self.phase = notice("応答がありませんでした", guests);
+                    self.phase = notice("応答がありませんでした", guests, Vec::new());
                 }
                 LobbyOutcome::Stay
             }
@@ -382,23 +461,27 @@ impl LobbyState {
                 self.accept_guest(started);
                 LobbyOutcome::Stay
             }
-            LobbyPhase::ConnectingToHost { addr, .. } => {
+            LobbyPhase::ConnectingToHost {
+                addr, host_peer, ..
+            } => {
                 let addr = *addr;
-                self.connect_to_host(addr)
+                let host_peer = host_peer.clone();
+                self.connect_to_host(addr, host_peer)
             }
             LobbyPhase::WaitingForRoomStart { .. } => self.receive_room_start(),
             LobbyPhase::Notice { shown_at, .. } => {
                 let shown_at = *shown_at;
                 if shown_at.elapsed() >= Duration::from_millis(NOTICE_DISPLAY_MS) {
                     let guests = self.take_guests();
-                    self.phase = LobbyPhase::Discovering { guests };
+                    let pending = self.take_pending();
+                    self.back_to_discovering(guests, pending);
                 }
                 LobbyOutcome::Stay
             }
         }
     }
 
-    /// 主催者として、ACCEPTを返したゲストのルーム参加接続を受け入れる(非ブロッキング
+    /// ホストとして、ACCEPTを返したゲストのルーム参加接続を受け入れる(非ブロッキング
     /// のため毎フレーム1回試す)。`JoinRoom`の読み取りだけは短時間のブロッキングで
     /// 済ませる(設計書4節)。
     fn accept_guest(&mut self, started: Instant) {
@@ -407,29 +490,33 @@ impl LobbyState {
                 Ok(guest) => {
                     let mut guests = self.take_guests();
                     guests.push(guest);
-                    self.phase = LobbyPhase::Discovering { guests };
+                    let pending = self.take_pending();
+                    self.back_to_discovering(guests, pending);
                 }
                 Err(_) => {
                     // このゲストの接続には失敗したが、既に迎え入れていた他のゲストは
                     // 持ち越す(#284)。
                     let guests = self.take_guests();
-                    self.phase = notice(CONNECT_FAILED_MESSAGE, guests);
+                    let pending = self.take_pending();
+                    self.phase = notice(CONNECT_FAILED_MESSAGE, guests, pending);
                 }
             },
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 if started.elapsed() >= Duration::from_millis(TCP_CONNECT_TIMEOUT_MS) {
                     let guests = self.take_guests();
-                    self.phase = notice(CONNECT_FAILED_MESSAGE, guests);
+                    let pending = self.take_pending();
+                    self.phase = notice(CONNECT_FAILED_MESSAGE, guests, pending);
                 }
             }
             Err(_) => {
                 let guests = self.take_guests();
-                self.phase = notice(CONNECT_FAILED_MESSAGE, guests);
+                let pending = self.take_pending();
+                self.phase = notice(CONNECT_FAILED_MESSAGE, guests, pending);
             }
         }
     }
 
-    /// 集まったゲストで対戦を開始する(主催者)。`room::start_room_as_host`はメッシュ
+    /// 集まったゲストで対戦を開始する(ホスト)。`room::start_room_as_host`はメッシュ
     /// 確立まで進むためブロッキングだが、対戦成立までの一度きりの処理として扱う
     /// (設計書4節)。
     fn start_room(&mut self, config: BattleConfig) -> LobbyOutcome {
@@ -457,16 +544,16 @@ impl LobbyState {
         match started {
             Ok((streams, handshake)) => self.battle_from_room(streams, guest_names, handshake),
             Err(_) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new(), Vec::new());
                 LobbyOutcome::Stay
             }
         }
     }
 
-    /// ゲストとして主催者へ接続し、`JoinRoom`を送る。接続は`connect_timeout`自体が
-    /// 待ち時間を持つため1回で決着させ、その後の「主催者が開始するのを待つ」区間は
+    /// ゲストとしてホストへ接続し、`JoinRoom`を送る。接続は`connect_timeout`自体が
+    /// 待ち時間を持つため1回で決着させ、その後の「ホストが開始するのを待つ」区間は
     /// いつ終わるか分からないため別スレッドへ載せる(設計書5節)。
-    fn connect_to_host(&mut self, addr: SocketAddr) -> LobbyOutcome {
+    fn connect_to_host(&mut self, addr: SocketAddr, host_peer: DiscoveredPeer) -> LobbyOutcome {
         // メッシュ用listenerは待ち受けスレッドへ渡すため複製する(自分は以降使わないが、
         // ロビーの持ち物として開いたままにしておく)。
         let joined = self.mesh_listener.try_clone().and_then(|mesh_listener| {
@@ -476,7 +563,7 @@ impl LobbyState {
         let (room_stream, mesh_listener) = match joined {
             Ok(joined) => joined,
             Err(_) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new(), Vec::new());
                 return LobbyOutcome::Stay;
             }
         };
@@ -491,14 +578,17 @@ impl LobbyState {
                 &mesh_listener,
             ));
         });
-        self.phase = LobbyPhase::WaitingForRoomStart { result_rx };
+        self.phase = LobbyPhase::WaitingForRoomStart {
+            result_rx,
+            host_peer,
+        };
         LobbyOutcome::Stay
     }
 
-    /// 主催者の開始を待っているスレッドから結果を受け取る(まだ届いていなければ待つ)。
+    /// ホストの開始を待っているスレッドから結果を受け取る(まだ届いていなければ待つ)。
     fn receive_room_start(&mut self) -> LobbyOutcome {
         let received = match &self.phase {
-            LobbyPhase::WaitingForRoomStart { result_rx } => result_rx.try_recv(),
+            LobbyPhase::WaitingForRoomStart { result_rx, .. } => result_rx.try_recv(),
             _ => return LobbyOutcome::Stay,
         };
 
@@ -508,7 +598,7 @@ impl LobbyState {
             }
             // 待ち受けスレッドが失敗した場合と、結果を送らずに終わった場合。
             Ok(Err(_)) | Err(mpsc::TryRecvError::Disconnected) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new(), Vec::new());
                 LobbyOutcome::Stay
             }
             Err(mpsc::TryRecvError::Empty) => LobbyOutcome::Stay,
@@ -539,7 +629,7 @@ impl LobbyState {
         ) {
             Ok(state) => LobbyOutcome::Battle(Box::new(state)),
             Err(_) => {
-                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new());
+                self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new(), Vec::new());
                 LobbyOutcome::Stay
             }
         }
@@ -551,14 +641,64 @@ impl LobbyState {
         match &mut self.phase {
             LobbyPhase::Discovering { guests }
             | LobbyPhase::AwaitingInviteResponse { guests, .. }
+            | LobbyPhase::IncomingInvite { guests, .. }
             | LobbyPhase::AcceptingGuestConnection { guests, .. }
             | LobbyPhase::Notice { guests, .. } => std::mem::take(guests),
             _ => Vec::new(),
         }
     }
 
-    /// 選択中の候補へ招待を送る。候補が1件も無い、またはルームが既に上限人数
-    /// (`ROOM_MAX_PLAYERS`)に達していれば何もしない。
+    /// 順番待ちの参加リクエストを現在のフェーズから取り出す(`take_guests`と同じ理由で
+    /// フェーズ間の移送に使う。#293)。
+    fn take_pending(&mut self) -> Vec<DiscoveredPeer> {
+        match &mut self.phase {
+            LobbyPhase::IncomingInvite { pending, .. }
+            | LobbyPhase::AcceptingGuestConnection { pending, .. }
+            | LobbyPhase::Notice { pending, .. } => std::mem::take(pending),
+            _ => Vec::new(),
+        }
+    }
+
+    /// 参加リクエストを順番待ちの末尾へ積む(#293)。持たないフェーズでは何もしない。
+    fn push_pending(&mut self, from: DiscoveredPeer) {
+        match &mut self.phase {
+            LobbyPhase::IncomingInvite { pending, .. }
+            | LobbyPhase::AcceptingGuestConnection { pending, .. }
+            | LobbyPhase::Notice { pending, .. } => pending.push(from),
+            _ => {}
+        }
+    }
+
+    /// ゲストと順番待ちを持って探索へ戻る。順番待ちが残っていれば、その先頭を次の
+    /// 確認画面として出す(#293)。
+    ///
+    /// 満員(`ROOM_MAX_PLAYERS`)に達していれば、順番待ち全員へ断りを送って捨てる。
+    /// 1件ずつ許可していく間にguestsが増えるため、`packet_effect`の人数チェック
+    /// (受信時点の人数)だけでは、許可を重ねるうちに上限を超えて迎え入れてしまう。
+    fn back_to_discovering(&mut self, guests: Vec<HostedGuest>, pending: Vec<DiscoveredPeer>) {
+        if guests.len() + 1 >= ROOM_MAX_PLAYERS {
+            for peer in &pending {
+                let _ = self.discovery.send_decline(peer);
+            }
+            self.phase = LobbyPhase::Discovering { guests };
+            return;
+        }
+        let mut pending = pending;
+        self.phase = if pending.is_empty() {
+            LobbyPhase::Discovering { guests }
+        } else {
+            let from = pending.remove(0);
+            LobbyPhase::IncomingInvite {
+                from,
+                pending,
+                guests,
+            }
+        };
+    }
+
+    /// 選択中の候補へ参加リクエストを送る(送った側は許可され次第ゲストになる。#293)。
+    /// 候補が1件も無い、またはルームが既に上限人数(`ROOM_MAX_PLAYERS`)に達していれば
+    /// 何もしない。
     fn invite_selected(&mut self) {
         if self.hosted_guests().len() + 1 >= ROOM_MAX_PLAYERS {
             return;
@@ -606,13 +746,21 @@ fn discovering() -> LobbyPhase {
 }
 
 /// 短い通知フェーズを作る。`guests`は通知を抜けた後、探索フェーズへそのまま
-/// 持ち越す(#284)。
-fn notice(message: &str, guests: Vec<HostedGuest>) -> LobbyPhase {
+/// 持ち越す(#284)。`pending`も同様に持ち越し、抜けた後で順番に確認する(#293)。
+fn notice(message: &str, guests: Vec<HostedGuest>, pending: Vec<DiscoveredPeer>) -> LobbyPhase {
     LobbyPhase::Notice {
         message: message.to_string(),
         shown_at: Instant::now(),
         guests,
+        pending,
     }
+}
+
+/// そのパケットの送り主が既に順番待ちに入っているか(同じ相手を二重に積まないため)。
+fn is_queued(pending: &[DiscoveredPeer], packet: &DiscoveryPacket) -> bool {
+    pending
+        .iter()
+        .any(|peer| peer.sender_id == packet.sender_id)
 }
 
 /// 対戦用のTCP listenerを確保する。既定ポートが使用中なら1つずつ上へ空きを探す
@@ -725,7 +873,7 @@ mod tests {
         lobbies
     }
 
-    /// 2人ぶん。招待する側(=主催者になる)と招待される側(=ゲストになる)。
+    /// 2人ぶん。参加リクエストを受ける側(=ホストになる)と送る側(=ゲストになる)。
     fn facing_lobbies() -> (LobbyState, LobbyState) {
         let mut lobbies = facing_lobbies_of(&["host", "guest"]);
         let guest = lobbies.pop().unwrap();
@@ -763,37 +911,55 @@ mod tests {
         }
     }
 
-    /// 名前で候補を選んで招待する。ルームに加わったゲストはBYEで候補から消えるため、
-    /// 固定のindexでは狙えない。
+    /// 名前で候補を選んで参加リクエストを送る。ルームに加わったゲストはBYEで候補から
+    /// 消えるため、固定のindexでは狙えない。`update`の中で候補リストが入れ替わって
+    /// indexがずれることもあるため、狙った相手へ送れるまで選び直す。
     fn invite_by_name(lobby: &mut LobbyState, name: &str) {
-        let index = lobby
-            .peers()
-            .iter()
-            .position(|peer| peer.player_name == name)
-            .unwrap_or_else(|| panic!("候補に{name}がいるはず"));
-        lobby.selection = index;
-        lobby.update(&[InputAction::Confirm], test_config());
-        assert!(
-            matches!(lobby.phase(), LobbyPhase::AwaitingInviteResponse { target, .. } if target.player_name == name),
-            "招待した側は{name}への応答待ちへ移るはず"
-        );
+        for _ in 0..200 {
+            // 先に受信を捌いて候補リストを最新にしてから選ぶ。
+            lobby.update(&[], test_config());
+            let Some(index) = lobby
+                .peers()
+                .iter()
+                .position(|peer| peer.player_name == name)
+            else {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            };
+            lobby.selection = index;
+            lobby.update(&[InputAction::Confirm], test_config());
+            match lobby.phase() {
+                LobbyPhase::AwaitingInviteResponse { target, .. } if target.player_name == name => {
+                    return;
+                }
+                // 直前のtickで候補が入れ替わり別の相手へ送ってしまった場合は取り消す。
+                LobbyPhase::AwaitingInviteResponse { .. } => {
+                    lobby.update(&[InputAction::Quit], test_config());
+                }
+                _ => {}
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!("{name}へ参加リクエストを送れなかった");
     }
 
-    /// 主催者が`guest`を招待し、ゲストがルームへ加わるまで両者を回す。
-    fn invite_and_join(host: &mut LobbyState, guest: &mut LobbyState, guest_name: &str) {
+    /// `guest`がホストへ参加リクエストを送り、許可されてルームへ加わるまで両者を回す
+    /// (#293で申し込んだ側がゲストになった)。
+    fn request_and_join(host: &mut LobbyState, guest: &mut LobbyState, guest_name: &str) {
         let joined_before = host.hosted_guests().len();
-        invite_by_name(host, guest_name);
+        let host_name = host.my_name().to_string();
+        invite_by_name(guest, &host_name);
 
         for _ in 0..MAX_PUMPS {
-            // ゲストは招待が届いたら承諾する。
+            // ホストはリクエストが届いたら許可する。
             let actions: &[InputAction] =
-                if matches!(guest.phase(), LobbyPhase::IncomingInvite { .. }) {
+                if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
                     &[InputAction::Confirm]
                 } else {
                     &[]
                 };
-            guest.update(actions, test_config());
-            host.update(&[], test_config());
+            host.update(actions, test_config());
+            guest.update(&[], test_config());
 
             if host.hosted_guests().len() > joined_before
                 && matches!(guest.phase(), LobbyPhase::WaitingForRoomStart { .. })
@@ -806,7 +972,7 @@ mod tests {
     }
 
     /// 対戦が成立するまでロビーを回し、成立したら`player_names`を返す。
-    /// `first_actions`は最初の1回だけ渡す操作(承諾のEnter・開始のTab等)。
+    /// `first_actions`は最初の1回だけ渡す操作(許可のEnter・開始のTab等)。
     fn run_until_battle(
         lobby: &mut LobbyState,
         first_actions: &[InputAction],
@@ -824,9 +990,26 @@ mod tests {
         None
     }
 
-    /// `names[0]`が主催者・以降がゲストとしてロビーを通しで回し、全員の`player_names`を
-    /// `names`と同じ順で返す。探索→招待→承諾→ルーム参加→開始(Tab)→メッシュ確立まで
-    /// 実際の通信で進める。
+    /// 同上だが`actions`を毎フレーム渡す。UDPで送る開始要求(#293)が届かなかった場合に
+    /// 押し直せるようにするため。
+    fn run_until_battle_repeating(
+        lobby: &mut LobbyState,
+        actions: &[InputAction],
+    ) -> Option<Vec<String>> {
+        for _ in 0..MAX_PUMPS {
+            match lobby.update(actions, test_config()) {
+                LobbyOutcome::Battle(state) => return Some(state.player_names.clone()),
+                LobbyOutcome::Leave => return None,
+                LobbyOutcome::Stay => {}
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        None
+    }
+
+    /// `names[0]`がホスト・以降がゲストとしてロビーを通しで回し、全員の`player_names`を
+    /// `names`と同じ順で返す。探索→参加リクエスト→許可→ルーム参加→開始(Tab)→メッシュ
+    /// 確立まで実際の通信で進める。
     fn run_room_of(names: &[&str]) -> Vec<Vec<String>> {
         let mut lobbies = facing_lobbies_of(names);
         discover_all(&mut lobbies);
@@ -841,10 +1024,10 @@ mod tests {
         let mut guests = lobbies.split_off(1);
         let mut host = lobbies.pop().unwrap();
 
-        // 1人ずつ招待し、加わるのを待ってから次を招待する(加わった順がroom内
+        // 1人ずつリクエストを送り、加わるのを待ってから次へ進む(加わった順がroom内
         // インデックス=`player_names`の並びになる)。
         for (guest, name) in guests.iter_mut().zip(&names[1..]) {
-            invite_and_join(&mut host, guest, name);
+            request_and_join(&mut host, guest, name);
         }
         assert_eq!(host.hosted_guests().len(), names.len() - 1);
         let joined: Vec<&str> = host
@@ -852,7 +1035,11 @@ mod tests {
             .iter()
             .map(|guest| guest.name())
             .collect();
-        assert_eq!(joined, names[1..], "迎え入れた順は招待した順のはず");
+        assert_eq!(
+            joined,
+            names[1..],
+            "迎え入れた順はリクエストを送った順のはず"
+        );
 
         // 開始操作(Tab)はメッシュ確立までブロックするため、ゲスト側は別スレッドで回す。
         let guest_threads: Vec<_> = guests
@@ -861,7 +1048,7 @@ mod tests {
             .collect();
         let host_names = run_until_battle(&mut host, &[InputAction::StartRoom]);
 
-        let mut all = vec![host_names.expect("主催者は対戦を開始するはず")];
+        let mut all = vec![host_names.expect("ホストは対戦を開始するはず")];
         for (index, thread) in guest_threads.into_iter().enumerate() {
             let names_seen = thread.join().expect("ゲストのスレッドは正常終了するはず");
             all.push(
@@ -906,7 +1093,7 @@ mod tests {
     #[test]
     fn inviting_a_candidate_does_nothing_once_the_room_is_already_full() {
         // #283: ルームがすでに上限人数(自分+ゲスト3人=4人)に達していれば、候補に
-        // Confirmしても新たな招待は送らない(誤操作で5人目を招待できてしまうのを防ぐ)。
+        // Confirmしても新たなリクエストは送らない(誤操作で5人目を誘えてしまうのを防ぐ)。
         let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
         lobby.add_peer(DiscoveredPeer::for_test(
             "candidate",
@@ -953,26 +1140,26 @@ mod tests {
 
     #[test]
     fn inviting_a_candidate_moves_to_awaiting_and_shows_up_as_an_incoming_invite() {
-        // 招待した側は応答待ち、された側は承諾を聞く画面へ移る。
+        // #293: 申し込んだ側は応答待ち、受けた側は許可するか聞く画面へ移る。
         let (mut host, mut guest) = facing_lobbies();
         discover_each_other(&mut host, &mut guest);
 
-        host.update(&[InputAction::Confirm], test_config());
+        guest.update(&[InputAction::Confirm], test_config());
         assert!(
-            matches!(host.phase(), LobbyPhase::AwaitingInviteResponse { target, .. } if target.player_name == "guest"),
-            "招待した側は応答待ちへ移るはず"
+            matches!(guest.phase(), LobbyPhase::AwaitingInviteResponse { target, .. } if target.player_name == "host"),
+            "申し込んだ側は応答待ちへ移るはず"
         );
 
         for _ in 0..200 {
-            guest.update(&[], test_config());
-            if matches!(guest.phase(), LobbyPhase::IncomingInvite { .. }) {
+            host.update(&[], test_config());
+            if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
         assert!(
-            matches!(guest.phase(), LobbyPhase::IncomingInvite { from } if from.player_name == "host"),
-            "招待された側は承諾を聞く画面へ移るはず"
+            matches!(host.phase(), LobbyPhase::IncomingInvite { from, pending, .. } if from.player_name == "guest" && pending.is_empty()),
+            "申し込まれた側は許可を聞く画面へ移るはず"
         );
     }
 
@@ -981,29 +1168,29 @@ mod tests {
         let (mut host, mut guest) = facing_lobbies();
         discover_each_other(&mut host, &mut guest);
 
-        host.update(&[InputAction::Confirm], test_config());
+        guest.update(&[InputAction::Confirm], test_config());
         for _ in 0..200 {
-            guest.update(&[], test_config());
-            if matches!(guest.phase(), LobbyPhase::IncomingInvite { .. }) {
+            host.update(&[], test_config());
+            if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
-        assert!(matches!(guest.phase(), LobbyPhase::IncomingInvite { .. }));
+        assert!(matches!(host.phase(), LobbyPhase::IncomingInvite { .. }));
 
-        // Escで拒否する。拒否した側はすぐ探索へ戻り、招待した側は通知を経て戻る。
-        guest.update(&[InputAction::Quit], test_config());
-        assert!(matches!(guest.phase(), LobbyPhase::Discovering { .. }));
+        // Escで拒否する。拒否した側はすぐ探索へ戻り、申し込んだ側は通知を経て戻る。
+        host.update(&[InputAction::Quit], test_config());
+        assert!(matches!(host.phase(), LobbyPhase::Discovering { .. }));
 
         for _ in 0..200 {
-            host.update(&[], test_config());
-            if matches!(host.phase(), LobbyPhase::Notice { .. }) {
+            guest.update(&[], test_config());
+            if matches!(guest.phase(), LobbyPhase::Notice { .. }) {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
         assert!(
-            matches!(host.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
+            matches!(guest.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
             "断られたことが通知として出るはず"
         );
     }
@@ -1012,33 +1199,40 @@ mod tests {
     fn an_invite_that_is_never_answered_times_out_into_a_notice() {
         let (mut host, mut guest) = facing_lobbies();
         discover_each_other(&mut host, &mut guest);
-        host.update(&[InputAction::Confirm], test_config());
+        guest.update(&[InputAction::Confirm], test_config());
 
         // 実時間で10秒待つ代わりに、送信時刻をタイムアウトぶん過去へ倒す。
-        let target = match &host.phase {
+        let target = match &guest.phase {
             LobbyPhase::AwaitingInviteResponse { target, .. } => target.clone(),
             _ => panic!("前提: 応答待ちのはず"),
         };
-        host.phase = LobbyPhase::AwaitingInviteResponse {
+        guest.phase = LobbyPhase::AwaitingInviteResponse {
             target,
             sent_at: Instant::now() - Duration::from_millis(INVITE_TIMEOUT_MS),
             guests: Vec::new(),
         };
-        host.update(&[], test_config());
+        guest.update(&[], test_config());
 
         assert!(
-            matches!(host.phase(), LobbyPhase::Notice { message, .. } if message == "応答がありませんでした")
+            matches!(guest.phase(), LobbyPhase::Notice { message, .. } if message == "応答がありませんでした")
         );
+
+        // 受けた側は放置しただけなので、探索を続けている。
+        assert!(matches!(host.phase(), LobbyPhase::Discovering { .. }));
     }
 
     #[test]
-    fn an_invite_that_arrives_while_hosting_a_room_is_declined_automatically() {
-        // 設計書に無い判断(lobby.rsのコメント参照): ルームを開いている最中に招待されても、
-        // 迎え入れ済みのゲストを黙って切断しないよう自動で断る。
+    fn a_join_request_that_arrives_once_the_room_is_full_is_declined_automatically() {
+        // #293: ゲストがいてもリクエストは受け付けるが、上限人数(`ROOM_MAX_PLAYERS`)に
+        // 達している間は自動で断る(無視すると相手がタイムアウトまで待たされる)。
         let (mut host, mut other) = facing_lobbies();
         discover_each_other(&mut host, &mut other);
         host.set_phase(LobbyPhase::Discovering {
-            guests: vec![HostedGuest::for_test("joined")],
+            guests: vec![
+                HostedGuest::for_test("g1"),
+                HostedGuest::for_test("g2"),
+                HostedGuest::for_test("g3"),
+            ],
         });
 
         invite_by_name(&mut other, "host");
@@ -1052,19 +1246,50 @@ mod tests {
         }
 
         assert!(
-            matches!(host.phase(), LobbyPhase::Discovering { guests } if guests.len() == 1),
-            "主催者は開いたルームを保ったままのはず"
+            matches!(host.phase(), LobbyPhase::Discovering { guests } if guests.len() == 3),
+            "満員のホストは確認画面へ移らず、集めたルームを保ったままのはず"
         );
         assert!(
             matches!(other.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
-            "招待した側には断られた通知が出るはず"
+            "申し込んだ側には断られた通知が出るはず"
         );
     }
 
     #[test]
-    fn a_second_invite_that_arrives_while_deciding_on_the_first_is_declined_immediately() {
-        // #291で発覚: 2人から同時に招待されると、先着以外は無視されタイムアウト
-        // (`INVITE_TIMEOUT_MS`)まで無応答で待たされてしまっていた。
+    fn a_join_request_that_arrives_while_a_guest_is_already_hosted_is_still_accepted() {
+        // #293: ゲストを1人迎えた後でも、上限に達していなければ確認画面へ移る
+        // (#276の「ゲストがいれば自動で断る」動作はここで無くなった)。
+        let (mut host, mut other) = facing_lobbies();
+        discover_each_other(&mut host, &mut other);
+        host.set_phase(LobbyPhase::Discovering {
+            guests: vec![HostedGuest::for_test("joined")],
+        });
+
+        invite_by_name(&mut other, "host");
+        for _ in 0..200 {
+            host.update(&[], test_config());
+            other.update(&[], test_config());
+            if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            matches!(host.phase(), LobbyPhase::IncomingInvite { guests, .. } if guests.len() == 1),
+            "迎え入れ済みのゲストを保ったまま確認画面へ移るはず"
+        );
+        assert!(
+            matches!(other.phase(), LobbyPhase::AwaitingInviteResponse { .. }),
+            "申し込んだ側は断られず応答待ちのままのはず"
+        );
+    }
+
+    #[test]
+    fn a_second_invite_that_arrives_while_deciding_on_the_first_is_queued_and_shown_next() {
+        // #291で発覚: 2人から同時に申し込まれると、先着以外は無視されタイムアウト
+        // (`INVITE_TIMEOUT_MS`)まで無応答で待たされてしまっていた。#293では順番待ちへ
+        // 積み、1件目を処理した後に続けて確認する。
         let mut lobbies = facing_lobbies_of(&["host", "guest-a", "guest-b"]);
         discover_all(&mut lobbies);
         let (host, rest) = lobbies.split_first_mut().unwrap();
@@ -1074,38 +1299,36 @@ mod tests {
         invite_by_name(guest_a, "host");
         invite_by_name(guest_b, "host");
 
+        let mut first = None;
         for _ in 0..200 {
             host.update(&[], test_config());
             guest_a.update(&[], test_config());
             guest_b.update(&[], test_config());
-            if matches!(guest_a.phase(), LobbyPhase::Notice { .. })
-                || matches!(guest_b.phase(), LobbyPhase::Notice { .. })
+            if let LobbyPhase::IncomingInvite { from, pending, .. } = host.phase()
+                && pending.len() == 1
             {
+                first = Some(from.player_name.clone());
                 break;
             }
             thread::sleep(Duration::from_millis(5));
         }
+        let first = first.expect("2件目は順番待ちへ積まれるはず");
 
-        assert!(
-            matches!(host.phase(), LobbyPhase::IncomingInvite { .. }),
-            "hostは一方の招待をまだ検討中のはず"
-        );
-        let (still_waiting, declined) = if matches!(guest_a.phase(), LobbyPhase::Notice { .. }) {
-            (guest_b, guest_a)
-        } else {
-            (guest_a, guest_b)
+        // どちらも断られていない(タイムアウト待ちにもなっていない)。
+        for (guest, name) in [(&*guest_a, "guest-a"), (&*guest_b, "guest-b")] {
+            assert!(
+                matches!(guest.phase(), LobbyPhase::AwaitingInviteResponse { .. }),
+                "{name}は応答待ちのままのはず"
+            );
+        }
+
+        // 1件目を断ると、順番待ちの1件が次の確認として出る。
+        host.update(&[InputAction::Quit], test_config());
+        let LobbyPhase::IncomingInvite { from, pending, .. } = host.phase() else {
+            panic!("順番待ちの1件が次の確認画面になるはず");
         };
-        assert!(
-            matches!(declined.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
-            "後から検知された側は即座に断られて分かるはず(タイムアウト待ちにならない)"
-        );
-        assert!(
-            matches!(
-                still_waiting.phase(),
-                LobbyPhase::AwaitingInviteResponse { .. }
-            ),
-            "先に検討中になった側はまだ応答待ちのはず"
-        );
+        assert_ne!(from.player_name, first, "次に出るのは2件目のはず");
+        assert!(pending.is_empty(), "順番待ちは空になるはず");
     }
 
     #[test]
@@ -1115,6 +1338,7 @@ mod tests {
             message: "テスト".to_string(),
             shown_at: Instant::now() - Duration::from_millis(NOTICE_DISPLAY_MS),
             guests: Vec::new(),
+            pending: Vec::new(),
         };
 
         lobby.update(&[], test_config());
@@ -1123,14 +1347,39 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_hands_a_queued_request_over_as_the_next_one_to_decide_on() {
+        // #293: 通知表示中に届いたリクエストは、通知を抜けた後に確認画面として出す。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        let waiting = DiscoveredPeer::for_test(
+            "waiting",
+            std::net::IpAddr::from(Ipv4Addr::new(192, 168, 0, 8)),
+            39398,
+        );
+        lobby.phase = LobbyPhase::Notice {
+            message: "テスト".to_string(),
+            shown_at: Instant::now() - Duration::from_millis(NOTICE_DISPLAY_MS),
+            guests: Vec::new(),
+            pending: vec![waiting],
+        };
+
+        lobby.update(&[], test_config());
+
+        assert!(
+            matches!(lobby.phase(), LobbyPhase::IncomingInvite { from, pending, .. } if from.player_name == "waiting" && pending.is_empty()),
+            "通知を抜けた後、順番待ちの1件が確認画面になるはず"
+        );
+    }
+
+    #[test]
     fn a_notice_carries_the_already_hosted_guests_back_to_discovering() {
-        // #284: 招待の失敗・タイムアウト・接続失敗1つで、既に迎え入れていた
+        // #284: リクエストの失敗・タイムアウト・接続失敗1つで、既に迎え入れていた
         // ゲストまでルームから失われないようにする。
         let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
         lobby.phase = LobbyPhase::Notice {
             message: "テスト".to_string(),
             shown_at: Instant::now() - Duration::from_millis(NOTICE_DISPLAY_MS),
             guests: vec![HostedGuest::for_test("already-joined")],
+            pending: Vec::new(),
         };
 
         lobby.update(&[], test_config());
@@ -1143,27 +1392,26 @@ mod tests {
 
     #[test]
     fn accepting_an_invite_connects_both_sides_and_starts_a_battle() {
-        // 探索→招待→承諾→ルーム参加→開始(Tab)→対戦成立までを通しで確認する。
-        // #276で役割が反転し、招待した側が主催者(サーバ役)・承諾した側がゲスト
-        // (クライアント役)になる。
+        // 探索→参加リクエスト→許可→ルーム参加→開始(Tab)→対戦成立までを通しで確認する。
+        // #293では申し込んだ側がゲスト(クライアント役)・受けた側がホスト(サーバ役)。
         let names = run_room_of(&["host", "guest"]);
 
         assert_eq!(
             names[0],
             vec!["host".to_string(), "guest".to_string()],
-            "主催者から見た並びはindex 0が自分・1がゲスト"
+            "ホストから見た並びはindex 0が自分・1がゲスト"
         );
         assert_eq!(
             names[1],
             vec!["guest".to_string(), "host".to_string()],
-            "ゲストから見た並びもindex 0が自分・1が主催者"
+            "ゲストから見た並びもindex 0が自分・1がホスト"
         );
     }
 
     #[test]
     fn a_room_of_three_players_starts_a_battle_for_everyone() {
-        // #276: 主催者が2人を順に招待して開始する。全員のindex 0が自分で、残りは
-        // room内インデックス順(主催者→ゲスト1→ゲスト2から自分を除いたもの)。
+        // #276: ゲスト2人が順にリクエストを送り、ホストが開始する。全員のindex 0が
+        // 自分で、残りはroom内インデックス順(ホスト→ゲスト1→ゲスト2から自分を除いたもの)。
         let names = run_room_of(&["host", "guest-1", "guest-2"]);
 
         assert_eq!(names[0], vec!["host", "guest-1", "guest-2"]);
@@ -1180,5 +1428,174 @@ mod tests {
         assert_eq!(names[1], vec!["guest-1", "host", "guest-2", "guest-3"]);
         assert_eq!(names[2], vec!["guest-2", "host", "guest-1", "guest-3"]);
         assert_eq!(names[3], vec!["guest-3", "host", "guest-1", "guest-2"]);
+    }
+
+    #[test]
+    fn a_guest_can_start_the_battle_without_the_host_confirming() {
+        // #293: 開始はゲストからも出せる。ホストは何も操作しないまま対戦へ入る。
+        let (mut host, mut guest) = facing_lobbies();
+        discover_each_other(&mut host, &mut guest);
+        request_and_join(&mut host, &mut guest, "guest");
+
+        // ゲスト側はメッシュ確立まで待ち合わせるため別スレッドで回す。
+        let guest_thread = thread::spawn(move || {
+            let mut guest = guest;
+            run_until_battle_repeating(&mut guest, &[InputAction::StartRoom])
+        });
+        let host_names = run_until_battle(&mut host, &[]);
+
+        assert_eq!(
+            host_names.expect("ホストはゲストの開始要求で対戦へ入るはず"),
+            vec!["host".to_string(), "guest".to_string()]
+        );
+        let guest_names = guest_thread
+            .join()
+            .expect("ゲストのスレッドは正常終了するはず")
+            .expect("ゲストも対戦へ入るはず");
+        assert_eq!(guest_names, vec!["guest".to_string(), "host".to_string()]);
+    }
+
+    #[test]
+    fn a_start_request_is_ignored_while_the_host_has_no_guest() {
+        // #293: ゲストが1人もいないホストへ開始要求が届いても、1人では始められない
+        // ので無視する。
+        let (mut host, mut guest) = facing_lobbies();
+        discover_each_other(&mut host, &mut guest);
+        let host_peer = guest
+            .peers()
+            .iter()
+            .find(|peer| peer.player_name == "host")
+            .expect("候補にhostがいるはず")
+            .clone();
+        // 結果を送る側(`_result_tx`)を残しておかないと、開始待ちが失敗扱いになる。
+        let (_result_tx, result_rx) = mpsc::channel();
+        guest.set_phase(LobbyPhase::WaitingForRoomStart {
+            result_rx,
+            host_peer,
+        });
+
+        guest.update(&[InputAction::StartRoom], test_config());
+        for _ in 0..50 {
+            assert!(matches!(
+                host.update(&[], test_config()),
+                LobbyOutcome::Stay
+            ));
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(
+            matches!(host.phase(), LobbyPhase::Discovering { guests } if guests.is_empty()),
+            "開始要求は無視され、探索を続けているはず"
+        );
+    }
+
+    #[test]
+    fn join_requests_from_several_players_are_handled_one_at_a_time() {
+        // #293: 同時に届いた複数のリクエストを1件ずつ許可して、全員を迎え入れられる
+        // (#291のように無視されて待たされる参加者を出さない)。
+        let mut lobbies = facing_lobbies_of(&["host", "guest-a", "guest-b"]);
+        discover_all(&mut lobbies);
+        let (host, rest) = lobbies.split_first_mut().unwrap();
+        let (guest_a, rest) = rest.split_first_mut().unwrap();
+        let guest_b = &mut rest[0];
+
+        invite_by_name(guest_a, "host");
+        invite_by_name(guest_b, "host");
+
+        for _ in 0..MAX_PUMPS {
+            // ホストは確認画面が出るたびに許可する(1件ずつしか出ない)。
+            let actions: &[InputAction] =
+                if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
+                    &[InputAction::Confirm]
+                } else {
+                    &[]
+                };
+            host.update(actions, test_config());
+            guest_a.update(&[], test_config());
+            guest_b.update(&[], test_config());
+            if host.hosted_guests().len() == 2 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        let mut joined: Vec<&str> = host
+            .hosted_guests()
+            .iter()
+            .map(|guest| guest.name())
+            .collect();
+        joined.sort_unstable();
+        assert_eq!(
+            joined,
+            vec!["guest-a", "guest-b"],
+            "2人とも迎え入れられるはず"
+        );
+        for (guest, name) in [(&*guest_a, "guest-a"), (&*guest_b, "guest-b")] {
+            assert!(
+                matches!(guest.phase(), LobbyPhase::WaitingForRoomStart { .. }),
+                "{name}はルームへ加わって開始待ちのはず"
+            );
+        }
+    }
+
+    #[test]
+    fn queued_join_requests_are_declined_once_accepting_the_earlier_ones_fills_the_room() {
+        // 1件ずつ許可していく途中で満員(`ROOM_MAX_PLAYERS`)に達したら、順番待ちの
+        // 残りは`IncomingInvite`として提示されず、即座に断られるはず(back_to_discovering
+        // が確認済みの人数で毎回判定するため、受信時点では入れる余地があった相手も
+        // 許可を重ねるうちに超過してしまう問題への対応)。
+        let mut lobbies = facing_lobbies_of(&["host", "guest-a", "guest-b"]);
+        discover_all(&mut lobbies);
+        let (host, rest) = lobbies.split_first_mut().unwrap();
+        let (guest_a, rest) = rest.split_first_mut().unwrap();
+        let guest_b = &mut rest[0];
+
+        // 既に2人迎えている(自分含め3人)。ROOM_MAX_PLAYERS=4なので、あと1人だけ入れる。
+        host.set_phase(LobbyPhase::Discovering {
+            guests: vec![
+                HostedGuest::for_test("already-1"),
+                HostedGuest::for_test("already-2"),
+            ],
+        });
+
+        invite_by_name(guest_a, "host");
+        invite_by_name(guest_b, "host");
+
+        for _ in 0..MAX_PUMPS {
+            let actions: &[InputAction] =
+                if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
+                    &[InputAction::Confirm]
+                } else {
+                    &[]
+                };
+            host.update(actions, test_config());
+            guest_a.update(&[], test_config());
+            guest_b.update(&[], test_config());
+            if matches!(guest_a.phase(), LobbyPhase::Notice { .. })
+                || matches!(guest_b.phase(), LobbyPhase::Notice { .. })
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(
+            host.hosted_guests().len(),
+            3,
+            "満員(自分含め4人)を超えて迎え入れてはいないはず"
+        );
+        let (accepted, declined) = if matches!(guest_a.phase(), LobbyPhase::Notice { .. }) {
+            (guest_b, guest_a)
+        } else {
+            (guest_a, guest_b)
+        };
+        assert!(
+            matches!(accepted.phase(), LobbyPhase::WaitingForRoomStart { .. }),
+            "先に許可された側はルームへ加わっているはず"
+        );
+        assert!(
+            matches!(declined.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
+            "満員後に順番が回ってきた側は断られるはず"
+        );
     }
 }

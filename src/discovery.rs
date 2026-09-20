@@ -1,8 +1,9 @@
 //! UDPブロードキャストによる対戦相手の自動探索(#256。spec.md 12.1)。
 //!
 //! 同一LAN上の他ホストへHELLOを1秒間隔で流し続けながら受信も行い、候補リスト
-//! (`DiscoveredPeer`)を保つ。招待のやり取り(INVITE/ACCEPT/DECLINE)もこのソケットで行う。
-//! 候補をどう見せるか・招待をどう扱うかはロビー側(`lobby.rs`)の責務で、ここは
+//! (`DiscoveredPeer`)を保つ。参加リクエストのやり取り(INVITE/ACCEPT/DECLINE)と
+//! ゲストからの開始要求(REQUEST_START)もこのソケットで行う。
+//! 候補をどう見せるか・リクエストをどう扱うかはロビー側(`lobby.rs`)の責務で、ここは
 //! 「パケットの送受信と候補リストの保守」だけを担う。
 
 use std::io;
@@ -181,9 +182,9 @@ impl Discovery {
 
     /// 1フレーム分の処理: HELLOの再送・受信キューの消化・古い候補の除去。
     ///
-    /// 戻り値は、この呼び出しで新たに受信したINVITE/ACCEPT/DECLINEのうち自分宛
-    /// (`target_id == my_id`)のものだけ。HELLO/BYEは候補リストの更新に使うだけで
-    /// 呼び出し元へは返さない。
+    /// 戻り値は、この呼び出しで新たに受信したINVITE/ACCEPT/DECLINE/REQUEST_STARTの
+    /// うち自分宛(`target_id == my_id`)のものだけ。HELLO/BYEは候補リストの更新に使う
+    /// だけで呼び出し元へは返さない。
     pub fn tick(&mut self) -> Vec<DiscoveryPacket> {
         if self.last_hello_sent.elapsed() >= Duration::from_millis(HELLO_BROADCAST_INTERVAL_MS) {
             self.send_hello();
@@ -209,7 +210,10 @@ impl Discovery {
             match packet.packet_type {
                 PacketType::Hello => self.remember_peer(&packet, from),
                 PacketType::Bye => self.forget_peer(packet.sender_id),
-                PacketType::Invite | PacketType::Accept | PacketType::Decline => {
+                PacketType::Invite
+                | PacketType::Accept
+                | PacketType::Decline
+                | PacketType::RequestStart => {
                     if packet.target_id == self.my_id {
                         for_me.push(packet);
                     }
@@ -233,6 +237,16 @@ impl Discovery {
 
     pub fn send_decline(&self, target: &DiscoveredPeer) -> io::Result<()> {
         self.send(PacketType::Decline, target.sender_id, peer_addr(target))
+    }
+
+    /// ゲストからホストへの開始要求(#293)。ホストはこれを受け取ると追認なしに
+    /// 対戦を開始する。
+    pub fn send_request_start(&self, target: &DiscoveredPeer) -> io::Result<()> {
+        self.send(
+            PacketType::RequestStart,
+            target.sender_id,
+            peer_addr(target),
+        )
     }
 
     /// 探索/募集からの離脱(接続確立時・ロビーを抜ける時)。相手の候補リストから
