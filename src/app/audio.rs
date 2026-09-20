@@ -38,7 +38,7 @@ pub fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Scr
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
         // 対戦中(#252)は自分の盤面の進行状態で判断する。対戦には一時停止が無く、
         // 決着(クリア/脱落)後はプレイ中BGMを止める点は通常プレイと同じ。
-        Screen::Battle(state) => state.game_local.status == GameStatus::Playing,
+        Screen::Battle(state) => state.games[0].status == GameStatus::Playing,
         Screen::Settings => true,
         // 独立画面としてのヘルプはジュークボックス試聴の置き場のため、プレイ中BGMを
         // 流すと試聴と二重に聞こえてしまう。常に無音にし、聞こえる音は選んだ曲のプレビュー
@@ -220,12 +220,11 @@ mod tests {
         use crate::battle::BattleState;
 
         let battling = |local_status: GameStatus| {
-            let mut game_local = Game::new(1);
-            game_local.status = local_status;
+            let mut my_game = Game::new(1);
+            my_game.status = local_status;
             Screen::Battle(Box::new(BattleState::new(
-                game_local,
-                Game::new(1),
-                "opponent".to_string(),
+                vec![my_game, Game::new(1)],
+                vec!["me".to_string(), "opponent".to_string()],
             )))
         };
 

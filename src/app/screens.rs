@@ -756,11 +756,13 @@ pub fn tick_battle(
     let se_on = app.se_enabled.load(Ordering::Relaxed);
     let outcome = state.outcome();
     terminal.draw(|frame| {
+        // N人対戦(#273)でも、この段階では相手パネルにindex 1の1人だけを表示する
+        // (N人分の表示は#270/#276の範囲)。
         ui::render::draw_battle(
             frame,
-            &state.game_local,
-            &state.game_remote,
-            &state.opponent_name,
+            &state.games[0],
+            &state.games[1],
+            &state.player_names[1],
             music_on,
             se_on,
             outcome,

@@ -1,11 +1,16 @@
-//! 対戦用の状態(#252/#254。spec.md 12章)。
+//! 対戦用の状態(#252/#254/#273。spec.md 12章)。
 //!
-//! 「自分の盤面と相手の盤面を150ms固定tickでlockstep実行し、決着を確定する」状態遷移を
-//! 持つ。#252では通信を伴わない状態遷移だけだったが、#254で実際のTCP通信(#253)と繋ぎ、
+//! 「全参加者の盤面を150ms固定tickでlockstep実行し、決着を確定する」状態遷移を持つ。
+//! #252では通信を伴わない状態遷移だけだったが、#254で実際のTCP通信(#253)と繋ぎ、
 //! 通信スレッドとのInput交換・切断検知・`Result`の交換を追加し、#255で定期的な
 //! `StateHash`の照合(デシンク検出)を追加した。#256でロビー(`lobby.rs`)から
 //! `Screen::Battle`へ到達する入口ができたが、2台での実プレイを自動テストでは回せない
 //! ため、検証は引き続きループバックTCPを使ったユニットテストで行う。
+//!
+//! #273で参加者を2人固定からN人(2〜4)へ一般化した。盤面は`games: Vec<Game>`(index 0が
+//! 自分)で持ち、決着は「Win/Lose/Draw」の3値から順位(`BattleOutcome::Ranked`)へ
+//! 置き換えた。通信あり(`network`)の経路は2人専用のまま残っており、N人分の接続
+//! (フルメッシュ)への置き換えは段階B(#274)で行う。
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -27,36 +32,46 @@ use crate::net::{self, BattleConfig, GameMessage, NetAction, NetworkEvent};
 /// 大きく空いたフレームが一度に大量のtickへ化けるのを防ぐ。
 const DELTA_CLAMP_MS: u64 = 250;
 
-/// 対戦の決着(spec.md 12.4)。自分視点で表す。
+/// 対戦の決着(#273。spec.md 12.4)。自分視点の最終順位で表す(2人版のWin=1位/
+/// Lose=2位/Draw=同着への一般化)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BattleOutcome {
-    Win,
-    Lose,
-    Draw,
-    /// StateHashの不一致を検出して対戦を中断した(spec.md 12.3)。勝敗としては
-    /// 引き分けと同様に扱うが、原因が異なるためUI表示を分けられるよう区別する。
+    /// 自分の最終順位(1が1位)。同着は同じ順位になる。
+    Ranked(u8),
+    /// StateHashの不一致を検出して対戦を中断した(spec.md 12.3)。順位が確定しない
+    /// 終わり方のため、UI表示を順位と分けられるよう区別する。
     Desync,
 }
 
 /// 対戦画面(`Screen::Battle`)が持つ状態。
 ///
-/// `game_local`/`game_remote`は通常プレイと同じ`Game`で、両者を毎tick同じ固定順序で
-/// 進めることで盤面を同期する(12.3「シミュレーション自体は省略してはならない」)。
+/// `games`の各要素は通常プレイと同じ`Game`で、全員を毎tick同じ固定順序で進めることで
+/// 盤面を同期する(12.3「シミュレーション自体は省略してはならない」)。
 pub struct BattleState {
-    /// 自分の盤面。自分の入力を適用する。
-    pub game_local: Game,
-    /// 相手の盤面。相手の入力を適用する。
-    pub game_remote: Game,
-    /// 相手の表示名。対戦画面の相手パネルの見出しに使う。
-    pub opponent_name: String,
+    /// 自分を含む全参加者の盤面。index 0が自分。フルメッシュ接続(#273設計書1節)なので、
+    /// 対戦中は全参加者の視点をローカルに保持する。
+    pub games: Vec<Game>,
+    /// 各参加者の表示名。`games`と同じindexで対応する(index 0が自分)。
+    pub player_names: Vec<String>,
     /// 実測フレーム時間を`NET_TICK_MS`(150ms)単位へ量子化するための蓄積バッファ。
-    /// `lockstep::run_tick`は1回で150ms固定分しか進めないため、フレーム間隔が150msの
+    /// `lockstep::run_tick_n`は1回で150ms固定分しか進めないため、フレーム間隔が150msの
     /// 倍数からずれてもtickを取りこぼさないよう繰り越す。
     net_tick_accum: Duration,
+    /// 確定した順位(1が1位)。`games`と同じindexで対応する。全員分`Some`になったら
+    /// 全参加者の決着が出たことになるが、`outcome`は自分(`ranks[0]`)が確定した時点で
+    /// 決まる(2人版が「自分の状態が確定したら即座にoutcome確定」だったのと同じ)。
+    ranks: Vec<Option<u8>>,
+    /// 次にゴール到達した参加者へ割り振る順位(1から始まり、確定するたびに人数分進む)。
+    next_win_rank: u8,
+    /// 次に脱落した参加者へ割り振る順位(Nから始まり、確定するたびに人数分下がる)。
+    next_lose_rank: u8,
     /// 決着。`Some`になった以後はtickを進めず、自分の入力も受け付けない。
     outcome: Option<BattleOutcome>,
     /// `Some`なら実際の通信で相手の入力を得る(#254)。`None`なら#252までと同じ、
-    /// 相手の入力は常に`None`として扱うローカル専用の動作(既存テストの前提)。
+    /// 他の参加者の入力は常に`None`として扱うローカル専用の動作(#273のテストの前提)。
+    ///
+    /// この経路は2人専用のまま残しており、`games`の長さが2であることを前提とする。
+    /// N人分のフルメッシュ接続への置き換えは段階B(#274)で行う。
     network: Option<NetworkLink>,
 }
 
@@ -103,15 +118,22 @@ struct NetworkLink {
 }
 
 impl BattleState {
-    /// 対戦開始時の状態を作る。`Screen::Battle`への実際の遷移はハンドシェイク完了時
-    /// (#254)・ロビーからの入口(#256)で作るため、この段階ではテストからのみ呼ばれる。
+    /// 通信なしの対戦状態を作る(#273)。`games`のindex 0が自分で、`player_names`は
+    /// 同じindexで対応する表示名。`games.len()`は2〜4を想定するが、この段階では長さの
+    /// 検証は行わない(呼び出し元が正しい前提。実際の人数制約は段階C/Dで扱う)。
+    ///
+    /// `Screen::Battle`への実際の遷移はハンドシェイク完了時(#254)・ロビーからの入口
+    /// (#256)で作るため、この段階ではテストからのみ呼ばれる。
     #[allow(dead_code)]
-    pub fn new(game_local: Game, game_remote: Game, opponent_name: String) -> Self {
+    pub fn new(games: Vec<Game>, player_names: Vec<String>) -> Self {
+        let player_count = games.len();
         Self {
-            game_local,
-            game_remote,
-            opponent_name,
+            games,
+            player_names,
             net_tick_accum: Duration::ZERO,
+            ranks: vec![None; player_count],
+            next_win_rank: 1,
+            next_lose_rank: player_count as u8,
             outcome: None,
             network: None,
         }
@@ -122,10 +144,23 @@ impl BattleState {
     /// (内部で`try_clone`して読み書き用に分ける)。
     ///
     /// 呼び出し元はロビー(`lobby.rs`)で、招待の成立後にホスト役・クライアント役の
-    /// どちらの経路からもここへ合流する(#256)。
-    pub fn from_handshake(handshake: net::HandshakeResult, stream: TcpStream) -> io::Result<Self> {
-        let game_local = new_game_from_battle_config(handshake.seed, &handshake.config);
-        let game_remote = new_game_from_battle_config(handshake.seed, &handshake.config);
+    /// どちらの経路からもここへ合流する(#256)。`my_name`は自分の表示名で、
+    /// `player_names`のindex 0に入る(ハンドシェイク結果は相手の名前しか持たないため
+    /// 呼び出し元から受け取る)。
+    ///
+    /// この経路は2人対戦のまま(`games`の長さは2)で、N人分のフルメッシュ接続の確立は
+    /// 段階C(#275)で行う。
+    pub fn from_handshake(
+        handshake: net::HandshakeResult,
+        stream: TcpStream,
+        my_name: &str,
+    ) -> io::Result<Self> {
+        let games = vec![
+            new_game_from_battle_config(handshake.seed, &handshake.config),
+            new_game_from_battle_config(handshake.seed, &handshake.config),
+        ];
+        let player_names = vec![my_name.to_string(), handshake.opponent_name];
+        let player_count = games.len();
 
         let reader_stream = stream.try_clone()?;
         let (tx, event_rx) = mpsc::channel();
@@ -133,10 +168,12 @@ impl BattleState {
 
         let now = Instant::now();
         Ok(Self {
-            game_local,
-            game_remote,
-            opponent_name: handshake.opponent_name,
+            games,
+            player_names,
             net_tick_accum: Duration::ZERO,
+            ranks: vec![None; player_count],
+            next_win_rank: 1,
+            next_lose_rank: player_count as u8,
             outcome: None,
             network: Some(NetworkLink {
                 writer: stream,
@@ -171,6 +208,59 @@ impl BattleState {
             return;
         };
         let _ = net::write_message(&mut link.writer, &GameMessage::Bye);
+    }
+
+    /// 全参加者の現在の`games`から、まだ確定していない参加者の順位を更新する(#273)。
+    ///
+    /// ゴール到達(`Cleared`)は先着順で上位から、脱落(`GameOver`)は最後まで残った順で
+    /// 上位から埋まる(2人版のWin/Lose/Drawの一般化)。同一tickで複数人が同時に
+    /// Cleared/GameOverになった場合は同順位にする。
+    fn update_ranks(&mut self) {
+        let newly_cleared: Vec<usize> = self
+            .games
+            .iter()
+            .enumerate()
+            .filter(|&(i, g)| self.ranks[i].is_none() && g.status == GameStatus::Cleared)
+            .map(|(i, _)| i)
+            .collect();
+        let newly_over: Vec<usize> = self
+            .games
+            .iter()
+            .enumerate()
+            .filter(|&(i, g)| self.ranks[i].is_none() && g.status == GameStatus::GameOver)
+            .map(|(i, _)| i)
+            .collect();
+
+        if !newly_cleared.is_empty() {
+            let rank = self.next_win_rank;
+            for &i in &newly_cleared {
+                self.ranks[i] = Some(rank);
+            }
+            self.next_win_rank += newly_cleared.len() as u8;
+        }
+        if !newly_over.is_empty() {
+            // 同時脱落は同順位にするため、その人数ぶん上の順位から割り当てる。
+            let rank = self.next_lose_rank - (newly_over.len() as u8 - 1);
+            for &i in &newly_over {
+                self.ranks[i] = Some(rank);
+            }
+            self.next_lose_rank -= newly_over.len() as u8;
+        }
+
+        // 未確定者が1人だけ残ったら、その人は自動的に確定する(2人版で「相手が脱落したら
+        // 自分は自動的にWin」だったのと同じ。残り1人はゴールも脱落もしていなくても
+        // 順位が確定する)。
+        let undecided: Vec<usize> = (0..self.games.len())
+            .filter(|&i| self.ranks[i].is_none())
+            .collect();
+        if undecided.len() == 1 {
+            self.ranks[undecided[0]] = Some(self.next_win_rank);
+        }
+
+        // 一度確定した決着は上書きしない。自分の順位が未確定なら`None`のままにする。
+        if self.outcome.is_none() {
+            self.outcome = self.ranks[0].map(BattleOutcome::Ranked);
+        }
     }
 
     /// 実測の経過時間`delta`を150ms固定tickへ量子化し、溜まったぶんだけlockstepを進める。
@@ -220,14 +310,15 @@ impl BattleState {
 
         let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
         if link.disconnected {
-            // 切断を検知した側の不戦勝(12.4)。
-            self.outcome = Some(BattleOutcome::Win);
+            // 切断を検知した側の不戦勝(12.4)。盤面から導けない決着のため`ranks`は触らず
+            // 自分の順位だけを1位として確定する(#274でN人版へ作り直す)。
+            self.outcome = Some(BattleOutcome::Ranked(1));
             return;
         }
         if let Some(since) = link.awaiting_since {
             if since.elapsed() >= Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS) {
                 link.disconnected = true;
-                self.outcome = Some(BattleOutcome::Win);
+                self.outcome = Some(BattleOutcome::Ranked(1));
             }
             // 待機中は自分の時計を進めない(12.3)。届いていれば`drain_network_events`が
             // 既に待機を解除している。
@@ -279,14 +370,14 @@ impl BattleState {
             link.committed_local_action = None;
             link.next_tick += 1;
             let completed_tick = link.next_tick - 1; // このtickの処理が完了した
-            self.run_net_tick_with_remote(my_action.into(), remote_action.into());
+            self.run_net_tick_with_actions(&[my_action.into(), remote_action.into()]);
 
             // 定期的に状態ダイジェストを交換してデシンクを検出する(#255。spec.md 12.3)。
             // tick 0も対象になり、そこでの照合はハンドシェイクで合意したseed/configから
             // 同一の初期盤面が作られているかの検証を兼ねる。
             if completed_tick.is_multiple_of(STATE_HASH_INTERVAL_TICKS) {
-                let local_hash = self.game_local.state_hash();
-                let remote_hash = self.game_remote.state_hash();
+                let local_hash = self.games[0].state_hash();
+                let remote_hash = self.games[1].state_hash();
                 let link = self.network.as_mut().expect("通信ありの経路でのみ呼ばれる");
                 link.own_state_hashes
                     .insert(completed_tick, (local_hash, remote_hash));
@@ -367,7 +458,7 @@ impl BattleState {
 
     /// 決着直後に自分の`Result`を1回だけ送る(12.4。勝敗判定の根拠ではなく相互確認用)。
     fn maybe_send_result(&mut self) {
-        let reached_goal = self.game_local.status == GameStatus::Cleared;
+        let reached_goal = self.games[0].status == GameStatus::Cleared;
         let Some(link) = &mut self.network else {
             return;
         };
@@ -390,13 +481,14 @@ impl BattleState {
     /// 受信済みの相手の`Result`を自分のシミュレーション結果と照合する(12.4)。
     ///
     /// 相手の自己申告と、自分が持つ相手インスタンスの判定が食い違ったら、どちらが正しいか
-    /// 判定できないためデシンクと同様に引き分けへ上書きする。自分がまだ決着していない
-    /// 段階では、単に自分のtickが相手より遅れているだけのため照合しない。
+    /// 判定できないため`Desync`へ上書きする(順位方式では「順位が確定しない終わり方」が
+    /// `Desync`にあたる。2人専用だった頃は同じ意図を`Draw`で表していた)。自分がまだ
+    /// 決着していない段階では、単に自分のtickが相手より遅れているだけのため照合しない。
     fn reconcile_remote_result(&mut self) {
         if self.outcome.is_none() {
             return;
         }
-        let reached_goal_in_my_simulation = self.game_remote.status == GameStatus::Cleared;
+        let reached_goal_in_my_simulation = self.games[1].status == GameStatus::Cleared;
         let Some(link) = &self.network else {
             return;
         };
@@ -405,34 +497,23 @@ impl BattleState {
         };
 
         if remote_reached_goal != reached_goal_in_my_simulation {
-            self.outcome = Some(BattleOutcome::Draw);
+            self.outcome = Some(BattleOutcome::Desync);
         }
     }
 
-    /// lockstepの1tickぶんを進め、その結果から決着を確定する。相手の入力は通信なしの
-    /// 経路(#252)用に`receive_remote_action`から取る。
+    /// lockstepの1tickぶんを進め、その結果から順位・決着を更新する。通信なしの経路
+    /// (#252/#273)では自分以外の参加者の入力は常に`None`になる。
     fn run_net_tick(&mut self, local_action: Option<InputAction>) {
-        self.run_net_tick_with_remote(local_action, receive_remote_action());
+        let mut actions = vec![None; self.games.len()];
+        actions[0] = local_action;
+        self.run_net_tick_with_actions(&actions);
     }
 
-    /// `run_net_tick`の本体。通信あり(#254)の経路は、受信済みの相手の入力を直接渡す。
-    fn run_net_tick_with_remote(
-        &mut self,
-        local_action: Option<InputAction>,
-        remote_action: Option<InputAction>,
-    ) {
-        lockstep::run_tick(
-            &mut self.game_local,
-            &mut self.game_remote,
-            local_action,
-            remote_action,
-        );
-
-        // 一度確定した決着は上書きしない(決着後は`advance`がtickを呼ばないため、
-        // 実際にはまだ未決着のときだけ評価される)。
-        if self.outcome.is_none() {
-            self.outcome = resolve_outcome(self.game_local.status, self.game_remote.status);
-        }
+    /// `run_net_tick`の本体。通信あり(#254)の経路は、受信済みの相手の入力を含めた
+    /// 全参加者ぶんの入力を直接渡す。
+    fn run_net_tick_with_actions(&mut self, actions: &[Option<InputAction>]) {
+        lockstep::run_tick_n(&mut self.games, actions);
+        self.update_ranks();
     }
 }
 
@@ -449,8 +530,8 @@ fn take_remote_input_for(link: &mut NetworkLink, tick: u32) -> Option<NetAction>
 }
 
 /// 指定tickについて、自分の計算値と相手からの申告値が両方揃っていれば照合する(#255)。
-/// 相手の`local_hash`(相手自身の盤面)は自分の`game_remote`のそのtick時点の値と、
-/// 相手の`remote_hash`(相手から見た自分)は自分の`game_local`のそのtick時点の値と
+/// 相手の`local_hash`(相手自身の盤面)は自分の`games[1]`のそのtick時点の値と、
+/// 相手の`remote_hash`(相手から見た自分)は自分の`games[0]`のそのtick時点の値と
 /// 一致するはず。不一致ならデシンクとして`outcome`を`Desync`にする(spec.md 12.3)。
 ///
 /// 送信時(自分がそのtickへ到達した時)と受信時の両方から呼ぶ。どちらが先になるかは
@@ -468,7 +549,7 @@ fn reconcile_state_hash(link: &mut NetworkLink, outcome: &mut Option<BattleOutco
 
     if outcome.is_some() {
         // 既に他の理由で決着済みなら上書きしない。デシンク検出は対戦終了前の同期ズレを
-        // 捉えるためのもので、確定済みのWin/Lose/Drawを覆す根拠にはしない。
+        // 捉えるためのもので、確定済みの順位を覆す根拠にはしない。
         return;
     }
     if mine_remote != their_local || mine_local != their_remote {
@@ -517,38 +598,6 @@ pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
     game
 }
 
-/// 通信なし(`network`が`None`)の経路で相手の入力を1tickぶん受け取る。相手がいないため
-/// 常に`None`。通信あり(#254)の経路は受信キュー(mpsc)から取り出した入力を
-/// `run_net_tick_with_remote`へ直接渡すため、この関数は通らない。
-fn receive_remote_action() -> Option<InputAction> {
-    None
-}
-
-/// 自分・相手それぞれのゲーム状態から、自分視点の決着を判定する(12.4)。
-///
-/// ゴール到達(`Cleared`)は自分なら勝ち・相手なら負け、脱落(`GameOver`)はその逆になる。
-/// 脱落時に通常プレイの「その場から復活」ダイアログは経由せず、即座に敗北扱いにする。
-/// 同一tickで自分側の判定と相手側の判定が食い違った場合(両者同時ゴール・両者同時脱落)は
-/// 引き分けにする。
-fn resolve_outcome(local: GameStatus, remote: GameStatus) -> Option<BattleOutcome> {
-    let from_local = match local {
-        GameStatus::Cleared => Some(BattleOutcome::Win),
-        GameStatus::GameOver => Some(BattleOutcome::Lose),
-        GameStatus::Playing | GameStatus::Paused => None,
-    };
-    let from_remote = match remote {
-        GameStatus::Cleared => Some(BattleOutcome::Lose),
-        GameStatus::GameOver => Some(BattleOutcome::Win),
-        GameStatus::Playing | GameStatus::Paused => None,
-    };
-
-    match (from_local, from_remote) {
-        (Some(by_local), Some(by_remote)) if by_local != by_remote => Some(BattleOutcome::Draw),
-        (Some(by_local), _) => Some(by_local),
-        (None, by_remote) => by_remote,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,12 +618,21 @@ mod tests {
         BattleConfig::from_settings(&crate::settings::Settings::default(), TEST_GOAL_M)
     }
 
-    /// テスト用の対戦状態。短いコースの`Game`を2つ持たせる。
+    /// 短いコースの`Game`を1つ作る。
+    fn test_game(seed: u64) -> Game {
+        Game::new_with_width(seed, FIELD_WIDTH_DEFAULT, TEST_GOAL_M)
+    }
+
+    /// テスト用の対戦状態。短いコースの`Game`を2つ持たせる(index 0が自分)。
     fn battle(seed_local: u64, seed_remote: u64) -> BattleState {
+        battle_n(&[seed_local, seed_remote])
+    }
+
+    /// テスト用のN人対戦状態(#273)。`seeds`のindex 0が自分。表示名は`p0`,`p1`,...とする。
+    fn battle_n(seeds: &[u64]) -> BattleState {
         BattleState::new(
-            Game::new_with_width(seed_local, FIELD_WIDTH_DEFAULT, TEST_GOAL_M),
-            Game::new_with_width(seed_remote, FIELD_WIDTH_DEFAULT, TEST_GOAL_M),
-            "opponent".to_string(),
+            seeds.iter().map(|&seed| test_game(seed)).collect(),
+            (0..seeds.len()).map(|i| format!("p{i}")).collect(),
         )
     }
 
@@ -598,72 +656,81 @@ mod tests {
 
     #[test]
     fn reaching_the_goal_first_wins() {
-        // 自分が先にゴール到達したら勝ち。
+        // 自分が先にゴール到達したら1位。
         let mut state = battle(1, 2);
-        place_just_above_goal(&mut state.game_local);
+        place_just_above_goal(&mut state.games[0]);
 
         advance_until_outcome(&mut state, 10);
 
         assert_eq!(
-            state.game_local.status,
+            state.games[0].status,
             GameStatus::Cleared,
             "前提: 自分がゴールに到達しているはず"
         );
         assert_eq!(
-            state.game_remote.status,
+            state.games[1].status,
             GameStatus::Playing,
-            "前提: 相手はまだ決着していないはず"
+            "前提: 相手はまだゴールも脱落もしていないはず"
         );
-        assert_eq!(state.outcome, Some(BattleOutcome::Win));
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
+        assert_eq!(
+            state.ranks,
+            vec![Some(1), Some(2)],
+            "残り1人になった相手は自動的に2位で確定するはず"
+        );
     }
 
     #[test]
     fn the_opponent_dropping_out_first_wins() {
-        // 相手が先に脱落(酸素切れ→ライフ0)したら自分の勝ち。自分の側が決着要因に
+        // 相手が先に脱落(酸素切れ→ライフ0)したら自分が1位。自分の側が決着要因に
         // 混ざらないよう、自分の盤面は無敵にしておく。
         let mut state = battle(3, 4);
-        state.game_local.set_invincible(true);
-        state.game_remote.player.lives = 1;
-        state.game_remote.player.oxygen = 1.0;
+        state.games[0].set_invincible(true);
+        state.games[1].player.lives = 1;
+        state.games[1].player.oxygen = 1.0;
 
         // 酸素切れの後、「天に召される」演出(CRUSH_ASCEND_MS=3000ms)を経てGameOverに
         // なるため、150msのtickで十分な回数を回す。
         advance_until_outcome(&mut state, 60);
 
         assert_eq!(
-            state.game_remote.status,
+            state.games[1].status,
             GameStatus::GameOver,
             "前提: 相手が脱落しているはず"
         );
-        assert_eq!(state.outcome, Some(BattleOutcome::Win));
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
+        assert_eq!(state.ranks, vec![Some(1), Some(2)]);
     }
 
     #[test]
     fn both_reaching_the_goal_on_the_same_tick_is_a_draw() {
         // 同じ盤面(同じシード)で両者を同じ位置に置くと同一tickでゴール到達する。
+        // 同時ゴールは同順位(両者1位)になり、2人版のDrawに相当する。
         let mut state = battle(5, 5);
-        place_just_above_goal(&mut state.game_local);
-        place_just_above_goal(&mut state.game_remote);
+        place_just_above_goal(&mut state.games[0]);
+        place_just_above_goal(&mut state.games[1]);
 
         advance_until_outcome(&mut state, 10);
 
-        assert_eq!(state.game_local.status, GameStatus::Cleared);
-        assert_eq!(state.game_remote.status, GameStatus::Cleared);
-        assert_eq!(state.outcome, Some(BattleOutcome::Draw));
+        assert_eq!(state.games[0].status, GameStatus::Cleared);
+        assert_eq!(state.games[1].status, GameStatus::Cleared);
+        assert_eq!(state.ranks, vec![Some(1), Some(1)]);
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
     }
 
     #[test]
     fn dropping_out_first_loses() {
-        // 自分が先に脱落したら負け(通常プレイの復活ダイアログは経由しない)。
+        // 自分が先に脱落したら最下位(2人なら2位)。通常プレイの復活ダイアログは経由しない。
         let mut state = battle(6, 7);
-        state.game_remote.set_invincible(true);
-        state.game_local.player.lives = 1;
-        state.game_local.player.oxygen = 1.0;
+        state.games[1].set_invincible(true);
+        state.games[0].player.lives = 1;
+        state.games[0].player.oxygen = 1.0;
 
         advance_until_outcome(&mut state, 60);
 
-        assert_eq!(state.game_local.status, GameStatus::GameOver);
-        assert_eq!(state.outcome, Some(BattleOutcome::Lose));
+        assert_eq!(state.games[0].status, GameStatus::GameOver);
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(2)));
+        assert_eq!(state.ranks, vec![Some(2), Some(1)]);
     }
 
     #[test]
@@ -674,7 +741,7 @@ mod tests {
 
         state.advance(Duration::from_millis(100), None);
         assert_eq!(
-            state.game_local.debug_frame(),
+            state.games[0].debug_frame(),
             0,
             "150msに満たないのでまだtickは起きないはず"
         );
@@ -682,7 +749,7 @@ mod tests {
 
         state.advance(Duration::from_millis(100), None);
         assert_eq!(
-            state.game_local.debug_frame(),
+            state.games[0].debug_frame(),
             1,
             "繰り越し分と合わせて150msを超えたら1tick進むはず"
         );
@@ -701,7 +768,7 @@ mod tests {
         state.advance(Duration::from_secs(10), None);
 
         assert_eq!(
-            state.game_local.debug_frame(),
+            state.games[0].debug_frame(),
             1,
             "250msにクランプされるので1tickぶんしか進まないはず"
         );
@@ -721,14 +788,10 @@ mod tests {
         stepwise.run_net_tick(Some(InputAction::MoveRight));
         stepwise.run_net_tick(None);
 
+        assert_eq!(batched.games[0].debug_frame(), 3, "前提: 合計3tick進むはず");
         assert_eq!(
-            batched.game_local.debug_frame(),
-            3,
-            "前提: 合計3tick進むはず"
-        );
-        assert_eq!(
-            batched.game_local.state_hash(),
-            stepwise.game_local.state_hash(),
+            batched.games[0].state_hash(),
+            stepwise.games[0].state_hash(),
             "2tick目以降にも入力が適用されていると状態が食い違う"
         );
     }
@@ -737,15 +800,19 @@ mod tests {
     fn no_tick_advances_after_the_outcome_is_decided() {
         // 決着後は入力を受け付けず、盤面も進めない。
         let mut state = battle(14, 15);
-        place_just_above_goal(&mut state.game_local);
+        place_just_above_goal(&mut state.games[0]);
         advance_until_outcome(&mut state, 10);
-        assert_eq!(state.outcome, Some(BattleOutcome::Win), "前提: 決着済み");
+        assert_eq!(
+            state.outcome,
+            Some(BattleOutcome::Ranked(1)),
+            "前提: 決着済み"
+        );
 
-        let frames_at_outcome = state.game_local.debug_frame();
+        let frames_at_outcome = state.games[0].debug_frame();
         state.advance(Duration::from_millis(250), Some(InputAction::MoveRight));
 
         assert_eq!(
-            state.game_local.debug_frame(),
+            state.games[0].debug_frame(),
             frames_at_outcome,
             "決着後はtickが進まないはず"
         );
@@ -800,23 +867,198 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // 順位判定(`update_ranks`。#273)
+    // -----------------------------------------------------------------------
+
+    /// 指定した`GameStatus`の並びで`update_ranks`を1回走らせ、確定した順位と決着を返す。
+    /// 判定はstatusだけを見るため、盤面はテスト用の短いコースを使い回してよい。
+    fn ranks_for(statuses: &[GameStatus]) -> (Vec<Option<u8>>, Option<BattleOutcome>) {
+        let mut state = battle_n(&vec![1; statuses.len()]);
+        for (game, &status) in state.games.iter_mut().zip(statuses.iter()) {
+            game.status = status;
+        }
+        state.update_ranks();
+        (state.ranks.clone(), state.outcome)
+    }
+
     #[test]
-    fn resolve_outcome_covers_every_combination_of_statuses() {
-        use BattleOutcome::{Draw, Lose, Win};
+    fn update_ranks_covers_every_combination_of_statuses_for_two_players() {
+        use BattleOutcome::Ranked;
         use GameStatus::{Cleared, GameOver, Paused, Playing};
 
-        assert_eq!(resolve_outcome(Playing, Playing), None);
-        assert_eq!(resolve_outcome(Paused, Playing), None);
-        assert_eq!(resolve_outcome(Cleared, Playing), Some(Win));
-        assert_eq!(resolve_outcome(GameOver, Playing), Some(Lose));
-        assert_eq!(resolve_outcome(Playing, Cleared), Some(Lose));
-        assert_eq!(resolve_outcome(Playing, GameOver), Some(Win));
-        // 同一tickで両者が同じ結末を迎えた場合は引き分け。
-        assert_eq!(resolve_outcome(Cleared, Cleared), Some(Draw));
-        assert_eq!(resolve_outcome(GameOver, GameOver), Some(Draw));
-        // 自分がゴール・相手が脱落なら、どちらの判定でも自分の勝ち。
-        assert_eq!(resolve_outcome(Cleared, GameOver), Some(Win));
-        assert_eq!(resolve_outcome(GameOver, Cleared), Some(Lose));
+        // 2人専用だった`resolve_outcome`と同じstatusの組み合わせを、順位方式での同値
+        // (Win=1位・Lose=最下位・Draw=同順位)で確認する。
+        assert_eq!(ranks_for(&[Playing, Playing]), (vec![None, None], None));
+        assert_eq!(ranks_for(&[Paused, Playing]), (vec![None, None], None));
+        // 片方が確定すると、残った1人はゴールも脱落もしていなくても順位が決まる。
+        assert_eq!(
+            ranks_for(&[Cleared, Playing]),
+            (vec![Some(1), Some(2)], Some(Ranked(1)))
+        );
+        assert_eq!(
+            ranks_for(&[GameOver, Playing]),
+            (vec![Some(2), Some(1)], Some(Ranked(2)))
+        );
+        assert_eq!(
+            ranks_for(&[Playing, Cleared]),
+            (vec![Some(2), Some(1)], Some(Ranked(2)))
+        );
+        assert_eq!(
+            ranks_for(&[Playing, GameOver]),
+            (vec![Some(1), Some(2)], Some(Ranked(1)))
+        );
+        // 同一tickで両者が同じ結末を迎えた場合は同順位(旧Draw)。
+        assert_eq!(
+            ranks_for(&[Cleared, Cleared]),
+            (vec![Some(1), Some(1)], Some(Ranked(1)))
+        );
+        assert_eq!(
+            ranks_for(&[GameOver, GameOver]),
+            (vec![Some(1), Some(1)], Some(Ranked(1)))
+        );
+        // 自分がゴール・相手が脱落なら、どちらの判定でも自分が1位。
+        assert_eq!(
+            ranks_for(&[Cleared, GameOver]),
+            (vec![Some(1), Some(2)], Some(Ranked(1)))
+        );
+        assert_eq!(
+            ranks_for(&[GameOver, Cleared]),
+            (vec![Some(2), Some(1)], Some(Ranked(2)))
+        );
+    }
+
+    #[test]
+    fn the_only_player_reaching_the_goal_is_ranked_first_with_three_or_four_players() {
+        use BattleOutcome::Ranked;
+        use GameStatus::{Cleared, Playing};
+
+        // 1人だけがゴール到達した時点では、その1人が1位で確定し残りは未確定のまま。
+        assert_eq!(
+            ranks_for(&[Cleared, Playing, Playing]),
+            (vec![Some(1), None, None], Some(Ranked(1)))
+        );
+        assert_eq!(
+            ranks_for(&[Cleared, Playing, Playing, Playing]),
+            (vec![Some(1), None, None, None], Some(Ranked(1)))
+        );
+        // ゴールしたのが自分以外なら、自分の決着はまだ出ない。
+        assert_eq!(
+            ranks_for(&[Playing, Cleared, Playing]),
+            (vec![None, Some(1), None], None)
+        );
+        assert_eq!(
+            ranks_for(&[Playing, Playing, Cleared, Playing]),
+            (vec![None, None, Some(1), None], None)
+        );
+    }
+
+    #[test]
+    fn players_reaching_the_goal_on_the_same_tick_share_the_same_rank() {
+        use BattleOutcome::Ranked;
+        use GameStatus::{Cleared, Playing};
+
+        // 3人で2人が同時ゴール → 2人とも1位。未確定が1人になるため残りも確定し、
+        // 同着で埋まった2つぶんを飛ばした3位になる。
+        assert_eq!(
+            ranks_for(&[Cleared, Cleared, Playing]),
+            (vec![Some(1), Some(1), Some(3)], Some(Ranked(1)))
+        );
+        // 4人で2人が同時ゴール → 2人とも1位、残り2人は未確定。
+        assert_eq!(
+            ranks_for(&[Cleared, Playing, Cleared, Playing]),
+            (vec![Some(1), None, Some(1), None], Some(Ranked(1)))
+        );
+        // 4人全員が同時ゴール → 全員1位。
+        assert_eq!(
+            ranks_for(&[Cleared, Cleared, Cleared, Cleared]),
+            (vec![Some(1); 4], Some(Ranked(1)))
+        );
+    }
+
+    #[test]
+    fn the_last_player_standing_is_ranked_first_after_everyone_else_drops_out() {
+        // 4人で自分以外の3人が順番に脱落すると、最後に残った自分が自動的に1位で確定する
+        // (2人版の「相手が脱落したら自動的に勝ち」の一般化)。
+        let mut state = battle_n(&[1, 2, 3, 4]);
+
+        state.games[1].status = GameStatus::GameOver;
+        state.update_ranks();
+        assert_eq!(
+            state.ranks,
+            vec![None, Some(4), None, None],
+            "最初の脱落者が最下位"
+        );
+        assert_eq!(state.outcome, None, "自分の順位はまだ確定しないはず");
+
+        state.games[2].status = GameStatus::GameOver;
+        state.update_ranks();
+        assert_eq!(state.ranks, vec![None, Some(4), Some(3), None]);
+        assert_eq!(state.outcome, None);
+
+        state.games[3].status = GameStatus::GameOver;
+        state.update_ranks();
+        assert_eq!(
+            state.ranks,
+            vec![Some(1), Some(4), Some(3), Some(2)],
+            "未確定が自分1人になったら自動的に1位で確定するはず"
+        );
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
+    }
+
+    #[test]
+    fn a_goal_and_a_dropout_rank_from_both_ends_while_the_survivors_stay_undecided() {
+        use GameStatus::{Cleared, GameOver, Playing};
+
+        // 4人で自分がゴール・1人が脱落・残り2人がプレイ中。ゴールは上から、脱落は
+        // 下から埋まり、残り2人は未確定のまま。
+        assert_eq!(
+            ranks_for(&[Cleared, Playing, GameOver, Playing]),
+            (
+                vec![Some(1), None, Some(4), None],
+                Some(BattleOutcome::Ranked(1))
+            )
+        );
+    }
+
+    #[test]
+    fn the_outcome_stays_undecided_while_i_am_one_of_the_survivors() {
+        use GameStatus::{Cleared, GameOver, Playing};
+
+        // 上と同じ状況で、自分が未確定の2人の一方である場合。他人の順位は確定しても
+        // 自分の決着は出ないため、対戦は続く。
+        assert_eq!(
+            ranks_for(&[Playing, Cleared, GameOver, Playing]),
+            (vec![None, Some(1), Some(4), None], None)
+        );
+    }
+
+    #[test]
+    fn a_three_player_battle_advances_every_board_and_ranks_the_goal_reacher_first() {
+        // `advance`(通信なし)がN人でも全員ぶんの盤面を進め、ゴール到達者を1位にすることを
+        // 実際にtickを回して確認する。
+        let mut state = battle_n(&[21, 22, 23]);
+        place_just_above_goal(&mut state.games[0]);
+
+        advance_until_outcome(&mut state, 10);
+
+        assert_eq!(state.games[0].status, GameStatus::Cleared);
+        assert!(
+            state.games[1..]
+                .iter()
+                .all(|game| game.status == GameStatus::Playing),
+            "前提: 自分以外はまだゴールも脱落もしていないはず"
+        );
+        assert!(
+            state.games[1..].iter().all(|game| game.debug_frame() > 0),
+            "自分以外の盤面もtickぶん進んでいるはず"
+        );
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
+        assert_eq!(
+            state.ranks,
+            vec![Some(1), None, None],
+            "残り2人は未確定のままのはず"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -858,8 +1100,8 @@ mod tests {
         let agreed = host_result.clone();
 
         (
-            BattleState::from_handshake(host_result, host_stream).unwrap(),
-            BattleState::from_handshake(client_result, client_stream).unwrap(),
+            BattleState::from_handshake(host_result, host_stream, "host").unwrap(),
+            BattleState::from_handshake(client_result, client_stream, "client").unwrap(),
             agreed,
         )
     }
@@ -882,7 +1124,7 @@ mod tests {
         let (host_result, host_stream) = host.join().unwrap();
 
         (
-            BattleState::from_handshake(host_result, host_stream).unwrap(),
+            BattleState::from_handshake(host_result, host_stream, "host").unwrap(),
             peer,
         )
     }
@@ -948,13 +1190,13 @@ mod tests {
         assert_eq!(client.outcome, None);
 
         assert_eq!(
-            host.game_local.state_hash(),
-            client.game_remote.state_hash(),
+            host.games[0].state_hash(),
+            client.games[1].state_hash(),
             "ホストの自分盤面とクライアントの相手盤面が一致しない"
         );
         assert_eq!(
-            host.game_remote.state_hash(),
-            client.game_local.state_hash(),
+            host.games[1].state_hash(),
+            client.games[0].state_hash(),
             "ホストの相手盤面とクライアントの自分盤面が一致しない"
         );
 
@@ -969,11 +1211,11 @@ mod tests {
             );
         }
         assert_eq!(
-            host.game_local.state_hash(),
+            host.games[0].state_hash(),
             reference_host.state_hash(),
             "通信を挟んでもローカルハーネスと同じ結果になるはず"
         );
-        assert_eq!(host.game_remote.state_hash(), reference_client.state_hash());
+        assert_eq!(host.games[1].state_hash(), reference_client.state_hash());
     }
 
     #[test]
@@ -990,7 +1232,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
         assert!(
             started.elapsed() >= Duration::from_millis(LOCKSTEP_WAIT_TIMEOUT_MS),
             "待機上限に達する前に不戦勝にはしないはず"
@@ -1014,7 +1256,7 @@ mod tests {
             pump_interval();
         }
 
-        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
         assert!(link(&host).disconnected);
         assert!(
             link(&host).awaiting_since.is_none(),
@@ -1054,7 +1296,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
         assert!(
             started.elapsed() >= Duration::from_millis(HEARTBEAT_TIMEOUT_MS),
             "途絶の上限に達する前に切断扱いにはしないはず"
@@ -1071,8 +1313,8 @@ mod tests {
         // (ホストから見た自分の盤面=クライアントから見た相手の盤面)。
         const TICKS: u32 = 20;
         let (mut host, mut client, _) = connected_pair();
-        place_just_above_goal(&mut host.game_local);
-        place_just_above_goal(&mut client.game_remote);
+        place_just_above_goal(&mut host.games[0]);
+        place_just_above_goal(&mut client.games[1]);
 
         for _ in 0..MAX_PUMPS {
             pump(&mut host, TICKS, None);
@@ -1084,12 +1326,12 @@ mod tests {
         }
 
         assert_eq!(
-            host.game_local.status,
+            host.games[0].status,
             GameStatus::Cleared,
             "前提: ホスト側がゴールに到達しているはず"
         );
-        assert_eq!(host.outcome, Some(BattleOutcome::Win));
-        assert_eq!(client.outcome, Some(BattleOutcome::Lose));
+        assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
+        assert_eq!(client.outcome, Some(BattleOutcome::Ranked(2)));
         assert_eq!(
             link(&host).remote_result.map(|(reached, _)| reached),
             Some(false),
@@ -1106,16 +1348,17 @@ mod tests {
             host.advance(Duration::ZERO, None);
             client.advance(Duration::ZERO, None);
         }
-        assert_eq!(host.outcome, Some(BattleOutcome::Win));
-        assert_eq!(client.outcome, Some(BattleOutcome::Lose));
+        assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
+        assert_eq!(client.outcome, Some(BattleOutcome::Ranked(2)));
     }
 
     #[test]
-    fn a_contradictory_result_from_the_opponent_overwrites_the_outcome_with_a_draw() {
-        // 相手の申告と自分のシミュレーションが食い違ったら引き分けにする(12.4)。
+    fn a_contradictory_result_from_the_opponent_overwrites_the_outcome_with_a_desync() {
+        // 相手の申告と自分のシミュレーションが食い違ったら、順位を確定できない終わり方
+        // (`Desync`)へ上書きする(12.4)。
         const TICKS: u32 = 16;
         let (mut host, mut peer) = battle_with_raw_peer();
-        place_just_above_goal(&mut host.game_local);
+        place_just_above_goal(&mut host.games[0]);
 
         // 相手役はtickを進めるための入力だけ送る(自分は何もしない)。
         for tick in 0..TICKS {
@@ -1137,11 +1380,11 @@ mod tests {
         }
 
         assert_eq!(
-            host.game_local.status,
+            host.games[0].status,
             GameStatus::Cleared,
             "前提: 自分のゴール到達で決着しているはず"
         );
-        assert_eq!(host.outcome, Some(BattleOutcome::Win));
+        assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
 
         // ホストの持つ相手インスタンスはまだプレイ中なのに、相手は「自分がゴールした」と
         // 申告してくる。
@@ -1156,18 +1399,18 @@ mod tests {
         .unwrap();
         for _ in 0..MAX_PUMPS {
             host.advance(Duration::ZERO, None);
-            if host.outcome == Some(BattleOutcome::Draw) {
+            if host.outcome == Some(BattleOutcome::Desync) {
                 break;
             }
             pump_interval();
         }
 
         assert_eq!(
-            host.game_remote.status,
+            host.games[1].status,
             GameStatus::Playing,
             "前提: 自分のシミュレーション上、相手はゴールしていない"
         );
-        assert_eq!(host.outcome, Some(BattleOutcome::Draw));
+        assert_eq!(host.outcome, Some(BattleOutcome::Desync));
     }
 
     // -----------------------------------------------------------------------
@@ -1263,13 +1506,13 @@ mod tests {
             read_state_hash(&mut peer),
             GameMessage::StateHash {
                 tick: 0,
-                local_hash: host.game_local.state_hash(),
-                remote_hash: host.game_remote.state_hash(),
+                local_hash: host.games[0].state_hash(),
+                remote_hash: host.games[1].state_hash(),
             },
             "自分の盤面・相手の盤面のダイジェストをそのまま申告するはず"
         );
 
-        // 相手役は「自分の盤面」として、ホストのgame_remoteとは違う値を申告する。
+        // 相手役は「自分の盤面」として、ホストのgames[1]とは違う値を申告する。
         let (mine_local, mine_remote) = link(&host).own_state_hashes[&0];
         net::write_message(
             &mut peer,
@@ -1301,7 +1544,7 @@ mod tests {
         // デシンク検出は対戦終了前の同期ズレを捉えるためのもので、確定済みの決着は覆さない。
         const TICKS: u32 = 16;
         let (mut host, mut peer) = battle_with_raw_peer();
-        place_just_above_goal(&mut host.game_local);
+        place_just_above_goal(&mut host.games[0]);
 
         // 相手役はtickを進めるための入力だけ送る(自分は何もしない)。
         for tick in 0..TICKS {
@@ -1323,7 +1566,7 @@ mod tests {
         }
         assert_eq!(
             host.outcome,
-            Some(BattleOutcome::Win),
+            Some(BattleOutcome::Ranked(1)),
             "前提: 自分のゴール到達で決着しているはず"
         );
 
@@ -1352,7 +1595,7 @@ mod tests {
         );
         assert_eq!(
             host.outcome,
-            Some(BattleOutcome::Win),
+            Some(BattleOutcome::Ranked(1)),
             "決着済みの結果はデシンク検出で上書きされないはず"
         );
     }

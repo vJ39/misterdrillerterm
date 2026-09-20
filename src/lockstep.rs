@@ -5,6 +5,9 @@
 //! 毎tick同じ固定順序でシミュレーションを進めることで盤面を同期する。本モジュールは
 //! 実際の通信(#10本体)を行わず、この同期手順(`run_tick`)だけをローカルで再現し、
 //! 決定性が成立していることをテストで検証するハーネスに留める。UIは持たない。
+//!
+//! N人対戦(#273)向けには、人数を可変にした`run_tick_n`を用意している(処理順序は
+//! `run_tick`と同じ)。こちらは`BattleState`から実際に呼ばれる。
 
 use std::time::Duration;
 
@@ -31,6 +34,27 @@ pub fn run_tick(
     }
     game_local.update(Duration::from_millis(NET_TICK_MS));
     game_remote.update(Duration::from_millis(NET_TICK_MS));
+}
+
+/// lockstepの1tickぶんの処理をN人向けに一般化したもの(#273)。処理順序は`run_tick`と
+/// 同じ(全員の入力適用 → 全員のupdate)で、人数だけが可変になる。
+///
+/// `games`と`actions`は同じindexで対応する(index 0が自分)。`actions`の要素がNoneなら
+/// その参加者はこのtickで何もしない(1tickにつき高々1アクション。spec.md 12.2)。
+pub fn run_tick_n(games: &mut [Game], actions: &[Option<InputAction>]) {
+    debug_assert_eq!(
+        games.len(),
+        actions.len(),
+        "参加者の数と入力の数は一致するはず"
+    );
+    for (game, &action) in games.iter_mut().zip(actions.iter()) {
+        if let Some(action) = action {
+            game.apply_input(action);
+        }
+    }
+    for game in games.iter_mut() {
+        game.update(Duration::from_millis(NET_TICK_MS));
+    }
 }
 
 #[cfg(test)]
@@ -150,5 +174,136 @@ mod tests {
             .collect();
 
         assert_lockstep_matches(9003, &actions);
+    }
+
+    // -----------------------------------------------------------------------
+    // N人版(`run_tick_n`。#273)
+    // -----------------------------------------------------------------------
+
+    /// ホスト`h`が持つ`Vec<Game>`の並び順。自分を先頭(index 0)に置き、残りを番号順に
+    /// 続ける(`BattleState`が「index 0が自分」とするのと同じ規約)。
+    fn order_for(n: usize, h: usize) -> Vec<usize> {
+        let mut order = vec![h];
+        order.extend((0..n).filter(|&p| p != h));
+        order
+    }
+
+    /// N人版のクロスチェック。参加者`n`人ぶんの「各ホストの視点」を作り、毎tick後に
+    /// 同じ参加者のインスタンスが全ホストで一致し続けることを確認する
+    /// (2人版`assert_lockstep_matches`のA.local⟷B.remote照合の一般化)。
+    /// `actions`は各tickの参加者ごとの入力(長さ`n`)。
+    fn assert_lockstep_n_matches(seed: u64, n: usize, actions: &[Vec<Option<InputAction>>]) {
+        let mut views: Vec<Vec<Game>> = (0..n)
+            .map(|_| (0..n).map(|_| Game::new(seed)).collect())
+            .collect();
+
+        // 同じ参加者のインスタンスをホスト0のものと突き合わせる。
+        let assert_views_agree = |views: &[Vec<Game>], label: &str| {
+            for p in 0..n {
+                let hash_of = |h: usize| {
+                    let order = order_for(n, h);
+                    let index = order
+                        .iter()
+                        .position(|&q| q == p)
+                        .expect("並び順には全参加者が含まれるはず");
+                    views[h][index].state_hash()
+                };
+                let expected = hash_of(0);
+                for h in 1..n {
+                    assert_eq!(
+                        expected,
+                        hash_of(h),
+                        "{label}: 参加者{p}のインスタンスがホスト0とホスト{h}で一致しない"
+                    );
+                }
+            }
+        };
+
+        assert_views_agree(&views, "初期状態");
+
+        for (i, tick_actions) in actions.iter().enumerate() {
+            assert_eq!(tick_actions.len(), n, "各tickの入力は参加者数ぶん必要");
+            for (h, view) in views.iter_mut().enumerate() {
+                let ordered: Vec<Option<InputAction>> =
+                    order_for(n, h).iter().map(|&p| tick_actions[p]).collect();
+                run_tick_n(view, &ordered);
+            }
+            assert_views_agree(&views, &format!("tick{i}後"));
+        }
+    }
+
+    #[test]
+    fn run_tick_n_keeps_every_hosts_views_in_sync_over_many_ticks() {
+        // 4人がそれぞれ異なる操作をしても、40 tickにわたって全ホストの視点が一致し
+        // 続けることを確認する(2人版の基本ケースの一般化)。
+        const N: usize = 4;
+        let actions: Vec<Vec<Option<InputAction>>> = (0..40)
+            .map(|i| {
+                (0..N)
+                    .map(|p| match (i + p) % 5 {
+                        0 => Some(InputAction::MoveRight),
+                        1 => Some(InputAction::Drill),
+                        2 => None,
+                        3 => Some(InputAction::FaceDown),
+                        _ => Some(InputAction::MoveLeft),
+                    })
+                    .collect()
+            })
+            .collect();
+
+        assert_lockstep_n_matches(9101, N, &actions);
+    }
+
+    #[test]
+    fn run_tick_n_stays_in_sync_with_no_inputs_at_all() {
+        // 3人で誰も操作しない場合でも、酸素減少・自由落下等のサブタイマーだけで
+        // 全ホストの決定性が保たれることを確認する。
+        const N: usize = 3;
+        let actions: Vec<Vec<Option<InputAction>>> = vec![vec![None; N]; 30];
+
+        assert_lockstep_n_matches(9102, N, &actions);
+    }
+
+    #[test]
+    fn run_tick_n_produces_the_same_result_as_run_tick_for_two_players() {
+        // N人版が2人版の正しい一般化であることの裏付け。同じ入力列を両者へ与え、
+        // 毎tick後に状態が完全に一致することを確認する。
+        let actions: Vec<(Option<InputAction>, Option<InputAction>)> = (0..30)
+            .map(|i| {
+                let a = match i % 4 {
+                    0 => Some(InputAction::MoveRight),
+                    1 => Some(InputAction::Drill),
+                    2 => None,
+                    _ => Some(InputAction::FaceDown),
+                };
+                let b = match i % 3 {
+                    0 => Some(InputAction::MoveLeft),
+                    1 => Some(InputAction::Drill),
+                    _ => None,
+                };
+                (a, b)
+            })
+            .collect();
+
+        const SEED: u64 = 9103;
+        let mut pair_local = Game::new(SEED);
+        let mut pair_remote = Game::new(SEED);
+        let mut games = vec![Game::new(SEED), Game::new(SEED)];
+
+        for (i, &(a_action, b_action)) in actions.iter().enumerate() {
+            run_tick(&mut pair_local, &mut pair_remote, a_action, b_action);
+            run_tick_n(&mut games, &[a_action, b_action]);
+
+            assert_eq!(
+                pair_local.state_hash(),
+                games[0].state_hash(),
+                "tick{i}後に自分の盤面が2人版と一致しない"
+            );
+            assert_eq!(
+                pair_remote.state_hash(),
+                games[1].state_hash(),
+                "tick{i}後に相手の盤面が2人版と一致しない"
+            );
+        }
     }
 }

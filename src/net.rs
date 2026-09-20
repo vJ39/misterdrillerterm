@@ -881,9 +881,12 @@ mod tests {
             "Bye自体も呼び出し側へ届けてから終了するはず"
         );
 
-        // Bye受信でスレッドが終わるため、以降のメッセージは届かない。
+        // Bye受信でスレッドが終わるため、以降のメッセージは届かない。検証対象は
+        // 「届かないこと」自体であり、送信の成否は問わない(スレッド終了に伴う
+        // TCP接続クローズのタイミングによっては、この書き込み自体がBrokenPipeで
+        // 失敗することがある。#277)。
         handle.join().unwrap();
-        write_message(&mut client, &GameMessage::Heartbeat { tick: 2 }).unwrap();
+        let _ = write_message(&mut client, &GameMessage::Heartbeat { tick: 2 });
         assert!(rx.recv().is_err(), "スレッド終了で送信側が閉じているはず");
     }
 

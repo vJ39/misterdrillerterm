@@ -359,7 +359,7 @@ pub fn draw_battle(
         draw_overlay(
             frame,
             plan.game_frame,
-            battle_outcome_message(outcome),
+            &battle_outcome_message(outcome),
             &["Enter/Escキーでタイトルへ"],
         );
     }
@@ -374,14 +374,13 @@ fn battle_progress_ratio(depth_m: usize, depth_goal_m: usize) -> f32 {
     (depth_m as f32 / depth_goal_m as f32).clamp(0.0, 1.0)
 }
 
-/// 決着の表示文字列(#256)。デシンクは引き分け扱いだが、原因が異なることが分かるよう
-/// 別の文言にする(spec.md 12.3「TUIにはデシンク終了である旨を表示する」)。
-fn battle_outcome_message(outcome: BattleOutcome) -> &'static str {
+/// 決着の表示文字列(#256)。順位方式(#273)になったため自分の順位をそのまま出す。
+/// デシンクは順位が確定しない終わり方で、原因が異なることが分かるよう別の文言にする
+/// (spec.md 12.3「TUIにはデシンク終了である旨を表示する」)。
+fn battle_outcome_message(outcome: BattleOutcome) -> String {
     match outcome {
-        BattleOutcome::Win => "YOU WIN",
-        BattleOutcome::Lose => "YOU LOSE",
-        BattleOutcome::Draw => "DRAW",
-        BattleOutcome::Desync => "DESYNC - DRAW",
+        BattleOutcome::Ranked(rank) => format!("RANK {rank}"),
+        BattleOutcome::Desync => "DESYNC - DRAW".to_string(),
     }
 }
 
@@ -2713,10 +2712,9 @@ mod tests {
 
     #[test]
     fn every_battle_outcome_has_its_own_result_message() {
-        // 勝敗と、引き分けでも原因がデシンクである場合(spec.md 12.3)を表示し分ける。
-        assert_eq!(battle_outcome_message(BattleOutcome::Win), "YOU WIN");
-        assert_eq!(battle_outcome_message(BattleOutcome::Lose), "YOU LOSE");
-        assert_eq!(battle_outcome_message(BattleOutcome::Draw), "DRAW");
+        // 順位(#273)と、順位が確定しないデシンク終了(spec.md 12.3)を表示し分ける。
+        assert_eq!(battle_outcome_message(BattleOutcome::Ranked(1)), "RANK 1");
+        assert_eq!(battle_outcome_message(BattleOutcome::Ranked(4)), "RANK 4");
         assert_eq!(
             battle_outcome_message(BattleOutcome::Desync),
             "DESYNC - DRAW"

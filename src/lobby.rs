@@ -361,7 +361,7 @@ fn host_handshake(
     // 引き継ぐ。ハンドシェイク以降はブロッキング前提なので明示的に戻す。
     stream.set_nonblocking(false)?;
     let handshake = net::run_host_handshake(&mut stream, my_name, config)?;
-    BattleState::from_handshake(handshake, stream)
+    BattleState::from_handshake(handshake, stream, my_name)
 }
 
 /// 相手へ接続してクライアント役のハンドシェイクを行い、対戦状態を組み立てる。
@@ -369,7 +369,7 @@ fn client_handshake(addr: SocketAddr, my_name: &str) -> io::Result<BattleState> 
     let mut stream =
         TcpStream::connect_timeout(&addr, Duration::from_millis(TCP_CONNECT_TIMEOUT_MS))?;
     let handshake = net::run_client_handshake(&mut stream, my_name)?;
-    BattleState::from_handshake(handshake, stream)
+    BattleState::from_handshake(handshake, stream, my_name)
 }
 
 #[cfg(test)]
@@ -608,7 +608,8 @@ mod tests {
         let mut actions = first_actions.to_vec();
         for _ in 0..400 {
             match lobby.update(&actions, test_config()) {
-                LobbyOutcome::Battle(state) => return Some(state.opponent_name.clone()),
+                // 相手はindex 1(index 0は自分)。
+                LobbyOutcome::Battle(state) => return Some(state.player_names[1].clone()),
                 LobbyOutcome::Leave => return None,
                 LobbyOutcome::Stay => {}
             }
