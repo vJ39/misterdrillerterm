@@ -54,6 +54,10 @@ pub struct BattleState {
     /// 自分を含む全参加者の盤面。index 0が自分。フルメッシュ接続(#273設計書1節)なので、
     /// 対戦中は全参加者の視点をローカルに保持する。
     pub games: Vec<Game>,
+    /// 自分の入力の見た目専用の先行コピー(#292)。tick確定を待たず、入力を受け取った
+    /// 瞬間にここへ適用して即座に描画へ反映する。tickが確定するたびに`games[0]`から
+    /// 作り直し、正式な状態へ同期し直す(ズレは最大1tickで補正される)。
+    predicted: Game,
     /// 各参加者の表示名。`games`と同じindexで対応する(index 0が自分)。
     pub player_names: Vec<String>,
     /// 実測フレーム時間を`NET_TICK_MS`(150ms)単位へ量子化するための蓄積バッファ。
@@ -172,8 +176,10 @@ impl BattleState {
     #[allow(dead_code)]
     pub fn new(games: Vec<Game>, player_names: Vec<String>) -> Self {
         let player_count = games.len();
+        let predicted = games[0].clone();
         Self {
             games,
+            predicted,
             player_names,
             net_tick_accum: Duration::ZERO,
             ranks: vec![None; player_count],
@@ -210,6 +216,7 @@ impl BattleState {
             "接続は自分以外の参加者ぶん必要"
         );
         let player_count = games.len();
+        let predicted = games[0].clone();
         let peers = streams
             .into_iter()
             .map(|stream| PeerLink::new(stream, start_at_unix_ms))
@@ -217,6 +224,7 @@ impl BattleState {
 
         Ok(Self {
             games,
+            predicted,
             player_names,
             net_tick_accum: Duration::ZERO,
             ranks: vec![None; player_count],
@@ -264,6 +272,12 @@ impl BattleState {
     /// 決着(#256)。`Some`なら対戦は終わっており、画面側は結果表示へ切り替える。
     pub fn outcome(&self) -> Option<BattleOutcome> {
         self.outcome
+    }
+
+    /// 自分の盤面の描画用(#292)。`games[0]`(確定済みの正式な状態)ではなく、tick確定を
+    /// 待たず入力を先行反映したこちらを描画に使う。
+    pub fn predicted_game(&self) -> &Game {
+        &self.predicted
     }
 
     /// 対戦から抜けることを他の参加者全員へ伝える(#256/#274)。通信なし(#252のローカル
@@ -378,8 +392,10 @@ impl BattleState {
         // このフレームで新しい入力があれば控える。関数の先頭で行うのは、下の
         // `is_awaiting_any_peer`等での早期returnでも入力を失わないため(#287/#288。
         // 相手の入力待ち中に押されたキーがそのまま捨てられていた)。
-        if local_action.is_some() {
+        if let Some(action) = local_action {
             self.pending_local_action = local_action;
+            // tick確定を待たず、見た目専用の先行コピーへ即座に反映する(#292)。
+            self.predicted.apply_input(action);
         }
 
         // 受信処理だけは決着後も続ける(他の参加者の`Result`は自分の決着より後に届くため)。
@@ -446,6 +462,9 @@ impl BattleState {
                 }
             }
             self.run_net_tick_with_actions(&all_actions);
+            // 確定した正式な状態へ先行コピーを同期し直す(#292)。予測が実際とズレていても
+            // ここで必ず補正される。
+            self.predicted = self.games[0].clone();
 
             // 定期的に状態ダイジェストを交換してデシンクを検出する(#255。spec.md 12.3)。
             // tick 0も対象になり、そこでの照合はハンドシェイクで合意したseed/configから
@@ -1496,6 +1515,55 @@ mod tests {
     /// 共通化したもの)。
     fn pump(state: &mut BattleState, target_ticks: u32, action: Option<InputAction>) {
         state.pump_frame(target_ticks, action);
+    }
+
+    #[test]
+    fn a_local_input_reaches_the_predicted_game_before_the_tick_is_confirmed() {
+        // #292: tick確定を待たず、入力を受け取った瞬間に見た目専用の先行コピーへ反映する。
+        let (mut host, _client, _) = connected_pair();
+        let row = host.games[0].player.row;
+        let col = host.games[0].player.col;
+        // 直下に足場・右隣を空けて、MoveRightが確実に成功する状態を作る。
+        host.games[0].board.rows[row + 1][col] = Cell::Rock { hits: 0 };
+        host.games[0].board.rows[row][col + 1] = Cell::Empty;
+        host.predicted = host.games[0].clone();
+
+        // delta=ZEROなのでtickはまだ確定しない(net_tick_accumが増えない)。
+        host.advance(Duration::ZERO, Some(InputAction::MoveRight));
+
+        assert_eq!(
+            host.predicted_game().player.col,
+            col + 1,
+            "予測はtick確定を待たず即座に反映されるはず"
+        );
+        assert_eq!(
+            host.games[0].player.col, col,
+            "前提: 確定側はまだtickが進んでいないはず"
+        );
+    }
+
+    #[test]
+    fn the_predicted_game_is_resynced_to_the_confirmed_state_once_the_tick_settles() {
+        // #292: tickが確定したら、予測(ズレていたかどうかに関わらず)を正式な状態へ
+        // 作り直す。ここでは予測を先に大きくズラしておき、確定後に上書きされることを見る。
+        let (mut host, mut client, _) = connected_pair();
+        host.predicted.player.col = usize::MAX / 2; // 確定状態とは絶対に一致しない値。
+
+        for _ in 0..MAX_PUMPS {
+            pump(&mut host, 1, None);
+            pump(&mut client, 1, None);
+            if link(&host).next_tick >= 1 {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(link(&host).next_tick, 1, "前提: 1tick確定しているはず");
+        assert_eq!(
+            host.predicted_game().player.col,
+            host.games[0].player.col,
+            "tick確定後は予測が正式な状態に同期し直されるはず"
+        );
     }
 
     /// `tick`番目に入力する予定のアクション(尽きたら何もしない)。

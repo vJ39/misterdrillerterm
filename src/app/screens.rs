@@ -763,7 +763,7 @@ pub fn tick_battle(
         // (N人分の表示は#270/#276の範囲)。
         ui::render::draw_battle(
             frame,
-            &state.games[0],
+            state.predicted_game(),
             &state.games[1],
             &state.player_names[1],
             music_on,
