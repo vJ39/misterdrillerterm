@@ -19,6 +19,8 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rand::RngExt;
+
 use crate::battle::{BattleState, new_game_from_battle_config};
 use crate::discovery::{DiscoveredPeer, Discovery};
 use crate::game::InputAction;
@@ -41,6 +43,10 @@ const CONNECT_FAILED_MESSAGE: &str = "接続できませんでした";
 
 /// ルーム1つに集まれる最大人数(主催者自身を含む。対戦人数の上限は4人)。
 const ROOM_MAX_PLAYERS: usize = 4;
+
+/// AI対戦で選べるAIの人数の範囲(#296)。自分を足した合計が`ROOM_MAX_PLAYERS`を
+/// 超えないようにするため、上限は「最大人数-1」(=3人。合計2〜4人)。
+const AI_OPPONENT_COUNT_RANGE: std::ops::RangeInclusive<usize> = 1..=(ROOM_MAX_PLAYERS - 1);
 
 /// `room::await_room_start`の結果(自分以外とのメッシュ接続, 自分以外の名前, ハンドシェイク)。
 /// 別スレッドからチャネルで受け取るため型に名前を付ける。
@@ -126,6 +132,10 @@ pub enum LobbyPhase {
         result_rx: mpsc::Receiver<io::Result<RoomStartResult>>,
         host_peer: DiscoveredPeer,
     },
+    /// AIと対戦する人数を選んでいる(#296)。`ai_count`は1〜3(合計2〜4人)。
+    /// 通信は一切使わないため、既に迎え入れたゲスト(`guests`)があっても無視する
+    /// (対戦の種類が違うため両立しない)。
+    SelectingAiOpponentCount { ai_count: usize },
     /// 拒否・タイムアウト・接続失敗を短く伝える。時間が経つと探索へ戻る。
     ///
     /// `guests`はホスト側で既に迎え入れていたゲスト(#284。リクエストや接続の失敗1つで
@@ -378,6 +388,13 @@ impl LobbyState {
                         return Some(self.start_room(config));
                     }
                 }
+                // AI対戦は通信を使わないため、既にゲストを迎え入れている場合は
+                // 無視する(#296。誤操作でゲストの接続を切ってしまわないように)。
+                InputAction::StartAiBattle => {
+                    if !has_guests {
+                        self.phase = LobbyPhase::SelectingAiOpponentCount { ai_count: 1 };
+                    }
+                }
                 InputAction::Quit => {
                     // 相手の候補リストから即座に消えるよう、抜ける前にBYEを流す。
                     self.discovery.send_bye();
@@ -423,6 +440,33 @@ impl LobbyState {
                 }
                 _ => {}
             },
+            // AI対戦の人数選択(#296)。通信を使わないため、ここでの操作は探索・招待の
+            // やり取りへ一切影響しない。
+            LobbyPhase::SelectingAiOpponentCount { ai_count } => {
+                let ai_count = *ai_count;
+                match action {
+                    InputAction::FaceUp => {
+                        self.phase = LobbyPhase::SelectingAiOpponentCount {
+                            ai_count: (ai_count + 1).min(*AI_OPPONENT_COUNT_RANGE.end()),
+                        };
+                    }
+                    InputAction::FaceDown => {
+                        self.phase = LobbyPhase::SelectingAiOpponentCount {
+                            ai_count: ai_count
+                                .saturating_sub(1)
+                                .max(*AI_OPPONENT_COUNT_RANGE.start()),
+                        };
+                    }
+                    InputAction::Confirm => {
+                        return Some(self.start_ai_battle(ai_count, config));
+                    }
+                    InputAction::Quit => {
+                        let guests = self.take_guests();
+                        self.phase = LobbyPhase::Discovering { guests };
+                    }
+                    _ => {}
+                }
+            }
             // ゲストからも開始できる。ホストへ開始要求を送るだけで、状態は変えない
             // (開始はホストが配る`RoomRoster`以降で進む。#293)。
             LobbyPhase::WaitingForRoomStart { host_peer, .. } => {
@@ -445,9 +489,10 @@ impl LobbyState {
         match &self.phase {
             // 参加リクエストを受けた側には期限を設けない(送った側が`INVITE_TIMEOUT_MS`で
             // 諦めるため、両側に時計を持たせる必要は無い)。
-            LobbyPhase::Discovering { .. } | LobbyPhase::IncomingInvite { .. } => {
-                LobbyOutcome::Stay
-            }
+            // AI対戦の人数選択(#296)にも期限は設けない(通信相手を待たないため)。
+            LobbyPhase::Discovering { .. }
+            | LobbyPhase::IncomingInvite { .. }
+            | LobbyPhase::SelectingAiOpponentCount { .. } => LobbyOutcome::Stay,
             LobbyPhase::AwaitingInviteResponse { sent_at, .. } => {
                 let sent_at = *sent_at;
                 if sent_at.elapsed() >= Duration::from_millis(INVITE_TIMEOUT_MS) {
@@ -548,6 +593,19 @@ impl LobbyState {
                 LobbyOutcome::Stay
             }
         }
+    }
+
+    /// AI対戦を開始する(#296)。通信は一切使わない。人間とAI全員を同じシード・
+    /// 同じ設定で作る(spec.md 12.2と同じ考え方=盤面の地形とアイテム配置を揃える
+    /// ため)。
+    fn start_ai_battle(&mut self, ai_count: usize, config: BattleConfig) -> LobbyOutcome {
+        let seed: u64 = rand::rng().random();
+        let human_game = new_game_from_battle_config(seed, &config);
+        let ai_games = (0..ai_count)
+            .map(|_| new_game_from_battle_config(seed, &config))
+            .collect();
+        let state = BattleState::new_local_vs_ai(human_game, ai_games, self.my_name.clone());
+        LobbyOutcome::Battle(Box::new(state))
     }
 
     /// ゲストとしてホストへ接続し、`JoinRoom`を送る。接続は`connect_timeout`自体が
@@ -1114,6 +1172,82 @@ mod tests {
             matches!(lobby.phase(), LobbyPhase::Discovering { guests } if guests.len() == 3),
             "上限に達している間はConfirmしても応答待ちへ移らないはず"
         );
+    }
+
+    #[test]
+    fn pressing_the_ai_battle_key_asks_how_many_opponents_to_face() {
+        // #296: 相手が1人も見つかっていなくてもVで人数選択へ入れる(通信を使わないため)。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+
+        let outcome = lobby.update(&[InputAction::StartAiBattle], test_config());
+
+        assert!(matches!(outcome, LobbyOutcome::Stay));
+        assert!(
+            matches!(
+                lobby.phase(),
+                LobbyPhase::SelectingAiOpponentCount { ai_count: 1 }
+            ),
+            "Vを押したらAIの人数選択(初期値1)へ移るはず"
+        );
+    }
+
+    #[test]
+    fn the_ai_opponent_count_stays_within_the_supported_range() {
+        // #296: 合計人数がROOM_MAX_PLAYERS(4人)を超えないよう、AIは1〜3人に収める。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 1 });
+
+        // 上限を超えて増やそうとしても3で止まる。
+        for _ in 0..5 {
+            lobby.update(&[InputAction::FaceUp], test_config());
+        }
+        assert!(
+            matches!(
+                lobby.phase(),
+                LobbyPhase::SelectingAiOpponentCount { ai_count: 3 }
+            ),
+            "AIの人数は3人で止まるはず"
+        );
+
+        // 下限も同じく1で止まる(0人=1人対戦にはならない)。
+        for _ in 0..5 {
+            lobby.update(&[InputAction::FaceDown], test_config());
+        }
+        assert!(
+            matches!(
+                lobby.phase(),
+                LobbyPhase::SelectingAiOpponentCount { ai_count: 1 }
+            ),
+            "AIの人数は1人で止まるはず"
+        );
+    }
+
+    #[test]
+    fn confirming_the_ai_opponent_count_starts_a_battle_with_that_many_opponents() {
+        // #296: AI2人を選んでEnter→自分+AI2人の3人で対戦が始まる。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 2 });
+
+        let outcome = lobby.update(&[InputAction::Confirm], test_config());
+
+        let LobbyOutcome::Battle(state) = outcome else {
+            panic!("AI対戦が始まるはず");
+        };
+        assert_eq!(state.games.len(), 3, "自分+AI2人ぶんの盤面があるはず");
+        assert_eq!(state.player_names.len(), 3);
+        assert_eq!(state.player_names[0], "me");
+    }
+
+    #[test]
+    fn escaping_the_ai_opponent_count_goes_back_to_discovering() {
+        // #296: 人数選択をやめたら探索へ戻る(タイトルまで戻したりはしない)。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 2 });
+
+        let outcome = lobby.update(&[InputAction::Quit], test_config());
+
+        assert!(matches!(outcome, LobbyOutcome::Stay));
+        assert!(matches!(lobby.phase(), LobbyPhase::Discovering { .. }));
     }
 
     #[test]

@@ -22,6 +22,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::autoplay::Autopilot;
 use crate::constants::{
     HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS, LOCKSTEP_WAIT_TIMEOUT_MS, NET_TICK_MS,
     STATE_HASH_INTERVAL_TICKS,
@@ -61,6 +62,10 @@ pub struct BattleState {
     /// 直近のtick確定で自分(`games[0]`)が発生させた`GameEvent`(#295)。呼び出し元
     /// (`tick_battle`)がSE再生に使うため、消費されるまで溜めておく。
     pending_local_events: Vec<GameEvent>,
+    /// ローカルAI対戦(#296)のAI操作主体。`games[1..]`と同じ並びで対応する。空なら
+    /// 通常のローカル専用/通信ありの対戦(AIなし)。`peers`と両方Someになることはない
+    /// (AI対戦は通信を使わないため)。
+    ai_pilots: Vec<Autopilot>,
     /// 各参加者の表示名。`games`と同じindexで対応する(index 0が自分)。
     pub player_names: Vec<String>,
     /// 実測フレーム時間を`NET_TICK_MS`(150ms)単位へ量子化するための蓄積バッファ。
@@ -184,6 +189,42 @@ impl BattleState {
             games,
             predicted,
             pending_local_events: Vec::new(),
+            ai_pilots: Vec::new(),
+            player_names,
+            net_tick_accum: Duration::ZERO,
+            ranks: vec![None; player_count],
+            outcome: None,
+            peers: None,
+            committed_local_action: None,
+            pending_local_action: None,
+            net_tick: 0,
+        }
+    }
+
+    /// ローカルAI対戦(#296)。通信を一切使わず、`human_game`(自分)と`ai_games`(AI操作)を
+    /// 同じlockstep機構(`run_net_tick`)でローカルに進める。`ai_games`は
+    /// `new_game_from_battle_config`で人間と同じシード・設定から作ったものを渡す
+    /// (地形とアイテム配置を揃えるため。spec.md 12.2と同じ考え方)。
+    pub fn new_local_vs_ai(human_game: Game, ai_games: Vec<Game>, my_name: String) -> Self {
+        // AIは無敵に頼らず素で戦わせる(#221の通常AIをそのまま使う)。`Autopilot::new`の
+        // 引数は「オートプレイを抜けるときに戻す無敵状態」で、対戦では抜ける操作が
+        // 無いため常にfalseでよい。
+        let ai_pilots = ai_games.iter().map(|_| Autopilot::new(false)).collect();
+        let mut games = Vec::with_capacity(ai_games.len() + 1);
+        games.push(human_game);
+        games.extend(ai_games);
+        let mut player_names = Vec::with_capacity(games.len());
+        player_names.push(my_name);
+        for i in 1..games.len() {
+            player_names.push(format!("AI {i}"));
+        }
+        let predicted = games[0].clone();
+        let player_count = games.len();
+        Self {
+            games,
+            predicted,
+            pending_local_events: Vec::new(),
+            ai_pilots,
             player_names,
             net_tick_accum: Duration::ZERO,
             ranks: vec![None; player_count],
@@ -230,6 +271,7 @@ impl BattleState {
             games,
             predicted,
             pending_local_events: Vec::new(),
+            ai_pilots: Vec::new(),
             player_names,
             net_tick_accum: Duration::ZERO,
             ranks: vec![None; player_count],
@@ -378,8 +420,12 @@ impl BattleState {
             return;
         }
 
-        if local_action.is_some() {
+        if let Some(action) = local_action {
             self.pending_local_action = local_action;
+            // tick確定を待たず、見た目専用の先行コピーへ即座に反映する(#292)。通信ありの
+            // 経路と揃えておく(#296のAI対戦はこちらのローカル専用パスを通るため、ここを
+            // 欠かすと自分の盤面が初期状態のまま描画され続ける)。
+            self.predicted.apply_input(action);
         }
 
         self.net_tick_accum += delta.min(Duration::from_millis(DELTA_CLAMP_MS));
@@ -388,7 +434,22 @@ impl BattleState {
         while self.net_tick_accum >= net_tick {
             self.net_tick_accum -= net_tick;
             let action = self.pending_local_action.take();
+            // ローカルAI対戦(#296)。人間の入力と同じ1tick粒度でAIにも1回分の
+            // 判断をさせ、その場で`games[i + 1]`へ直接適用する。lockstep::run_tick_nの
+            // 「1tickにつき高々1アクション」という制約(spec.md 12.2)はネットワーク
+            // 同期のためのものでローカルAIには適用されないため、decide()が返す
+            // 複数アクション(向き変更+掘削の組み合わせ等)をここで全て適用してよい。
+            // run_net_tick(run_tick_n)にはこのスロットをNoneで渡すことになり、
+            // game.update()と妨害岩の交換だけが行われる(二重入力にはならない)。
+            for (i, pilot) in self.ai_pilots.iter_mut().enumerate() {
+                let ai_actions = pilot.decide(&self.games[i + 1]);
+                for ai_action in ai_actions {
+                    self.games[i + 1].apply_input(ai_action);
+                }
+            }
             self.run_net_tick(action);
+            // 確定した正式な状態へ先行コピーを同期し直す(#292)。
+            self.predicted = self.games[0].clone();
             if self.outcome.is_some() {
                 break;
             }
@@ -2570,5 +2631,139 @@ mod tests {
                 "peer{bad}との不一致でもデシンクになるはず"
             );
         }
+    }
+
+    /// テスト用のローカルAI対戦(#296)。AI`ai_count`人を相手にする(合計`ai_count + 1`人)。
+    /// 人間ぶんもAIぶんも`new_game_from_battle_config`で同じシード・設定から作る
+    /// (実際のロビーからの入口と同じ作り方にするため)。
+    fn ai_battle(ai_count: usize) -> BattleState {
+        let config = test_battle_config();
+        let seed = 7;
+        let human_game = new_game_from_battle_config(seed, &config);
+        let ai_games = (0..ai_count)
+            .map(|_| new_game_from_battle_config(seed, &config))
+            .collect();
+        BattleState::new_local_vs_ai(human_game, ai_games, "me".to_string())
+    }
+
+    #[test]
+    fn the_ai_opponents_drill_down_on_their_own() {
+        // #296: AIは誰からも入力をもらわずに自力で掘り進む(オートプレイの判断を
+        // 毎tick1回ぶん適用する)。
+        let mut state = ai_battle(2);
+        let start_rows: Vec<usize> = state.games[1..].iter().map(|g| g.player.row).collect();
+
+        for _ in 0..200 {
+            state.advance(net_tick(), None);
+            let all_moved = state.games[1..]
+                .iter()
+                .zip(&start_rows)
+                .all(|(game, &row)| game.player.row > row);
+            if all_moved {
+                break;
+            }
+        }
+
+        for (index, &start_row) in start_rows.iter().enumerate() {
+            assert!(
+                state.games[index + 1].player.row > start_row,
+                "AI {}は自力で下へ進むはず(開始{}行目のまま止まっている)",
+                index + 1,
+                start_row
+            );
+        }
+    }
+
+    #[test]
+    fn an_ai_battle_never_uses_the_network() {
+        // #296: AI対戦は通信を一切使わない。進めても通信路は生えないし、退出時の
+        // Bye送信(送る相手がいない)でも落ちない。
+        let mut state = ai_battle(1);
+        assert!(state.peers.is_none(), "前提: 通信路を持たないはず");
+
+        for _ in 0..10 {
+            state.advance(net_tick(), None);
+        }
+
+        assert!(state.peers.is_none(), "AI対戦中に通信路が生えてはいけない");
+        state.notify_bye();
+    }
+
+    #[test]
+    fn the_ai_opponents_are_named_in_order() {
+        // #296: 表示名はindex 0が自分で、AIは1から順に振る。
+        let state = ai_battle(3);
+
+        assert_eq!(state.games.len(), 4, "自分+AI3人ぶんの盤面があるはず");
+        assert_eq!(
+            state.player_names,
+            vec![
+                "me".to_string(),
+                "AI 1".to_string(),
+                "AI 2".to_string(),
+                "AI 3".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_local_input_reaches_the_predicted_game_without_any_peer() {
+        // #296でローカル専用の経路も対戦画面に出るようになったため、#292の先行描画が
+        // 通信ありの経路と同じように効くことを見る(自分の盤面は`predicted_game()`を
+        // 描くため、ここが動かないと初期状態のまま固まって見える)。
+        let mut state = ai_battle(1);
+        let row = state.games[0].player.row;
+        let col = state.games[0].player.col;
+        // 直下に足場・右隣を空けて、MoveRightが確実に成功する状態を作る。
+        state.games[0].board.rows[row + 1][col] = Cell::Rock { hits: 0 };
+        state.games[0].board.rows[row][col + 1] = Cell::Empty;
+        state.predicted = state.games[0].clone();
+
+        // delta=ZEROなのでtickはまだ確定しない(net_tick_accumが増えない)。
+        state.advance(Duration::ZERO, Some(InputAction::MoveRight));
+
+        assert_eq!(
+            state.predicted_game().player.col,
+            col + 1,
+            "予測はtick確定を待たず即座に反映されるはず"
+        );
+        assert_eq!(
+            state.games[0].player.col, col,
+            "前提: 確定側はまだtickが進んでいないはず"
+        );
+    }
+
+    #[test]
+    fn the_predicted_game_is_resynced_after_a_local_tick_settles() {
+        // #296: ローカル専用の経路でも、tickが確定したら予測を正式な状態へ作り直す。
+        let mut state = ai_battle(1);
+        state.predicted.player.col = usize::MAX / 2; // 確定状態とは絶対に一致しない値。
+
+        state.advance(net_tick(), None);
+
+        assert_eq!(
+            state.predicted_game().player.col,
+            state.games[0].player.col,
+            "tick確定後の予測は正式な状態と一致するはず"
+        );
+    }
+
+    #[test]
+    fn an_ai_opponent_can_finish_the_course_by_itself() {
+        // #296: AIは掘り進むだけでなく、誰の手も借りずにゴールまで到達できる
+        // (オートプレイ(#221)をそのまま相手として使えていることの確認)。
+        let mut state = ai_battle(1);
+
+        advance_until(&mut state, 300, |state| {
+            state.games[1].status != GameStatus::Playing
+        });
+
+        assert_eq!(
+            state.games[1].status,
+            GameStatus::Cleared,
+            "AIは自力でゴールできるはず(到達行={} / ゴール行={})",
+            state.games[1].player.row,
+            TEST_GOAL_M - 1
+        );
     }
 }

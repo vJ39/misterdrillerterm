@@ -473,6 +473,19 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
                     guests.len() + 1
                 )));
             }
+            // 相手が見つからなくても遊べる入口(#296)。通信は使わない。
+            lines.push(line("V: AIと対戦".to_string()));
+        }
+        LobbyPhase::SelectingAiOpponentCount { ai_count } => {
+            lines.push(heading("== AIと対戦 =="));
+            lines.push(line(format!(
+                "AIの人数: {ai_count} (合計{}人)",
+                ai_count + 1
+            )));
+            lines.push(Line::from(""));
+            lines.push(line(
+                "↑↓: 人数を変更 / Enter: 開始 / Esc: やめる".to_string(),
+            ));
         }
         LobbyPhase::AwaitingInviteResponse { target, .. } => {
             lines.push(line(format!(
@@ -3955,6 +3968,34 @@ mod tests {
         assert!(
             screen_shows(&text, "Tab: この3人で対戦をはじめる"),
             "開始操作の案内が出ていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_lobby_offers_an_ai_battle_and_shows_how_many_opponents_are_selected() {
+        // #296: 相手が見つからなくてもAIと対戦できる入口(V)と、人数選択の表示。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+
+        let text = render_network_lobby(&lobby);
+        assert!(
+            screen_shows(&text, "V: AIと対戦"),
+            "AI対戦の入口の案内が出ていない:\n{text}"
+        );
+
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 2 });
+        let text = render_network_lobby(&lobby);
+        assert!(
+            screen_shows(&text, "== AIと対戦 =="),
+            "人数選択の見出しが出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "AIの人数: 2 (合計3人)"),
+            "選んでいる人数と合計人数が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Enter: 開始"),
+            "操作案内がクリップされている:\n{text}"
         );
     }
 

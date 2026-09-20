@@ -142,6 +142,9 @@ pub enum InputAction {
     /// Tabキー: 集めた参加者でN人対戦のルームを開始する(#276)。ロビー画面でのみ意味を
     /// 持つため、この解釈も`Game`の外側=`lobby::LobbyState`が担う
     StartRoom,
+    /// Vキー: 対戦相手探索ロビーで、通信を使わずローカルでAIと対戦を開始する(#296)。
+    /// ロビー画面でのみ意味を持つため、この解釈も`Game`の外側=`lobby::LobbyState`が担う
+    StartAiBattle,
 }
 
 /// ゲーム全体の進行状態。

@@ -37,6 +37,8 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // N人対戦のルーム開始(#276)。Enterは「選択中の候補へ招待」のままにして、
         // 誤操作で開始してしまわないよう別のキーに分ける(設計書3節)。
         KeyCode::Tab => InputAction::StartRoom,
+        // AI対戦モードの開始(#296)。V=vs AI。
+        KeyCode::Char('v') | KeyCode::Char('V') => InputAction::StartAiBattle,
         // フレーム巻き戻し(TERM独自拡張。#233)。押しやすい位置のBackspaceと、
         // Undoを連想できるUキーの両方に割り当てる(どちらも他のショートカットと衝突しない)。
         KeyCode::Backspace | KeyCode::Char('u') | KeyCode::Char('U') => InputAction::Rewind,
@@ -350,6 +352,7 @@ mod tests {
             KeyCode::Char('='),
             KeyCode::Char(','),
             KeyCode::Char('.'),
+            KeyCode::Char('v'),
         ];
         for key in existing_keys {
             assert_ne!(
@@ -412,6 +415,7 @@ mod tests {
             KeyCode::Char('='),
             KeyCode::Char(','),
             KeyCode::Char('.'),
+            KeyCode::Char('v'),
         ];
         for key in existing_keys {
             assert_ne!(
@@ -480,6 +484,67 @@ mod tests {
     fn action_from_key_code_maps_tab_to_starting_a_room() {
         // #276: ロビーで集めた参加者と対戦を開始する操作。
         assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::StartRoom);
+    }
+
+    #[test]
+    fn action_from_key_code_maps_v_to_starting_an_ai_battle() {
+        // #296: ロビーからAIと対戦を始める操作(大文字小文字とも)。
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('v')),
+            InputAction::StartAiBattle
+        );
+        assert_eq!(
+            action_from_key_code(KeyCode::Char('V')),
+            InputAction::StartAiBattle
+        );
+    }
+
+    #[test]
+    fn the_ai_battle_key_does_not_collide_with_any_other_shortcut() {
+        // #296でVキーを追加する際、既存のショートカットを奪っていないことを確認する。
+        // 特にロビーで同時に使うEnter(申し込む)・Esc(戻る)・矢印(選択)・Tab(ルーム開始)と
+        // 別物であること。
+        let existing_keys = [
+            KeyCode::Left,
+            KeyCode::Right,
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Tab,
+            KeyCode::Backspace,
+            KeyCode::Char(' '),
+            KeyCode::Char('x'),
+            KeyCode::Char('z'),
+            KeyCode::Char('p'),
+            KeyCode::Char('u'),
+            KeyCode::Char('m'),
+            KeyCode::Char('e'),
+            KeyCode::Char('s'),
+            KeyCode::Char('h'),
+            KeyCode::Char('c'),
+            KeyCode::Char('l'),
+            KeyCode::Char('a'),
+            KeyCode::Char('r'),
+            KeyCode::Char('k'),
+            KeyCode::Char('b'),
+            KeyCode::Char('o'),
+            KeyCode::Char('t'),
+            KeyCode::Char('g'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Char('-'),
+            KeyCode::Char('='),
+            KeyCode::Char(','),
+            KeyCode::Char('.'),
+        ];
+        for key in existing_keys {
+            assert_ne!(
+                action_from_key_code(key),
+                InputAction::StartAiBattle,
+                "{key:?}がAI対戦の開始に奪われている"
+            );
+        }
     }
 
     /// 修飾キーなしのキーイベントを組む(テスト用)。
@@ -614,6 +679,7 @@ mod tests {
             KeyCode::Char('s'),
             KeyCode::Char('h'),
             KeyCode::Char('n'),
+            KeyCode::Char('v'),
         ] {
             assert_ne!(
                 action_from_key_code(code),
