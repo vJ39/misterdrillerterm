@@ -79,6 +79,12 @@ pub struct BattleState {
     /// (`None`なら現在のtickぶんの自分の入力はまだ確定していない)。全peerへ同じ値を
     /// 送るだけなのでpeerごとには持たない(#274設計書4節)。
     committed_local_action: Option<NetAction>,
+    /// まだtickの発火(`net_tick_accum >= NET_TICK_MS`)に至っていないフレームで受け取った
+    /// 自分の入力(#287/#288)。`advance`/`advance_networked`は`FRAME_INTERVAL_MS`ごとに
+    /// 呼ばれるが、tickは`NET_TICK_MS`間隔でしか進まないため、tickが発火しなかった
+    /// フレームの入力をその場で捨てると取りこぼす。次にtickが発火するまでここへ保持し、
+    /// 新しい入力が来れば上書きする(1tickにつき高々1アクションの前提は変えない)。
+    pending_local_action: Option<InputAction>,
     /// 次に処理するtick番号。全peerで共通(フルメッシュの全員が同じtickを共有するのが
     /// 前提)で、StateHashのキーや`completed_tick`の算出に使う。
     net_tick: u32,
@@ -179,6 +185,7 @@ impl BattleState {
             outcome: None,
             peers: None,
             committed_local_action: None,
+            pending_local_action: None,
             net_tick: 0,
         }
     }
@@ -223,6 +230,7 @@ impl BattleState {
             outcome: None,
             peers: Some(peers),
             committed_local_action: None,
+            pending_local_action: None,
             net_tick: 0,
         })
     }
@@ -333,11 +341,15 @@ impl BattleState {
         }
     }
 
-    /// 実測の経過時間`delta`を150ms固定tickへ量子化し、溜まったぶんだけlockstepを進める。
+    /// 実測の経過時間`delta`を`NET_TICK_MS`固定tickへ量子化し、溜まったぶんだけ
+    /// lockstepを進める。
     ///
-    /// `local_action`はこのフレームで確定した自分の入力(無ければ`None`)。1tickにつき
-    /// 高々1アクション(12.2)のため、1フレームで複数tick進む場合も最初のtickだけが消費し、
-    /// 残りのtickは`None`で進む。決着後(`outcome`が`Some`)は何もしない。
+    /// `local_action`はこのフレームで確定した自分の入力(無ければ`None`)。フレーム間隔
+    /// (`FRAME_INTERVAL_MS`)は`NET_TICK_MS`より短く、tickが発火しないフレームもあるため、
+    /// その間の入力を`pending_local_action`へ保持し、次にtickが発火するまで持ち越す
+    /// (#287/#288。その場で捨てると入力が取りこぼされる)。1tickにつき高々1アクション
+    /// (12.2)のため、1フレームで複数tick進む場合も最初のtickだけが消費し、残りのtickは
+    /// `None`で進む。決着後(`outcome`が`Some`)は何もしない。
     ///
     /// 通信あり(`peers`が`Some`)の場合は`advance_networked`へ委ねる。他の参加者の入力が
     /// 揃ったtickしか進められないため、時間の扱いがローカル専用の場合と異なる。
@@ -352,13 +364,17 @@ impl BattleState {
             return;
         }
 
+        if local_action.is_some() {
+            self.pending_local_action = local_action;
+        }
+
         self.net_tick_accum += delta.min(Duration::from_millis(DELTA_CLAMP_MS));
 
         let net_tick = Duration::from_millis(NET_TICK_MS);
-        let mut local_action = local_action;
         while self.net_tick_accum >= net_tick {
             self.net_tick_accum -= net_tick;
-            self.run_net_tick(local_action.take());
+            let action = self.pending_local_action.take();
+            self.run_net_tick(action);
             if self.outcome.is_some() {
                 break;
             }
@@ -371,6 +387,13 @@ impl BattleState {
     /// lockstepの前提が壊れる)。1回の呼び出しで複数tick進む場合も、待機に入った時点で
     /// 残りのtickは次回の呼び出しへ持ち越す。
     fn advance_networked(&mut self, delta: Duration, local_action: Option<InputAction>) {
+        // このフレームで新しい入力があれば控える。関数の先頭で行うのは、下の
+        // `is_awaiting_any_peer`等での早期returnでも入力を失わないため(#287/#288。
+        // 相手の入力待ち中に押されたキーがそのまま捨てられていた)。
+        if local_action.is_some() {
+            self.pending_local_action = local_action;
+        }
+
         // 受信処理だけは決着後も続ける(他の参加者の`Result`は自分の決着より後に届くため)。
         self.drain_network_events();
         if self.outcome.is_some() {
@@ -395,7 +418,6 @@ impl BattleState {
         self.net_tick_accum += delta.min(Duration::from_millis(DELTA_CLAMP_MS));
 
         let net_tick = Duration::from_millis(NET_TICK_MS);
-        let mut local_action = local_action;
         while self.net_tick_accum >= net_tick {
             // 自分の入力は他の参加者を待たずに先に確定して送る。相手の入力が届いてから
             // 送る形にすると、全員が互いの`Input`を待ったまま進まなくなる。送信済みの
@@ -403,7 +425,8 @@ impl BattleState {
             let my_action = match self.committed_local_action {
                 Some(action) => action,
                 None => {
-                    let action = local_action
+                    let action = self
+                        .pending_local_action
                         .take()
                         .and_then(Option::<NetAction>::from)
                         .unwrap_or(NetAction::None);
@@ -421,6 +444,11 @@ impl BattleState {
 
             self.net_tick_accum -= net_tick;
             self.committed_local_action = None;
+            // tick確定までの間、まだ未発火のこのtickへ向けて`pending_local_action`に
+            // 同じ入力が繰り返しセットされ続けている場合がある(#287/#288)。ここで
+            // クリアしておかないと、次のtickに入力が無い(`None`)フレームで、この
+            // 消費済みの値が誤って次のtickの入力として使われてしまう。
+            self.pending_local_action = None;
             let completed_tick = self.net_tick; // このtickの処理がこれから完了する
             self.net_tick += 1;
             let next_tick = self.net_tick;
@@ -1000,6 +1028,26 @@ mod tests {
             "250msにクランプされるのでNET_TICK_MS(50ms)ぶん5tickしか進まないはず"
         );
         assert_eq!(state.net_tick_accum, Duration::from_millis(0));
+    }
+
+    #[test]
+    fn a_local_action_from_a_frame_without_a_tick_is_carried_over_to_the_next_tick() {
+        // #287/#288: フレーム間隔(`FRAME_INTERVAL_MS`)は`NET_TICK_MS`より短いため、
+        // tickが発火しないフレームで受け取った入力をその場で捨てると取りこぼす。次に
+        // tickが発火するまで保持されることを確認する。
+        let mut carried = battle(14, 15);
+        carried.advance(Duration::from_millis(30), Some(InputAction::MoveRight)); // まだtick未発火
+        carried.advance(Duration::from_millis(20), None); // ここでtick発火するはず
+
+        let mut direct = battle(14, 15);
+        direct.run_net_tick(Some(InputAction::MoveRight));
+
+        assert_eq!(carried.games[0].debug_frame(), 1, "前提: 1tick進むはず");
+        assert_eq!(
+            carried.games[0].state_hash(),
+            direct.games[0].state_hash(),
+            "先のフレームで受け取った入力が保持されずに捨てられている"
+        );
     }
 
     #[test]
