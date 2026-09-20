@@ -667,7 +667,7 @@ pub fn tick_playing(
 enum BattleInput {
     /// 対戦を中断してタイトルへ戻る。
     Quit,
-    /// このtickの自分の入力として`lockstep::run_tick`へ渡す5操作。
+    /// このフレームの自分の入力として`BattleState::advance`へ渡す5操作。
     Local(InputAction),
     /// MUSICのトグル。音声はローカル専用でシミュレーションに影響しないため、
     /// 通常プレイのPaused限定と異なり対戦中は常時受け付ける。
@@ -693,8 +693,8 @@ fn classify_battle_input(action: InputAction) -> BattleInput {
     }
 }
 
-/// このフレームにキューされた入力列から、このtickで自分の入力として採用する1つを選ぶ。
-/// 2つ目以降は次tickへ持ち越さず捨てる(1tickにつき高々1アクション。spec.md 12.2)。
+/// このフレームにキューされた入力列から、自分の入力として採用する1つを選ぶ。
+/// 2つ目以降は次フレームへ持ち越さず捨てる(1フレームにつき高々1アクション。spec.md 12.2)。
 fn first_local_action(actions: &[InputAction]) -> Option<InputAction> {
     actions
         .iter()
@@ -708,8 +708,7 @@ fn first_local_action(actions: &[InputAction]) -> Option<InputAction> {
 ///
 /// 通常プレイの`tick_playing`とは独立した関数にしている(あちらへ対戦用の分岐を混ぜると
 /// さらに肥大化し、通常プレイ側の挙動を壊すリスクも生むため)。ゲームの進行は実測フレーム
-/// 時間を`NET_TICK_MS`固定tickへ量子化して`BattleState::advance`へ任せ、ここは入力の
-/// 仕分けと描画だけを行う。
+/// 時間をそのまま`BattleState::advance`へ渡して任せ、ここは入力の仕分けと描画だけを行う。
 pub fn tick_battle(
     app: &mut App,
     state: &mut BattleState,
@@ -745,7 +744,7 @@ pub fn tick_battle(
                     .store(app.settings.se_enabled, Ordering::Relaxed);
                 app.settings.save();
             }
-            // 自分の操作は1tickにつき高々1つのため、`first_local_action`でまとめて選ぶ。
+            // 自分の操作は1フレームにつき高々1つのため、`first_local_action`でまとめて選ぶ。
             BattleInput::Local(_) | BattleInput::Ignored => {}
         }
     }
@@ -1322,7 +1321,7 @@ mod tests {
 
     #[test]
     fn battle_takes_the_five_gameplay_actions_as_the_local_input() {
-        // 移動・向き変更・掘削の5操作だけがそのtickの自分の入力になる。
+        // 移動・向き変更・掘削の5操作だけがそのフレームの自分の入力になる。
         for action in [
             InputAction::MoveLeft,
             InputAction::MoveRight,
@@ -1389,7 +1388,7 @@ mod tests {
 
     #[test]
     fn only_the_first_gameplay_action_queued_in_a_frame_is_used() {
-        // 1フレームに複数キーが届いても、採用するのは最初の1つだけ(1tick高々1アクション)。
+        // 1フレームに複数キーが届いても、採用するのは最初の1つだけ(1フレーム高々1アクション)。
         // 途中に挟まる無視対象・音声トグルは選択に影響しない。
         let actions = [
             InputAction::ToggleMusic,

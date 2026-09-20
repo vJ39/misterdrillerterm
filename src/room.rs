@@ -1,6 +1,6 @@
 //! N人対戦のルーム参加フローとフルメッシュ確立(#275。docs/multiplayer-4p-room-design.md)。
 //!
-//! #274のフルメッシュlockstep(`BattleState::from_peer_streams`)が要求する「確立済みの
+//! #274のフルメッシュ対戦(`BattleState::from_peer_streams`)が要求する「確立済みの
 //! TCP接続N-1本」を用意するところを担う。主催者が参加者を集めて`RoomRoster`・対戦設定・
 //! シード・開始時刻を配布し、全員が同じ`members`の並び(room内インデックス)を見て
 //! C(n,2)本のメッシュ接続を張る。
@@ -318,13 +318,15 @@ fn resolve_host_mesh_addr(roster_addr: SocketAddr, host_addr: SocketAddr) -> Soc
 mod tests {
     use super::*;
     use crate::battle::{BattleState, new_game_from_battle_config};
+    use crate::game::board::Cell;
+    use crate::game::player::Direction;
     use crate::game::{Game, InputAction};
     use crate::settings::Settings;
     use std::net::Ipv4Addr;
     use std::thread;
 
-    /// テストのポンプ回数の上限。ループバックの配送待ちで何周か空回りするため実際の
-    /// tick数より多めに取る(`battle.rs`のテストと同じ考え方)。
+    /// テストのポンプ回数の上限。ループバックの配送待ちで何周か空回りするため、必要な
+    /// フレーム数より多めに取る(`battle.rs`のテストと同じ考え方)。
     const MAX_PUMPS: usize = 500;
 
     /// テスト用の対戦設定。盤面生成を軽くするため短いコース(20m)にする。
@@ -549,11 +551,11 @@ mod tests {
     }
 
     #[test]
-    fn the_established_mesh_drives_a_four_player_lockstep_battle() {
-        // 確立した接続をそのまま`BattleState::from_peer_streams`へ渡し、数tick進めて
-        // 全員の盤面が一致することを見る(#274との接続部分の確認)。
+    fn the_established_mesh_drives_a_four_player_battle() {
+        // 確立した接続をそのまま`BattleState::from_peer_streams`へ渡し、全員の操作が
+        // 他の全員の手元へ届くことを見る(#274との接続部分の確認)。#299で盤面の
+        // 突き合わせをやめたため、tick数や盤面の一致ではなく操作の反映で確認する。
         const N: usize = 4;
-        const TICKS: u32 = 6;
         let participants = run_room(&numbered_names(N));
         let seed = participants[0].handshake.seed;
         let config = participants[0].handshake.config;
@@ -576,17 +578,50 @@ mod tests {
             })
             .collect();
 
-        for _ in 0..MAX_PUMPS {
-            for (my_index, state) in states.iter_mut().enumerate() {
-                // 参加者ごとに入力を変え、盤面が初期状態のまま揃う状況にしない。
-                let action = match my_index % 3 {
-                    0 => Some(InputAction::Drill),
-                    1 => Some(InputAction::MoveRight),
-                    _ => Some(InputAction::MoveLeft),
-                };
-                state.pump_frame(TICKS, action);
+        // 横移動は足場が無いと受け付けられないため、全員ぶんの盤面に同じ足場を置き、
+        // 左右を空けておく(全員が同じシードから作るため、同じ変更で同じ盤面になる)。
+        for state in states.iter_mut() {
+            for game in state.games.iter_mut() {
+                let (row, col) = (game.player.row, game.player.col);
+                game.board.rows[row + 1][col] = Cell::Rock { hits: 0 };
+                game.board.rows[row][col - 1] = Cell::Empty;
+                game.board.rows[row][col + 1] = Cell::Empty;
             }
-            if states.iter().all(|state| state.current_net_tick() >= TICKS) {
+        }
+
+        // 参加者ごとに別の向きになる操作を割り当てる。接続の順序が食い違って他人の入力を
+        // 取り違えていれば、向きの並びがずれてここで壊れる。
+        let action_for = |index: usize| match index {
+            0 => InputAction::MoveLeft,
+            1 => InputAction::MoveRight,
+            2 => InputAction::FaceUp,
+            _ => InputAction::FaceDown,
+        };
+        let facing_for = |index: usize| match index {
+            0 => Direction::Left,
+            1 => Direction::Right,
+            2 => Direction::Up,
+            _ => Direction::Down,
+        };
+
+        for (my_index, state) in states.iter_mut().enumerate() {
+            state.advance(Duration::ZERO, Some(action_for(my_index)));
+        }
+
+        for _ in 0..MAX_PUMPS {
+            for state in states.iter_mut() {
+                // 盤面を進めずに受信だけ回す(配送待ちで酸素を消費させない)。
+                state.advance(Duration::ZERO, None);
+            }
+            let all_arrived = states.iter().enumerate().all(|(my_index, state)| {
+                (0..N).all(|participant| {
+                    state.games[games_index_of(my_index, participant)]
+                        .player
+                        .facing
+                        == facing_for(participant)
+                })
+            });
+            if all_arrived {
                 break;
             }
             thread::sleep(Duration::from_millis(1));
@@ -594,37 +629,20 @@ mod tests {
 
         for (my_index, state) in states.iter().enumerate() {
             assert_eq!(
-                state.current_net_tick(),
-                TICKS,
-                "参加者{my_index}が目標tickまで進むはず"
-            );
-            assert_eq!(
                 state.outcome(),
                 None,
                 "参加者{my_index}: この範囲では決着しないはず"
             );
-        }
-
-        // 同じ参加者の盤面が全員の視点で一致すること(接続の順序が食い違っていれば
-        // 他人の入力を取り違えてここで壊れる)。
-        for participant in 0..N {
-            let expected = states[0].games[games_index_of(0, participant)].state_hash();
-            for (my_index, state) in states.iter().enumerate().skip(1) {
+            for participant in 0..N {
                 assert_eq!(
-                    state.games[games_index_of(my_index, participant)].state_hash(),
-                    expected,
-                    "参加者{participant}の盤面が参加者0と参加者{my_index}で一致しない"
+                    state.games[games_index_of(my_index, participant)]
+                        .player
+                        .facing,
+                    facing_for(participant),
+                    "参加者{participant}の操作が参加者{my_index}の手元へ届いていない"
                 );
             }
         }
-
-        // 一致比較が自明に通る状況(全員初期状態のまま)になっていないことの裏取り。
-        let initial = new_game_from_battle_config(seed, &config).state_hash();
-        assert_ne!(
-            states[0].games[0].state_hash(),
-            initial,
-            "少なくとも自分の盤面は初期状態から進んでいるはず"
-        );
     }
 
     #[test]

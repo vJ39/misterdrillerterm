@@ -9,7 +9,6 @@ mod bomb;
 mod debug_ops;
 pub mod physics;
 pub mod player;
-mod state_hash;
 mod view;
 
 pub use attack::IncomingRock;
@@ -4857,7 +4856,7 @@ mod tests {
 
     /// #247のテスト用に、盤面を空にして妨害ルールを有効化し、ボムの乱入を止めた状態を作る。
     /// プレイヤーは最深行(=常に支持される)へ置き、自由落下で出現行がずれないようにする。
-    /// `state_hash`モジュールのテスト(#262)からも参照するため`pub(super)`にする。
+    /// `attack`モジュールのテストからも参照するため`pub(super)`にする。
     pub(super) fn attack_rules_game(seed: u64) -> Game {
         let mut game = Game::new(seed);
         clear_board(&mut game);

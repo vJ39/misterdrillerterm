@@ -11,7 +11,6 @@ mod discovery;
 mod game;
 mod input;
 mod lobby;
-mod lockstep;
 mod net;
 mod rewind;
 mod room;

@@ -381,12 +381,9 @@ fn battle_progress_ratio(depth_m: usize, depth_goal_m: usize) -> f32 {
 }
 
 /// 決着の表示文字列(#256)。順位方式(#273)になったため自分の順位をそのまま出す。
-/// デシンクは順位が確定しない終わり方で、原因が異なることが分かるよう別の文言にする
-/// (spec.md 12.3「TUIにはデシンク終了である旨を表示する」)。
 fn battle_outcome_message(outcome: BattleOutcome) -> String {
     match outcome {
         BattleOutcome::Ranked(rank) => format!("RANK {rank}"),
-        BattleOutcome::Desync => "DESYNC - DRAW".to_string(),
     }
 }
 
@@ -2865,13 +2862,9 @@ mod tests {
 
     #[test]
     fn every_battle_outcome_has_its_own_result_message() {
-        // 順位(#273)と、順位が確定しないデシンク終了(spec.md 12.3)を表示し分ける。
+        // 対戦の結末は順位(#273)だけになった(#299で盤面の突き合わせによる打ち切りを廃止)。
         assert_eq!(battle_outcome_message(BattleOutcome::Ranked(1)), "RANK 1");
         assert_eq!(battle_outcome_message(BattleOutcome::Ranked(4)), "RANK 4");
-        assert_eq!(
-            battle_outcome_message(BattleOutcome::Desync),
-            "DESYNC - DRAW"
-        );
     }
 
     #[test]
@@ -4157,32 +4150,35 @@ mod tests {
 
     #[test]
     fn the_battle_screen_shows_the_result_overlay_once_the_outcome_is_decided() {
-        // 決着後は結果と抜け方が盤面の上に重なって見える(#256)。
+        // 決着後は結果と抜け方が盤面の上に重なって見える(#256)。順位は1位から最下位まで
+        // どれでも同じように出す(対戦人数の上限は4人=ROOM_MAX_PLAYERS)。
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
-        let text = rendered_screen_text(|frame| {
-            draw_battle(
-                frame,
-                &game,
-                &game,
-                "opponent",
-                true,
-                true,
-                Some(BattleOutcome::Desync),
-            )
-        });
+        for rank in 1..=4u8 {
+            let text = rendered_screen_text(|frame| {
+                draw_battle(
+                    frame,
+                    &game,
+                    &game,
+                    "opponent",
+                    true,
+                    true,
+                    Some(BattleOutcome::Ranked(rank)),
+                )
+            });
 
-        assert!(
-            screen_shows(&text, "DESYNC - DRAW"),
-            "決着の結果が出ていない:\n{text}"
-        );
-        assert!(
-            screen_shows(&text, "Enter/Escキーでタイトルへ"),
-            "抜け方の案内が出ていない:\n{text}"
-        );
-        assert!(
-            screen_shows(&text, "OPPONENT: opponent"),
-            "相手パネルは結果表示中も残るはず:\n{text}"
-        );
+            assert!(
+                screen_shows(&text, &format!("RANK {rank}")),
+                "{rank}位の結果が出ていない:\n{text}"
+            );
+            assert!(
+                screen_shows(&text, "Enter/Escキーでタイトルへ"),
+                "{rank}位: 抜け方の案内が出ていない:\n{text}"
+            );
+            assert!(
+                screen_shows(&text, "OPPONENT: opponent"),
+                "{rank}位: 相手パネルは結果表示中も残るはず:\n{text}"
+            );
+        }
     }
 
     #[test]

@@ -3,9 +3,9 @@
 //! TCP接続が確立済みの2ホストが、メッセージのフレーミングを介してハンドシェイク
 //! (Hello交換 → StartConfig → SeedAgree → StartCountdown)を行うところと、対戦中の
 //! 受信専用スレッド(#254)、およびUDP探索のパケット形式(#256)を担う。
-//! 受信したメッセージをlockstepの進行としてどう解釈するか(#254)・`StateHash`の照合
-//! (#255)はゲームロジック側の責務のため`battle.rs`に置く。ハンドシェイクの結果から
-//! `Game`を組み立てるのも同じ理由で`battle::new_game_from_battle_config`に置く。
+//! 受信したメッセージを自分のシミュレーションへどう反映するか(#254)はゲームロジック側の
+//! 責務のため`battle.rs`に置く。ハンドシェイクの結果から`Game`を組み立てるのも同じ理由で
+//! `battle::new_game_from_battle_config`に置く。
 //!
 //! #256でUDP探索(spec.md 12.1)のパケット定義も加えた。探索の状態管理そのものは
 //! `discovery.rs`、招待のやり取りとタイトルからの入口は`lobby.rs`が持つ。
@@ -30,8 +30,9 @@ const START_COUNTDOWN_LEAD_MS: u64 = 3000;
 
 /// TCP接続後にやり取りするメッセージ(spec.md 12.2)。
 ///
-/// `Input`/`Heartbeat`/`StateHash`/`Result`は#253では送受信しない(#254/#255の範囲)が、
-/// プロトコルとしては最初から完全な形で定義しておき、後から使う分だけ配線する。
+/// `Hello`〜`StartCountdown`が開始前のハンドシェイク用、`Input`以降が対戦中用。
+/// 対戦中のメッセージはtick番号を持たない。各参加者が自分の実時間でシミュレーションを
+/// 進める非同期方式のため、届いた順にそのまま反映すればよい(spec.md 12.3)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameMessage {
     Hello {
@@ -62,22 +63,20 @@ pub enum GameMessage {
     StartCountdown {
         start_at_unix_ms: u64,
     },
+    /// 自分の操作1つ。受け取った側は自分が持つ送信元のインスタンスへ即座に適用する。
+    /// TCPが順序を保証するため、送った順=適用される順になる。
     Input {
-        tick: u32,
         action: NetAction,
     },
-    Heartbeat {
-        tick: u32,
-    },
-    /// 定期デシンク検出(spec.md 12.3)。互いのシミュレーション状態のダイジェストを照合する。
-    StateHash {
-        tick: u32,
-        local_hash: u64,
-        remote_hash: u64,
+    /// 生存確認のみ(spec.md 12.4)。一定時間これも`Input`も届かなければ切断とみなす。
+    Heartbeat,
+    /// 妨害岩(#247/#297)。自分が消したブロック数を、そのまま相手へ送る。受け取った側は
+    /// 自分がまだPlayingのときだけ適用する(spec.md 12.8)。
+    Attack {
+        amount: u32,
     },
     Result {
         reached_goal: bool,
-        tick: u32,
         time_ms: u64,
     },
     Bye,
@@ -95,7 +94,7 @@ pub struct RoomMember {
 
 /// 1章の`InputAction`のうちネットワーク同期に必要な要素のみを送る(spec.md 12.2)。
 /// TogglePause/Quit/ToggleMusic/ToggleSe/Debug*系はローカルのみで完結させ
-/// (12.5の通り対戦中はほぼ無効化)、対戦tickには含めない。
+/// (12.5の通り対戦中はほぼ無効化)、送信の対象にしない。
 ///
 /// `game::InputAction`と役割が重なるが、あちらはキー入力から得られる全アクションを
 /// 持つゲーム内部の型で、こちらはプロトコル上の型として独立させる(名前の衝突も避ける)。
@@ -110,8 +109,8 @@ pub enum NetAction {
 }
 
 impl From<NetAction> for Option<InputAction> {
-    /// 受信した相手の入力を、そのtickで`lockstep::run_tick`へ渡す形へ変換する。
-    /// `NetAction::None`は「このtickは何もしていない」を表すため`None`になる。
+    /// 受信した相手の入力を、`Game::apply_input`へ渡す形へ変換する。
+    /// `NetAction::None`は「操作なし」を表すため`None`になる。
     fn from(action: NetAction) -> Self {
         match action {
             NetAction::None => None,
@@ -622,18 +621,12 @@ mod tests {
             start_at_unix_ms: 1_700_000_000_000,
         });
         assert_round_trips(&GameMessage::Input {
-            tick: 42,
             action: NetAction::Drill,
         });
-        assert_round_trips(&GameMessage::Heartbeat { tick: 43 });
-        assert_round_trips(&GameMessage::StateHash {
-            tick: 60,
-            local_hash: 1,
-            remote_hash: 2,
-        });
+        assert_round_trips(&GameMessage::Heartbeat);
+        assert_round_trips(&GameMessage::Attack { amount: 3 });
         assert_round_trips(&GameMessage::Result {
             reached_goal: true,
-            tick: 1234,
             time_ms: 56_789,
         });
         assert_round_trips(&GameMessage::Bye);
@@ -924,11 +917,10 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let handle = spawn_receiver_thread(server, tx);
 
-        write_message(&mut client, &GameMessage::Heartbeat { tick: 1 }).unwrap();
+        write_message(&mut client, &GameMessage::Heartbeat).unwrap();
         write_message(
             &mut client,
             &GameMessage::Input {
-                tick: 1,
                 action: NetAction::Drill,
             },
         )
@@ -937,12 +929,11 @@ mod tests {
 
         assert!(matches!(
             recv_event(&rx),
-            NetworkEvent::Message(GameMessage::Heartbeat { tick: 1 })
+            NetworkEvent::Message(GameMessage::Heartbeat)
         ));
         assert!(matches!(
             recv_event(&rx),
             NetworkEvent::Message(GameMessage::Input {
-                tick: 1,
                 action: NetAction::Drill
             })
         ));
@@ -956,7 +947,7 @@ mod tests {
         // TCP接続クローズのタイミングによっては、この書き込み自体がBrokenPipeで
         // 失敗することがある。#277)。
         handle.join().unwrap();
-        let _ = write_message(&mut client, &GameMessage::Heartbeat { tick: 2 });
+        let _ = write_message(&mut client, &GameMessage::Heartbeat);
         assert!(rx.recv().is_err(), "スレッド終了で送信側が閉じているはず");
     }
 
