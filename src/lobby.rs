@@ -262,6 +262,20 @@ impl LobbyState {
                     Some(PacketEffect::DeclineWhileHosting(from))
                 }
             }
+            // 既に別の招待の検討中(まだ受ける/断るの返事をしていない)に来た招待。
+            // 無視すると相手はタイムアウト(`INVITE_TIMEOUT_MS`)まで無応答で待たされる
+            // ため、ゲストがいる時と同様に即座に断る(#291で発覚)。
+            (LobbyPhase::IncomingInvite { from: current }, PacketType::Invite)
+                if current.sender_id != packet.sender_id =>
+            {
+                let from = self
+                    .discovery
+                    .peers()
+                    .iter()
+                    .find(|peer| peer.sender_id == packet.sender_id)?
+                    .clone();
+                Some(PacketEffect::DeclineWhileHosting(from))
+            }
             (LobbyPhase::AwaitingInviteResponse { target, .. }, PacketType::Accept)
                 if target.sender_id == packet.sender_id =>
             {
@@ -1044,6 +1058,53 @@ mod tests {
         assert!(
             matches!(other.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
             "招待した側には断られた通知が出るはず"
+        );
+    }
+
+    #[test]
+    fn a_second_invite_that_arrives_while_deciding_on_the_first_is_declined_immediately() {
+        // #291で発覚: 2人から同時に招待されると、先着以外は無視されタイムアウト
+        // (`INVITE_TIMEOUT_MS`)まで無応答で待たされてしまっていた。
+        let mut lobbies = facing_lobbies_of(&["host", "guest-a", "guest-b"]);
+        discover_all(&mut lobbies);
+        let (host, rest) = lobbies.split_first_mut().unwrap();
+        let (guest_a, rest) = rest.split_first_mut().unwrap();
+        let guest_b = &mut rest[0];
+
+        invite_by_name(guest_a, "host");
+        invite_by_name(guest_b, "host");
+
+        for _ in 0..200 {
+            host.update(&[], test_config());
+            guest_a.update(&[], test_config());
+            guest_b.update(&[], test_config());
+            if matches!(guest_a.phase(), LobbyPhase::Notice { .. })
+                || matches!(guest_b.phase(), LobbyPhase::Notice { .. })
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            matches!(host.phase(), LobbyPhase::IncomingInvite { .. }),
+            "hostは一方の招待をまだ検討中のはず"
+        );
+        let (still_waiting, declined) = if matches!(guest_a.phase(), LobbyPhase::Notice { .. }) {
+            (guest_b, guest_a)
+        } else {
+            (guest_a, guest_b)
+        };
+        assert!(
+            matches!(declined.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
+            "後から検知された側は即座に断られて分かるはず(タイムアウト待ちにならない)"
+        );
+        assert!(
+            matches!(
+                still_waiting.phase(),
+                LobbyPhase::AwaitingInviteResponse { .. }
+            ),
+            "先に検討中になった側はまだ応答待ちのはず"
         );
     }
 
