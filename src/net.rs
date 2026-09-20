@@ -11,7 +11,7 @@
 //! `discovery.rs`、招待のやり取りとタイトルからの入口は`lobby.rs`が持つ。
 
 use std::io::{self, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,6 +36,22 @@ const START_COUNTDOWN_LEAD_MS: u64 = 3000;
 pub enum GameMessage {
     Hello {
         name: String,
+    },
+    /// 参加者→主催者(ルーム参加接続で送信)。N人対戦のルームへ参加を申し込む(#275)。
+    /// `mesh_port`は自分のメッシュ接続用listenerのポートで、主催者はこれに接続元のIPを
+    /// 添えて`RoomRoster`の`mesh_addr`を組み立てる。
+    JoinRoom {
+        name: String,
+        mesh_port: u16,
+    },
+    /// 主催者→各参加者(ルーム参加接続で送信)。`members[0]`は常に主催者(#275)。
+    ///
+    /// `your_index`は「このメッセージの送り先」自身の`members`内での位置。名前が
+    /// 重複していても各参加者が自分を一意に特定できるよう、ブロードキャストの内容を
+    /// 送り先ごとに変えている。
+    RoomRoster {
+        members: Vec<RoomMember>,
+        your_index: usize,
     },
     /// ホスト(TCPサーバ役)のシミュレーション影響設定一式。クライアントは
     /// この値を対戦セッション中のみ強制適用する(自分のsettings.jsonへは保存しない)。
@@ -65,6 +81,16 @@ pub enum GameMessage {
         time_ms: u64,
     },
     Bye,
+}
+
+/// ルームの参加者1人ぶんの情報(#275)。`RoomRoster`で全参加者へ同じ並びを配り、
+/// この並びの位置(room内インデックス)が対戦中の参加者番号とメッシュ接続の役割
+/// (どちらがTCPサーバ役か)を決める。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomMember {
+    pub name: String,
+    /// メッシュ接続の受け口(IP+ポート)。
+    pub mesh_addr: SocketAddr,
 }
 
 /// 1章の`InputAction`のうちネットワーク同期に必要な要素のみを送る(spec.md 12.2)。
@@ -248,7 +274,7 @@ pub fn run_host_handshake(
     let seed: u64 = rand::rng().random();
     write_message(stream, &GameMessage::SeedAgree { seed })?;
 
-    let start_at_unix_ms = unix_time_ms().saturating_add(START_COUNTDOWN_LEAD_MS);
+    let start_at_unix_ms = countdown_start_time_ms();
     write_message(stream, &GameMessage::StartCountdown { start_at_unix_ms })?;
 
     Ok(HandshakeResult {
@@ -297,8 +323,16 @@ pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result
     })
 }
 
+/// `StartCountdown`で通知する開始時刻。開始を決めた側(2人版のホスト・N人版の主催者)の
+/// 現在時刻から`START_COUNTDOWN_LEAD_MS`先にする。N人版(`room.rs`)も同じ猶予を使うため
+/// 関数として切り出している。
+pub(crate) fn countdown_start_time_ms() -> u64 {
+    unix_time_ms().saturating_add(START_COUNTDOWN_LEAD_MS)
+}
+
 /// ハンドシェイクの途中で想定外のメッセージ種別を受信したときのエラー。
-fn unexpected_message(expected: &str, actual: &GameMessage) -> io::Error {
+/// ルーム参加のやり取り(#275)でも同じ形のエラーにするため`pub(crate)`にしている。
+pub(crate) fn unexpected_message(expected: &str, actual: &GameMessage) -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidData,
         format!("{expected}を待っていたが{actual:?}を受信した"),
@@ -543,6 +577,24 @@ mod tests {
     fn every_message_kind_round_trips_through_the_framing() {
         assert_round_trips(&GameMessage::Hello {
             name: "ホリ・ススム".to_string(),
+        });
+        assert_round_trips(&GameMessage::JoinRoom {
+            name: "ホリ・ススム".to_string(),
+            mesh_port: 39395,
+        });
+        assert_round_trips(&GameMessage::RoomRoster {
+            members: vec![
+                RoomMember {
+                    name: "主催者".to_string(),
+                    mesh_addr: "127.0.0.1:39394".parse().unwrap(),
+                },
+                RoomMember {
+                    name: "参加者".to_string(),
+                    // IPv6の参加者が混じっても同じ並びで運べること。
+                    mesh_addr: "[::1]:39395".parse().unwrap(),
+                },
+            ],
+            your_index: 1,
         });
         assert_round_trips(&GameMessage::StartConfig(test_config()));
         assert_round_trips(&GameMessage::SeedAgree {

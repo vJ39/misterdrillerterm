@@ -700,6 +700,28 @@ impl BattleState {
     }
 }
 
+#[cfg(test)]
+impl BattleState {
+    /// 現在処理中のtick番号。テストが「目標tickまで進んだか」を判定するために使う。
+    pub(crate) fn current_net_tick(&self) -> u32 {
+        self.net_tick
+    }
+
+    /// 対戦の1フレームぶん`advance`を呼ぶ。実測時間を渡すのは「目標tickにまだ達して
+    /// おらず、前フレームぶんの蓄積も使い切っている」ときだけにする。こうしないと
+    /// 相手待ちの空回り中に時間だけが溜まり、後からまとめてtickへ化けて参加者間の
+    /// tick数がずれる。
+    ///
+    /// ループバックで複数の`BattleState`を回すテスト(この`battle.rs`と、ルーム参加
+    /// フローの`room.rs`)が共通で使う。
+    pub(crate) fn pump_frame(&mut self, target_ticks: u32, action: Option<InputAction>) {
+        let net_tick = Duration::from_millis(NET_TICK_MS);
+        let needs_time = self.net_tick_accum < net_tick && self.net_tick < target_ticks;
+        let delta = if needs_time { net_tick } else { Duration::ZERO };
+        self.advance(delta, action);
+    }
+}
+
 /// 指定したtickの相手の入力が届いているかだけを調べる(取り出さない。#274)。
 ///
 /// N人版では「全員ぶん揃ってから初めて消費する」必要がある(誰か1人ぶんが未着なら
@@ -1331,17 +1353,10 @@ mod tests {
         )
     }
 
-    /// 対戦の1フレームぶん`advance`を呼ぶ。実測時間を渡すのは「目標tickにまだ達して
-    /// おらず、前フレームぶんの蓄積も使い切っている」ときだけにする。こうしないと相手待ちの
-    /// 空回り中に時間だけが溜まり、後からまとめてtickへ化けて両者のtick数がずれる。
+    /// 対戦の1フレームぶん進める(実体は`BattleState::pump_frame`。`room.rs`のテストと
+    /// 共通化したもの)。
     fn pump(state: &mut BattleState, target_ticks: u32, action: Option<InputAction>) {
-        let needs_time = state.net_tick_accum < net_tick() && state.net_tick < target_ticks;
-        let delta = if needs_time {
-            net_tick()
-        } else {
-            Duration::ZERO
-        };
-        state.advance(delta, action);
+        state.pump_frame(target_ticks, action);
     }
 
     /// `tick`番目に入力する予定のアクション(尽きたら何もしない)。

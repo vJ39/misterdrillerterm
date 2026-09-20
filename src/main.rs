@@ -14,6 +14,7 @@ mod lobby;
 mod lockstep;
 mod net;
 mod rewind;
+mod room;
 mod settings;
 mod ui;
 
