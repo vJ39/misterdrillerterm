@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::net::{
-    DISCOVERY_PACKET_LEN, DISCOVERY_PORT, DISCOVERY_TIMEOUT_MS, DiscoveryPacket,
-    HELLO_BROADCAST_INTERVAL_MS, PacketType,
+    DISCOVERY_PACKET_LEN, DISCOVERY_PORT, DISCOVERY_PORT_RANGE_COUNT, DISCOVERY_TIMEOUT_MS,
+    DiscoveryPacket, HELLO_BROADCAST_INTERVAL_MS, PacketType,
 };
 
 /// HELLOを受け取って候補リストに載っている相手1件。
@@ -36,8 +36,10 @@ pub struct DiscoveredPeer {
 /// 探索用のUDPソケットと候補リスト。ロビーにいる間だけ生存する。
 pub struct Discovery {
     socket: UdpSocket,
-    /// HELLO/BYEの送信先。実運用では`255.255.255.255:DISCOVERY_PORT`固定。
-    hello_target: SocketAddr,
+    /// HELLO/BYEの送信先。実運用では`255.255.255.255:<探索範囲内の各ポート>`
+    /// (#278。同一ホストで複数プロセスが別ポートを使っていても発見できるよう、
+    /// 範囲内の全ポートへ送る)。
+    hello_targets: Vec<SocketAddr>,
     my_id: Uuid,
     my_name: String,
     my_tcp_port: u16,
@@ -45,21 +47,17 @@ pub struct Discovery {
     peers: Vec<DiscoveredPeer>,
 }
 
-/// 環境変数`MDT_DISCOVERY_PORT`(自分がbindするポート)を読み取る。未設定・不正な
-/// 値なら`DISCOVERY_PORT`(39393)を使う(#267)。
-///
-/// 同一マシンで2プロセスを起動して動作確認したい場合に使う開発用のオーバーライドで、
-/// 通常のプレイでは設定不要(本番の自動探索は全ホストが39393で待ち受ける前提のまま)。
-fn bind_port_override() -> u16 {
-    resolve_port_override(
-        std::env::var("MDT_DISCOVERY_PORT").ok().as_deref(),
-        DISCOVERY_PORT,
-    )
+/// 環境変数`MDT_DISCOVERY_PORT`(自分がbindするポート)が明示的に指定されていれば
+/// その値を返す。未設定・不正な値なら`None`(呼び出し元は範囲探索にフォールバック
+/// する。#267/#278)。
+fn env_bind_port_override() -> Option<u16> {
+    std::env::var("MDT_DISCOVERY_PORT").ok()?.parse().ok()
 }
 
 /// 環境変数`MDT_DISCOVERY_PEER_PORT`(HELLO/招待の送信先ポート)を読み取る。未設定・
 /// 不正な値なら`bind_port`と同じ値を使う(#267。通常運用と同じ「全員同じポート」)。
-fn peer_port_override(bind_port: u16) -> u16 {
+/// `MDT_DISCOVERY_PORT`が明示指定されている場合にのみ呼ぶ。
+fn env_peer_port_override(bind_port: u16) -> u16 {
     resolve_port_override(
         std::env::var("MDT_DISCOVERY_PEER_PORT").ok().as_deref(),
         bind_port,
@@ -75,37 +73,96 @@ fn resolve_port_override(value: Option<&str>, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+/// `DISCOVERY_PORT`から`DISCOVERY_PORT_RANGE_COUNT`個ぶん連続するポート範囲(#278)。
+fn discovery_port_range() -> std::ops::Range<u16> {
+    DISCOVERY_PORT..DISCOVERY_PORT.saturating_add(DISCOVERY_PORT_RANGE_COUNT)
+}
+
 impl Discovery {
-    /// 既定では`0.0.0.0:39393`にbindし、非ブロッキング+ブロードキャスト送信可能に
-    /// してから最初のHELLOを1回流す。`MDT_DISCOVERY_PORT`/`MDT_DISCOVERY_PEER_PORT`が
-    /// 設定されていればそちらを使う(#267。同一マシンで2プロセスを別ポートで起動し、
-    /// 互いを送信先に向けることで対戦フローを実機無しに確認できる)。
+    /// `MDT_DISCOVERY_PORT`が明示指定されていれば`0.0.0.0:<その値>`にbindし、
+    /// `MDT_DISCOVERY_PEER_PORT`(未設定なら同じ値)へ送信する(#267。既存の
+    /// 同一マシン動作確認手順との後方互換)。
+    ///
+    /// 指定が無い通常の起動では、`DISCOVERY_PORT`から連続する範囲(既定4つ)の中で
+    /// 空いている最初のポートにbindし、範囲内の全ポートへHELLO/BYEをブロードキャスト
+    /// する(#278。同一ホストで複数プロセスを起動しても、環境変数無しで自動的に
+    /// 発見し合える)。非ブロッキング+ブロードキャスト送信可能にしてから最初のHELLOを
+    /// 1回流す。
     pub fn start(my_name: String, my_tcp_port: u16) -> io::Result<Self> {
-        let bind_port = bind_port_override();
-        let peer_port = peer_port_override(bind_port);
-        Self::start_with(
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, bind_port)),
-            SocketAddr::from((Ipv4Addr::BROADCAST, peer_port)),
+        if let Some(bind_port) = env_bind_port_override() {
+            let peer_port = env_peer_port_override(bind_port);
+            return Self::start_with(
+                SocketAddr::from((Ipv4Addr::UNSPECIFIED, bind_port)),
+                vec![SocketAddr::from((Ipv4Addr::BROADCAST, peer_port))],
+                my_name,
+                my_tcp_port,
+            );
+        }
+
+        Self::start_in_range(
+            discovery_port_range(),
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::BROADCAST,
             my_name,
             my_tcp_port,
         )
+    }
+
+    /// `ports`の中で空いている最初のポートに`bind_ip`でbindし、範囲内の全ポート
+    /// (`target_ip`)へHELLO/BYEを送る(#278)。本番の`start`(`UNSPECIFIED`+
+    /// `BROADCAST`)と、範囲探索そのものをテストする専用コード(ループバックの
+    /// 動的なベースポート)の両方から使う。
+    fn start_in_range(
+        ports: impl Iterator<Item = u16> + Clone,
+        bind_ip: Ipv4Addr,
+        target_ip: Ipv4Addr,
+        my_name: String,
+        my_tcp_port: u16,
+    ) -> io::Result<Self> {
+        let hello_targets: Vec<SocketAddr> = ports
+            .clone()
+            .map(|port| SocketAddr::from((target_ip, port)))
+            .collect();
+        let mut last_error = None;
+        for port in ports {
+            match UdpSocket::bind(SocketAddr::from((bind_ip, port))) {
+                Ok(socket) => {
+                    return Self::start_from_socket(socket, hello_targets, my_name, my_tcp_port);
+                }
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            io::Error::new(io::ErrorKind::AddrInUse, "探索用のUDPポートに空きが無い")
+        }))
     }
 
     /// bind先とHELLOの送信先を指定して開始する。実運用の組み合わせは`start`が持ち、
     /// ここを分けているのはテストでループバックの空きポートを使うため。
     fn start_with(
         bind_addr: SocketAddr,
-        hello_target: SocketAddr,
+        hello_targets: Vec<SocketAddr>,
         my_name: String,
         my_tcp_port: u16,
     ) -> io::Result<Self> {
         let socket = UdpSocket::bind(bind_addr)?;
+        Self::start_from_socket(socket, hello_targets, my_name, my_tcp_port)
+    }
+
+    /// bind済みのソケットから組み立てる(#278。範囲探索で確保したソケットを
+    /// そのまま使うため`start_with`から分けている)。
+    fn start_from_socket(
+        socket: UdpSocket,
+        hello_targets: Vec<SocketAddr>,
+        my_name: String,
+        my_tcp_port: u16,
+    ) -> io::Result<Self> {
         socket.set_nonblocking(true)?;
         socket.set_broadcast(true)?;
 
         let discovery = Self {
             socket,
-            hello_target,
+            hello_targets,
             my_id: Uuid::new_v4(),
             my_name,
             my_tcp_port,
@@ -182,11 +239,15 @@ impl Discovery {
     /// 即座に消えてもらうためのもので、届かなくても`DISCOVERY_TIMEOUT_MS`後には
     /// 消えるため、送信失敗は無視する。
     pub fn send_bye(&self) {
-        let _ = self.send(PacketType::Bye, Uuid::nil(), self.hello_target);
+        for &target in &self.hello_targets {
+            let _ = self.send(PacketType::Bye, Uuid::nil(), target);
+        }
     }
 
     fn send_hello(&self) {
-        let _ = self.send(PacketType::Hello, Uuid::nil(), self.hello_target);
+        for &target in &self.hello_targets {
+            let _ = self.send(PacketType::Hello, Uuid::nil(), target);
+        }
     }
 
     fn send(&self, packet_type: PacketType, target_id: Uuid, to: SocketAddr) -> io::Result<()> {
@@ -245,7 +306,26 @@ impl Discovery {
     /// (設計書8節「テストでは宛先を直接指定する」)。
     pub(crate) fn start_on_loopback(my_name: String, my_tcp_port: u16) -> io::Result<Self> {
         let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
-        Self::start_with(loopback, loopback, my_name, my_tcp_port)
+        Self::start_with(loopback, vec![loopback], my_name, my_tcp_port)
+    }
+
+    /// `start`の範囲探索ロジック(#278)をループバックでテストするための入口。
+    /// `base`から`count`個の範囲で空いている最初のポートにbindし、範囲内の全ポート
+    /// (ループバック)へ送る。同一の`base`/`count`で複数インスタンスを起動すると、
+    /// 本番の「同一ホストで複数プロセスが自動的に発見し合う」動作を再現できる。
+    pub(crate) fn start_in_range_on_loopback(
+        my_name: String,
+        my_tcp_port: u16,
+        base: u16,
+        count: u16,
+    ) -> io::Result<Self> {
+        Self::start_in_range(
+            base..base.saturating_add(count),
+            Ipv4Addr::LOCALHOST,
+            Ipv4Addr::LOCALHOST,
+            my_name,
+            my_tcp_port,
+        )
     }
 
     /// 自分のプレイヤーID。招待パケットの宛先(`target_id`)と突き合わせるために
@@ -260,7 +340,7 @@ impl Discovery {
 
     /// HELLO/BYEの送信先を差し替える。テストで2インスタンスを互いに向け合わせるため。
     pub(crate) fn set_hello_target(&mut self, addr: SocketAddr) {
-        self.hello_target = addr;
+        self.hello_targets = vec![addr];
     }
 
     /// 次の`tick`でHELLOを送らせる。1秒間隔を実時間で待たずに候補を揃えるため。
@@ -513,5 +593,117 @@ mod tests {
             1,
             "間隔を過ぎたら1回再送するはず"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // 同一ホストで複数プロセスを起動しても自動的に発見し合える(#278)。
+    // 固定ポート(39393-39396)は環境依存で他のテストと競合しうるため、動的に
+    // 確保した空きポートを範囲の起点として使う。
+    // -----------------------------------------------------------------------
+
+    /// ループバックの空きポートを1つ確保し、その番号だけを返す(すぐ手放す)。
+    /// 範囲探索の起点として使う。
+    fn free_loopback_port() -> u16 {
+        UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[test]
+    fn four_processes_on_the_same_host_bind_to_distinct_ports_in_the_range() {
+        // 範囲(4つ)ぶんの`Discovery`を起動すると、1つ目から順に空いている最初の
+        // ポートを確保していくため、全員が異なるポートになる。
+        const COUNT: u16 = 4;
+        let base = free_loopback_port();
+
+        let discoveries: Vec<Discovery> = (0..COUNT)
+            .map(|i| {
+                Discovery::start_in_range_on_loopback(format!("p{i}"), 39394 + i, base, COUNT)
+                    .unwrap()
+            })
+            .collect();
+
+        let ports: Vec<u16> = discoveries
+            .iter()
+            .map(|discovery| discovery.local_addr().port())
+            .collect();
+        let mut distinct = ports.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            COUNT as usize,
+            "{COUNT}プロセスぶん全員が異なるポートを確保するはず(実際: {ports:?})"
+        );
+    }
+
+    #[test]
+    fn a_fifth_process_fails_to_start_once_the_range_is_exhausted() {
+        const COUNT: u16 = 4;
+        let base = free_loopback_port();
+        let _discoveries: Vec<Discovery> = (0..COUNT)
+            .map(|i| {
+                Discovery::start_in_range_on_loopback(format!("p{i}"), 39394 + i, base, COUNT)
+                    .unwrap()
+            })
+            .collect();
+
+        let fifth = Discovery::start_in_range_on_loopback("p4".to_string(), 39399, base, COUNT);
+
+        assert!(
+            fifth.is_err(),
+            "範囲内の全ポートが使用中なら、それ以上は起動できないはず"
+        );
+    }
+
+    #[test]
+    fn four_processes_on_the_same_host_discover_each_other_through_the_shared_port_range() {
+        // 環境変数オーバーライド無しでも、範囲内の全ポートへ送るHELLOによって
+        // 4プロセスが自動的に互いを発見できる(実際のユーザー報告: 手動でポートを
+        // 指定しないと2台目以降がロビーに入れなかった問題の再現・解消確認)。
+        const COUNT: u16 = 4;
+        let base = free_loopback_port();
+
+        let mut discoveries: Vec<Discovery> = (0..COUNT)
+            .map(|i| {
+                Discovery::start_in_range_on_loopback(format!("p{i}"), 39394 + i, base, COUNT)
+                    .unwrap()
+            })
+            .collect();
+
+        for _ in 0..200 {
+            for discovery in discoveries.iter_mut() {
+                discovery.resend_hello_now();
+                discovery.tick();
+            }
+            if discoveries
+                .iter()
+                .all(|discovery| discovery.peers().len() == (COUNT as usize) - 1)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        for (i, discovery) in discoveries.iter().enumerate() {
+            let mut names: Vec<&str> = discovery
+                .peers()
+                .iter()
+                .map(|peer| peer.player_name.as_str())
+                .collect();
+            names.sort_unstable();
+            let mut expected: Vec<String> = (0..COUNT)
+                .filter(|&j| j != i as u16)
+                .map(|j| format!("p{j}"))
+                .collect();
+            expected.sort_unstable();
+            assert_eq!(
+                names,
+                expected.iter().map(String::as_str).collect::<Vec<_>>(),
+                "参加者{i}は自分以外の全員を発見するはず"
+            );
+        }
     }
 }

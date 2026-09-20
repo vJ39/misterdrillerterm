@@ -395,6 +395,11 @@ pub const INVITE_TIMEOUT_MS: u64 = 10000;
 pub const TCP_CONNECT_TIMEOUT_MS: u64 = 3000;
 /// HELLOを再送する間隔(ms)。
 pub const HELLO_BROADCAST_INTERVAL_MS: u64 = 1000;
+/// 同一ホストで自動発見できる最大プロセス数(#278)。環境変数によるポート指定
+/// (`MDT_DISCOVERY_PORT`)が無い場合、`DISCOVERY_PORT`からこの数だけ連続する
+/// ポートを探索範囲として使う(空いている最初のポートにbindし、範囲内の全ポート
+/// へHELLO/BYEをブロードキャストする)。
+pub const DISCOVERY_PORT_RANGE_COUNT: u16 = 4;
 
 /// 探索パケットの固定長(バイト)。受信バッファの大きさとしても使うため、
 /// 探索側(`discovery.rs`)から参照できるようにしている。
