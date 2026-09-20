@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::constants::NET_TICK_MS;
-use crate::game::{Game, GameStatus, InputAction};
+use crate::game::{Game, GameEvent, GameStatus, InputAction};
 
 /// lockstepの1tickぶんの処理を、spec.md 12.3の固定実行順序で行う。
 /// `local_action`/`remote_action`はNoneなら何もしない(1tickにつき高々1アクション)。
@@ -51,19 +51,23 @@ pub fn run_tick(
 ///
 /// `games`と`actions`は同じindexで対応する(index 0が自分)。`actions`の要素がNoneなら
 /// その参加者はこのtickで何もしない(1tickにつき高々1アクション。spec.md 12.2)。
-pub fn run_tick_n(games: &mut [Game], actions: &[Option<InputAction>]) {
+///
+/// 戻り値は各参加者が発生させた`GameEvent`(`games`と同じindex)。呼び出し元(`BattleState`)
+/// が自分(index 0)ぶんだけSE再生に使う(#295。対戦画面はこれまでSEを再生していなかった)。
+pub fn run_tick_n(games: &mut [Game], actions: &[Option<InputAction>]) -> Vec<Vec<GameEvent>> {
     debug_assert_eq!(
         games.len(),
         actions.len(),
         "参加者の数と入力の数は一致するはず"
     );
-    for (game, &action) in games.iter_mut().zip(actions.iter()) {
+    let mut events: Vec<Vec<GameEvent>> = vec![Vec::new(); games.len()];
+    for ((game, &action), out) in games.iter_mut().zip(actions.iter()).zip(events.iter_mut()) {
         if let Some(action) = action {
-            game.apply_input(action);
+            out.extend(game.apply_input(action));
         }
     }
-    for game in games.iter_mut() {
-        game.update(Duration::from_millis(NET_TICK_MS));
+    for (game, out) in games.iter_mut().zip(events.iter_mut()) {
+        out.extend(game.update(Duration::from_millis(NET_TICK_MS)));
     }
 
     // 妨害岩(#247/#297)。各自が消したブロック数を、割らずに生存中(Playing)の
@@ -82,6 +86,8 @@ pub fn run_tick_n(games: &mut [Game], actions: &[Option<InputAction>]) {
             }
         }
     }
+
+    events
 }
 
 #[cfg(test)]

@@ -1755,6 +1755,35 @@ impl Game {
     /// (`item_top_up_frontier_row`より先)だけを対象にするため、抽選済みの行は変えない。
     /// プレイヤーが進むと窓の下限も進み、既存アイテムが窓の外へ抜けたぶんだけ補充余地が
     /// 生まれる。`reroll_spawn_rates_from`と`check_level_and_clear`の両方から呼ぶ。
+    /// 対戦専用: アイテム3種の配置を、プレイヤーの進行を待たず開始時に全深度ぶん
+    /// 確定させる。地形(色・岩・AIR・スター・ダイヤ)は`Board::generate`で最初から
+    /// 確定しているが、アイテムだけは`top_up_items_ahead`の窓補充に乗っており、
+    /// 掘るペースが違えば`self.rng`の消費タイミングがずれ、まだ誰も到達していない
+    /// 深い場所のアイテム配置が対戦相手ごとに食い違ってしまう(公平性の問題)。
+    ///
+    /// `top_up_items_ahead`と同じ窓幅(`ITEM_WINDOW_AHEAD_ROWS`)で先頭から順に呼ぶ
+    /// ことで、実際のプレイと同じ`rng`消費順序・同じ抽選ロジックのまま全行を対象に
+    /// する。呼び終えると`item_top_up_frontier_row`が最大値になり、以後
+    /// `top_up_items_ahead`は何もしなくなる。
+    pub fn precompute_all_items(&mut self) {
+        let depth_rows = self.board.depth_rows();
+        while self.item_top_up_frontier_row < depth_rows {
+            let target_row = (self.item_top_up_frontier_row
+                + crate::constants::ITEM_WINDOW_AHEAD_ROWS)
+                .min(depth_rows);
+            self.board.top_up_items(
+                &mut self.rng,
+                self.item_top_up_frontier_row,
+                self.item_top_up_frontier_row,
+                target_row,
+                self.item_clear_above_rate_percent,
+                self.item_unify_colors_rate_percent,
+                self.item_starify_screen_rate_percent,
+            );
+            self.item_top_up_frontier_row = target_row;
+        }
+    }
+
     fn top_up_items_ahead(&mut self) {
         let target_row = (self.player.row + crate::constants::ITEM_WINDOW_AHEAD_ROWS)
             .min(self.board.depth_rows());
@@ -2454,6 +2483,51 @@ mod tests {
         assert!(
             count_in_range(&game, ItemEffect::StarifyScreen, 500, 600) > 0,
             "深度500m地点でも前方の窓にKアイテムが補充されているはず"
+        );
+    }
+
+    #[test]
+    fn precompute_all_items_makes_item_placement_independent_of_dig_pace() {
+        // #298: 対戦は各プレイヤーが独立した`Game`を持ち、掘るペースも違う。進行に
+        // 応じた窓補充(top_up_items_ahead)に任せていると、まだ誰も到達していない
+        // 深い場所のアイテム配置が対戦相手ごとに食い違ってしまう(公平性の問題)。
+        // precompute_all_items()で開始時に全深度分を確定すれば、後からプレイヤーが
+        // どれだけ深く進んでtop_up_items_aheadが呼ばれても、既に確定済み
+        // (frontierが最大値)のため配置が変わらないはず。チェックポイント等の
+        // 副作用(頭上クリア等)を混入させないよう、直接`top_up_items_ahead`だけを
+        // 呼んで検証する。
+        const SEED: u64 = 777;
+        let item_positions = |game: &Game| -> Vec<(usize, usize, ItemEffect)> {
+            game.board
+                .rows
+                .iter()
+                .enumerate()
+                .flat_map(|(row, cells)| {
+                    cells
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(col, cell)| match cell {
+                            Cell::Item(effect) => Some((row, col, *effect)),
+                            _ => None,
+                        })
+                })
+                .collect()
+        };
+
+        let mut game = Game::new(SEED);
+        game.reroll_spawn_rates_from(2, 100, 100, 100, 100, 300, 300, 300, 4, 100);
+        game.precompute_all_items();
+        let items_right_after_precompute = item_positions(&game);
+
+        // 対戦相手が自分より速く掘り進んだ状況を模して、プレイヤーを盤面最深部
+        // まで進めてから窓補充を呼ぶ。
+        game.player.row = game.board.depth_rows() - 1;
+        game.top_up_items_ahead();
+        let items_after_progress = item_positions(&game);
+
+        assert_eq!(
+            items_right_after_precompute, items_after_progress,
+            "事前確定後はtop_up_items_aheadが呼ばれても配置が変わらないはず"
         );
     }
 

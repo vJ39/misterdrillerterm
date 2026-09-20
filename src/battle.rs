@@ -26,7 +26,7 @@ use crate::constants::{
     HEARTBEAT_INTERVAL_MS, HEARTBEAT_TIMEOUT_MS, LOCKSTEP_WAIT_TIMEOUT_MS, NET_TICK_MS,
     STATE_HASH_INTERVAL_TICKS,
 };
-use crate::game::{Game, GameStatus, InputAction};
+use crate::game::{Game, GameEvent, GameStatus, InputAction};
 use crate::lockstep;
 use crate::net::{self, BattleConfig, GameMessage, NetAction, NetworkEvent};
 
@@ -58,6 +58,9 @@ pub struct BattleState {
     /// 瞬間にここへ適用して即座に描画へ反映する。tickが確定するたびに`games[0]`から
     /// 作り直し、正式な状態へ同期し直す(ズレは最大1tickで補正される)。
     predicted: Game,
+    /// 直近のtick確定で自分(`games[0]`)が発生させた`GameEvent`(#295)。呼び出し元
+    /// (`tick_battle`)がSE再生に使うため、消費されるまで溜めておく。
+    pending_local_events: Vec<GameEvent>,
     /// 各参加者の表示名。`games`と同じindexで対応する(index 0が自分)。
     pub player_names: Vec<String>,
     /// 実測フレーム時間を`NET_TICK_MS`(150ms)単位へ量子化するための蓄積バッファ。
@@ -180,6 +183,7 @@ impl BattleState {
         Self {
             games,
             predicted,
+            pending_local_events: Vec::new(),
             player_names,
             net_tick_accum: Duration::ZERO,
             ranks: vec![None; player_count],
@@ -225,6 +229,7 @@ impl BattleState {
         Ok(Self {
             games,
             predicted,
+            pending_local_events: Vec::new(),
             player_names,
             net_tick_accum: Duration::ZERO,
             ranks: vec![None; player_count],
@@ -278,6 +283,13 @@ impl BattleState {
     /// 待たず入力を先行反映したこちらを描画に使う。
     pub fn predicted_game(&self) -> &Game {
         &self.predicted
+    }
+
+    /// 直近のtick確定で自分が発生させた`GameEvent`を取り出す(#295)。呼び出し元
+    /// (`tick_battle`)がSE再生に使う。取り出した後は空になる(次のtick確定まで
+    /// 何も返さない)。
+    pub fn take_local_events(&mut self) -> Vec<GameEvent> {
+        std::mem::take(&mut self.pending_local_events)
     }
 
     /// 対戦から抜けることを他の参加者全員へ伝える(#256/#274)。通信なし(#252のローカル
@@ -739,7 +751,8 @@ impl BattleState {
     /// `run_net_tick`の本体。通信あり(#254)の経路は、受信済みの相手の入力を含めた
     /// 全参加者ぶんの入力を直接渡す。
     fn run_net_tick_with_actions(&mut self, actions: &[Option<InputAction>]) {
-        lockstep::run_tick_n(&mut self.games, actions);
+        let mut events = lockstep::run_tick_n(&mut self.games, actions);
+        self.pending_local_events.append(&mut events[0]);
         self.update_ranks();
     }
 }
@@ -858,6 +871,11 @@ pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
         config.color_count,
         config.color_cluster_rate_percent,
     );
+    // アイテム3種は通常プレイでは進行に応じた窓補充(top_up_items_ahead)に任せるが、
+    // 対戦では掘るペースが違う相手同士でRNG消費タイミングがずれ、まだ誰も到達していない
+    // 深い場所のアイテム配置が食い違ってしまう(公平性の問題)。対戦では開始時に全深度分
+    // 確定させる。
+    game.precompute_all_items();
     game
 }
 

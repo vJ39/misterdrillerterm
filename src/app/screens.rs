@@ -755,6 +755,14 @@ pub fn tick_battle(
     app.last_tick = now;
     state.advance(delta, first_local_action(&actions));
 
+    let events = state.take_local_events();
+    handle_events(
+        &events,
+        app.mixer.as_ref(),
+        &app.se_enabled,
+        app.settings.se_volume_percent,
+    );
+
     let music_on = app.gameplay_music_enabled.load(Ordering::Relaxed);
     let se_on = app.se_enabled.load(Ordering::Relaxed);
     let outcome = state.outcome();
