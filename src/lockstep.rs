@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::constants::NET_TICK_MS;
-use crate::game::{Game, InputAction};
+use crate::game::{Game, GameStatus, InputAction};
 
 /// lockstepの1tickぶんの処理を、spec.md 12.3の固定実行順序で行う。
 /// `local_action`/`remote_action`はNoneなら何もしない(1tickにつき高々1アクション)。
@@ -34,6 +34,16 @@ pub fn run_tick(
     }
     game_local.update(Duration::from_millis(NET_TICK_MS));
     game_remote.update(Duration::from_millis(NET_TICK_MS));
+
+    // 妨害岩(#247/#297)。生存中(Playing)の相手にだけ、そのまま届ける。
+    let local_power = game_local.take_pending_attack_power();
+    let remote_power = game_remote.take_pending_attack_power();
+    if remote_power > 0 && game_local.status == GameStatus::Playing {
+        game_local.receive_incoming_attack(remote_power);
+    }
+    if local_power > 0 && game_remote.status == GameStatus::Playing {
+        game_remote.receive_incoming_attack(local_power);
+    }
 }
 
 /// lockstepの1tickぶんの処理をN人向けに一般化したもの(#273)。処理順序は`run_tick`と
@@ -54,6 +64,23 @@ pub fn run_tick_n(games: &mut [Game], actions: &[Option<InputAction>]) {
     }
     for game in games.iter_mut() {
         game.update(Duration::from_millis(NET_TICK_MS));
+    }
+
+    // 妨害岩(#247/#297)。各自が消したブロック数を、割らずに生存中(Playing)の
+    // 他の全員へそのまま届ける(N人時の配分ルールはユーザー確認済み)。
+    let pending: Vec<u32> = games
+        .iter_mut()
+        .map(Game::take_pending_attack_power)
+        .collect();
+    for (i, &power) in pending.iter().enumerate() {
+        if power == 0 {
+            continue;
+        }
+        for (j, game) in games.iter_mut().enumerate() {
+            if i != j && game.status == GameStatus::Playing {
+                game.receive_incoming_attack(power);
+            }
+        }
     }
 }
 
@@ -305,5 +332,67 @@ mod tests {
                 "tick{i}後に相手の盤面が2人版と一致しない"
             );
         }
+    }
+
+    #[test]
+    fn run_tick_n_delivers_drilled_blocks_as_attack_power_to_the_opponent() {
+        // #247/#297: 掘削で消したブロック数が、同じtick内で生存中の相手へ攻撃力として届く。
+        use crate::game::board::{Cell, ColorKind};
+        use crate::game::player::Direction;
+
+        let mut attacker = Game::new(1);
+        attacker.set_attack_rules_enabled(true);
+        attacker.player.facing = Direction::Down;
+        let target_row = attacker.player.row + 1;
+        let col = attacker.player.col;
+        // 横に3個つながった同色を1回の掘削で消す(#247の実装と同じ前提)。
+        attacker.board.rows[target_row][col] = Cell::Color(ColorKind::Red);
+        attacker.board.rows[target_row][col + 1] = Cell::Color(ColorKind::Red);
+        attacker.board.rows[target_row][col + 2] = Cell::Color(ColorKind::Red);
+
+        let mut defender = Game::new(2);
+        defender.set_attack_rules_enabled(true);
+
+        let mut games = vec![attacker, defender];
+        run_tick_n(&mut games, &[Some(InputAction::Drill), None]);
+
+        assert_eq!(
+            games[0].attack_power_pending(),
+            0,
+            "送った側の蓄積はtick内で消費されるはず"
+        );
+        assert_eq!(
+            games[1].incoming_attack_power(),
+            3,
+            "3個分の攻撃力が生存中の相手へ届くはず"
+        );
+    }
+
+    #[test]
+    fn run_tick_n_does_not_send_attack_power_to_a_player_who_already_finished() {
+        // ゴール・脱落済みの相手へは妨害岩を送らない(意味が無いため)。
+        use crate::game::board::{Cell, ColorKind};
+        use crate::game::player::Direction;
+
+        let mut attacker = Game::new(1);
+        attacker.set_attack_rules_enabled(true);
+        attacker.player.facing = Direction::Down;
+        let target_row = attacker.player.row + 1;
+        let col = attacker.player.col;
+        attacker.board.rows[target_row][col] = Cell::Color(ColorKind::Red);
+        attacker.board.rows[target_row][col + 1] = Cell::Color(ColorKind::Red);
+
+        let mut finished = Game::new(2);
+        finished.set_attack_rules_enabled(true);
+        finished.status = GameStatus::Cleared;
+
+        let mut games = vec![attacker, finished];
+        run_tick_n(&mut games, &[Some(InputAction::Drill), None]);
+
+        assert_eq!(
+            games[1].incoming_attack_power(),
+            0,
+            "ゴール済みの相手には妨害岩を送らないはず"
+        );
     }
 }

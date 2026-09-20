@@ -843,6 +843,8 @@ pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
     game.set_chain_vanish_interval_ms(config.chain_vanish_interval_ms);
     game.set_attack_blocks_per_rock(config.attack_blocks_per_rock);
     game.set_attack_rocks_per_wave_max(config.attack_rocks_per_wave_max);
+    // 妨害岩(#247)は対戦専用のルールで、通常プレイでは常に無効(#297でlockstepへ接続)。
+    game.set_attack_rules_enabled(true);
     // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
     game.reroll_spawn_rates_from(
         2,
