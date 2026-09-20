@@ -130,6 +130,11 @@ impl PeerLink {
     /// ハンドシェイクに使ったものをそのまま渡す(内部で`try_clone`して読み書き用に分け、
     /// 読み側は受信専用スレッドへ預ける)。
     fn new(stream: TcpStream, start_at_unix_ms: u64) -> io::Result<Self> {
+        // Input/Result/StateHashは1件あたり数十バイトの小さいメッセージを毎tick
+        // 送り合う。Nagleアルゴリズムが有効だと、直前の送信のACKを待つ間ここが
+        // バッファされ、tick間隔(NET_TICK_MS)より大きな遅延が積み重なる(#287、
+        // 実機で「対戦がまだ重い」と報告された原因の一つ)。
+        stream.set_nodelay(true)?;
         let reader_stream = stream.try_clone()?;
         let (tx, event_rx) = mpsc::channel();
         let receiver_thread = net::spawn_receiver_thread(reader_stream, tx);

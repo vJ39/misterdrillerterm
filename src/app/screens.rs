@@ -706,8 +706,8 @@ fn first_local_action(actions: &[InputAction]) -> Option<InputAction> {
 ///
 /// 通常プレイの`tick_playing`とは独立した関数にしている(あちらへ対戦用の分岐を混ぜると
 /// さらに肥大化し、通常プレイ側の挙動を壊すリスクも生むため)。ゲームの進行は実測フレーム
-/// 時間を150ms固定tickへ量子化して`BattleState::advance`へ任せ、ここは入力の仕分けと
-/// 描画だけを行う。
+/// 時間を`NET_TICK_MS`固定tickへ量子化して`BattleState::advance`へ任せ、ここは入力の
+/// 仕分けと描画だけを行う。
 pub fn tick_battle(
     app: &mut App,
     state: &mut BattleState,
