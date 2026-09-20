@@ -16,6 +16,7 @@ mod net;
 mod rewind;
 mod room;
 mod settings;
+mod text_edit;
 mod ui;
 
 use std::io;
@@ -34,13 +35,14 @@ use app::audio::{
     effective_gameplay_bgm_enabled, effective_title_bgm_enabled, play_se, should_restart_title_bgm,
 };
 use app::screens::{
-    tick_battle, tick_help_screen, tick_mode_select, tick_network_lobby, tick_playing, tick_rewind,
-    tick_settings_screen, tick_title,
+    tick_battle, tick_help_screen, tick_mode_select, tick_network_lobby, tick_player_name_input,
+    tick_playing, tick_rewind, tick_settings_screen, tick_title,
 };
 use battle::BattleState;
 use game::{Game, InputAction};
 use lobby::LobbyState;
 use settings::Settings;
+use text_edit::TextEditState;
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -143,8 +145,11 @@ enum ScreenTransition {
     ToSettings,
     ToHelp,
     ToPlaying(Box<Game>),
-    /// 対戦相手を探すロビー画面へ(#256)。タイトルでNキーを押すと、探索用の
-    /// ソケットを確保済みの`LobbyState`がここに載って渡ってくる。
+    /// 表示名の入力画面へ(#270)。タイトルでNキーを押すと、初期値を入れた編集状態が
+    /// ここに載って渡ってくる。
+    ToPlayerNameInput(TextEditState),
+    /// 対戦相手を探すロビー画面へ(#256)。表示名の入力画面(#270)でEnterを押すと、
+    /// 探索用のソケットを確保済みの`LobbyState`がここに載って渡ってくる。
     ToNetworkLobby(Box<LobbyState>),
     /// ロビーで対戦が成立した(#256)。ハンドシェイク済みの状態をそのまま対戦画面へ渡す。
     ToBattle(Box<BattleState>),
@@ -244,6 +249,8 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Screen::Battle(state) => tick_battle(&mut app, state, terminal)?,
             // 対戦相手を探すロビー(#256)。
             Screen::NetworkLobby(state) => tick_network_lobby(&mut app, state, terminal)?,
+            // ロビーへ入る前の表示名入力(#270)。
+            Screen::PlayerNameInput(state) => tick_player_name_input(&mut app, state, terminal)?,
             Screen::Settings => tick_settings_screen(&mut app, terminal)?,
             Screen::Help => tick_help_screen(&mut app, terminal)?,
             Screen::ModeSelect => tick_mode_select(&mut app, terminal)?,
@@ -274,6 +281,9 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Some(ScreenTransition::ToPlaying(game)) => {
                 screen = Screen::Playing(game);
                 app.last_tick = Instant::now();
+            }
+            Some(ScreenTransition::ToPlayerNameInput(state)) => {
+                screen = Screen::PlayerNameInput(state)
             }
             Some(ScreenTransition::ToNetworkLobby(state)) => screen = Screen::NetworkLobby(state),
             Some(ScreenTransition::ToBattle(state)) => {
@@ -346,8 +356,11 @@ enum Screen {
     Playing(Box<Game>),
     /// 対戦中(#252。spec.md 12章)。ロビー(#256)で対戦が成立するとここへ移る。
     Battle(Box<BattleState>),
-    /// 対戦相手を探すロビー画面(#256。spec.md 12.1)。タイトルでNキーを押すと移る。
+    /// 対戦相手を探すロビー画面(#256。spec.md 12.1)。表示名の入力(#270)を終えると移る。
     NetworkLobby(Box<LobbyState>),
+    /// 表示名の入力画面(#270)。タイトルでNキーを押すと移り、Enterでロビーへ進む。
+    /// `TextEditState`は文字列とカーソル位置だけの小さな状態なので`Box`では包まない。
+    PlayerNameInput(TextEditState),
 }
 
 /// 一時停止中にオーバーレイ表示する画面。`Screen::Playing`のまま

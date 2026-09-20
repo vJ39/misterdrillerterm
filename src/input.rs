@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::game::InputAction;
 
@@ -89,6 +89,86 @@ pub fn poll_input_batch(poll_ms: u64) -> std::io::Result<Vec<InputAction>> {
             && key.kind == KeyEventKind::Press
         {
             actions.push(action_from_key_code(key.code));
+        }
+
+        if !event::poll(Duration::ZERO)? {
+            break;
+        }
+    }
+
+    Ok(actions)
+}
+
+/// テキスト編集画面(プレイヤー名入力、#270)専用の入力アクション。ゲームプレイ用の
+/// `InputAction`とは意味が異なるキー割り当てのため独立して持つ。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextEditAction {
+    Char(char),
+    Backspace,
+    Delete,
+    MoveLeft {
+        extend: bool,
+    },
+    MoveRight {
+        extend: bool,
+    },
+    MoveToStart {
+        extend: bool,
+    },
+    MoveToEnd {
+        extend: bool,
+    },
+    SelectAll,
+    /// Enter。確定してロビーへ進む。
+    Confirm,
+    /// Esc。タイトルへ戻る。
+    Cancel,
+}
+
+/// キーイベントを`TextEditAction`へ変換する(`poll_text_edit_input`の実装本体)。
+/// 修飾キーで意味が変わる(Shiftで選択拡張・Ctrl/Cmd+Aで全選択)ため、`KeyCode`だけでなく
+/// `KeyEvent`全体を受け取る。どのアクションにも当てはまらないキーは`None`(無視)。
+fn text_edit_action_from_key(key: KeyEvent) -> Option<TextEditAction> {
+    // macOSのCmdはSUPERとして届くため、Ctrl+AとCmd+Aの両方を全選択として扱う。
+    let command = key.modifiers.contains(KeyModifiers::CONTROL)
+        || key.modifiers.contains(KeyModifiers::SUPER);
+    let extend = key.modifiers.contains(KeyModifiers::SHIFT);
+
+    match key.code {
+        KeyCode::Char('a') | KeyCode::Char('A') if command => Some(TextEditAction::SelectAll),
+        // Ctrl/Cmd付きの文字キーはテキスト入力ではない(他のショートカットに使われうる)
+        // ため、文字としては受け取らない。Shiftのみ・無修飾はそのまま文字にする
+        // (crosstermは大文字/小文字を`c`自体に反映して届ける)。
+        KeyCode::Char(_) if command => None,
+        KeyCode::Char(c) => Some(TextEditAction::Char(c)),
+        KeyCode::Backspace => Some(TextEditAction::Backspace),
+        KeyCode::Delete => Some(TextEditAction::Delete),
+        KeyCode::Left => Some(TextEditAction::MoveLeft { extend }),
+        KeyCode::Right => Some(TextEditAction::MoveRight { extend }),
+        KeyCode::Home => Some(TextEditAction::MoveToStart { extend }),
+        KeyCode::End => Some(TextEditAction::MoveToEnd { extend }),
+        KeyCode::Enter => Some(TextEditAction::Confirm),
+        KeyCode::Esc => Some(TextEditAction::Cancel),
+        _ => None,
+    }
+}
+
+/// `poll_ms`だけ待って入力を確認し、その時点でキューされている全キーイベントを
+/// `TextEditAction`へ変換してまとめて返す(#270)。文字を速く打った場合でも
+/// 1フレームに届いた入力を取りこぼさないよう、`poll_input_batch`と同じ吐き出し方をする。
+pub fn poll_text_edit_input(poll_ms: u64) -> std::io::Result<Vec<TextEditAction>> {
+    let mut actions = Vec::new();
+
+    if !event::poll(Duration::from_millis(poll_ms))? {
+        return Ok(actions);
+    }
+
+    loop {
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+            && let Some(action) = text_edit_action_from_key(key)
+        {
+            actions.push(action);
         }
 
         if !event::poll(Duration::ZERO)? {
@@ -400,6 +480,116 @@ mod tests {
     fn action_from_key_code_maps_tab_to_starting_a_room() {
         // #276: ロビーで集めた参加者と対戦を開始する操作。
         assert_eq!(action_from_key_code(KeyCode::Tab), InputAction::StartRoom);
+    }
+
+    /// 修飾キーなしのキーイベントを組む(テスト用)。
+    fn plain(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn text_edit_maps_the_editing_keys() {
+        // #270: 文字入力・削除・確定・キャンセル。
+        assert_eq!(
+            text_edit_action_from_key(plain(KeyCode::Char('a'))),
+            Some(TextEditAction::Char('a'))
+        );
+        assert_eq!(
+            text_edit_action_from_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT)),
+            Some(TextEditAction::Char('A')),
+            "Shiftのみの文字キーはそのまま大文字として入力する"
+        );
+        assert_eq!(
+            text_edit_action_from_key(plain(KeyCode::Backspace)),
+            Some(TextEditAction::Backspace)
+        );
+        assert_eq!(
+            text_edit_action_from_key(plain(KeyCode::Delete)),
+            Some(TextEditAction::Delete)
+        );
+        assert_eq!(
+            text_edit_action_from_key(plain(KeyCode::Enter)),
+            Some(TextEditAction::Confirm)
+        );
+        assert_eq!(
+            text_edit_action_from_key(plain(KeyCode::Esc)),
+            Some(TextEditAction::Cancel)
+        );
+    }
+
+    #[test]
+    fn text_edit_extends_the_selection_only_while_shift_is_held() {
+        // #270: 矢印・Home/EndはShiftの有無で選択拡張が切り替わる。
+        for (code, without, with) in [
+            (
+                KeyCode::Left,
+                TextEditAction::MoveLeft { extend: false },
+                TextEditAction::MoveLeft { extend: true },
+            ),
+            (
+                KeyCode::Right,
+                TextEditAction::MoveRight { extend: false },
+                TextEditAction::MoveRight { extend: true },
+            ),
+            (
+                KeyCode::Home,
+                TextEditAction::MoveToStart { extend: false },
+                TextEditAction::MoveToStart { extend: true },
+            ),
+            (
+                KeyCode::End,
+                TextEditAction::MoveToEnd { extend: false },
+                TextEditAction::MoveToEnd { extend: true },
+            ),
+        ] {
+            assert_eq!(
+                text_edit_action_from_key(plain(code)),
+                Some(without),
+                "{code:?}(修飾なし)は選択を拡張しない"
+            );
+            assert_eq!(
+                text_edit_action_from_key(KeyEvent::new(code, KeyModifiers::SHIFT)),
+                Some(with),
+                "{code:?}(Shift)は選択を拡張する"
+            );
+        }
+    }
+
+    #[test]
+    fn text_edit_maps_both_ctrl_a_and_cmd_a_to_select_all() {
+        // #270: macOSのCmdはSUPERとして届くため、CONTROL/SUPERの両方を全選択にする。
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+            for code in [KeyCode::Char('a'), KeyCode::Char('A')] {
+                assert_eq!(
+                    text_edit_action_from_key(KeyEvent::new(code, modifiers)),
+                    Some(TextEditAction::SelectAll),
+                    "{code:?}+{modifiers:?}は全選択のはず"
+                );
+            }
+        }
+        // 修飾なしのaは普通の文字入力(全選択に奪われない)。
+        assert_eq!(
+            text_edit_action_from_key(plain(KeyCode::Char('a'))),
+            Some(TextEditAction::Char('a'))
+        );
+    }
+
+    #[test]
+    fn text_edit_ignores_unrelated_keys() {
+        // #270: 割り当ての無いキーと、Ctrl/Cmd付きの文字キー(テキスト入力ではない)は無視する。
+        assert_eq!(text_edit_action_from_key(plain(KeyCode::Tab)), None);
+        assert_eq!(text_edit_action_from_key(plain(KeyCode::Up)), None);
+        assert_eq!(text_edit_action_from_key(plain(KeyCode::F(1))), None);
+        assert_eq!(
+            text_edit_action_from_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl+Xは文字として入力しない"
+        );
+        assert_eq!(
+            text_edit_action_from_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER)),
+            None,
+            "Cmd+Cは文字として入力しない"
+        );
     }
 
     #[test]

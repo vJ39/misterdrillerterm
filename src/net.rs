@@ -417,7 +417,8 @@ const DISCOVERY_MAGIC: [u8; 4] = *b"MDT1";
 /// 探索プロトコルの版。旧版の実装は存在しないため現在は1固定。
 const PROTOCOL_VERSION: u8 = 1;
 /// 表示名フィールドの長さ(バイト)。超える場合は切り詰め、余りは0でパディングする。
-const PLAYER_NAME_LEN: usize = 16;
+/// 名前入力UI(#270)が入力中にこの上限で打ち止めにするため、モジュール外からも参照する。
+pub(crate) const PLAYER_NAME_LEN: usize = 16;
 
 /// 探索パケットの種別(spec.md 12.1)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

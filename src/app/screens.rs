@@ -24,7 +24,8 @@ use crate::constants::{
 };
 use crate::game::{Game, GameOverChoice, GameStatus, InputAction};
 use crate::lobby::{LobbyOutcome, LobbyState};
-use crate::net::BattleConfig;
+use crate::net::{self, BattleConfig};
+use crate::text_edit::TextEditState;
 use crate::{
     App, PauseOverlay, ScreenTransition, advance_rewind_session, audio, autoplay,
     cycle_jukebox_selection, input, rewind, start_new_game, ui,
@@ -810,6 +811,57 @@ pub fn tick_network_lobby(
     Ok(None)
 }
 
+/// 表示名の入力画面(`Screen::PlayerNameInput`)の1フレーム(#270)。
+///
+/// 編集そのものは`TextEditState`が持ち、ここは入力の取り込みと描画、確定時の
+/// ロビーへの受け渡しだけを行う。Enterで名前を確定してロビーへ進み、Escで
+/// 入力を捨ててタイトルへ戻る。
+/// `_app`はこの画面では参照しないが、他の画面別tick関数と同じ呼び出し形にそろえるため
+/// 受け取っておく(呼び出し元の`run()`のmatchが画面ごとに形を変えずに済む)。
+pub fn tick_player_name_input(
+    _app: &mut App,
+    state: &mut TextEditState,
+    terminal: &mut ratatui::DefaultTerminal,
+) -> io::Result<Option<ScreenTransition>> {
+    let mut transition = None;
+
+    for action in input::poll_text_edit_input(FRAME_INTERVAL_MS)? {
+        match action {
+            // 表示名は探索パケットの固定長フィールドに載るため、入力の時点で
+            // 同じバイト数で打ち止めにする(超える分は黙って無視される)。
+            input::TextEditAction::Char(c) => {
+                state.insert_char(c, net::PLAYER_NAME_LEN);
+            }
+            input::TextEditAction::Backspace => state.backspace(),
+            input::TextEditAction::Delete => state.delete_forward(),
+            input::TextEditAction::MoveLeft { extend } => state.move_left(extend),
+            input::TextEditAction::MoveRight { extend } => state.move_right(extend),
+            input::TextEditAction::MoveToStart { extend } => state.move_to_start(extend),
+            input::TextEditAction::MoveToEnd { extend } => state.move_to_end(extend),
+            input::TextEditAction::SelectAll => state.select_all(),
+            input::TextEditAction::Confirm => {
+                let my_name = state.text();
+                // 空の名前では確定させない(この画面に留まる)。探索用ソケットを
+                // 確保できなかった場合(ポート使用中等)も同じくここに留まる。
+                if !my_name.is_empty()
+                    && let Ok(lobby) = LobbyState::new(my_name)
+                {
+                    transition = Some(ScreenTransition::ToNetworkLobby(Box::new(lobby)));
+                    break;
+                }
+            }
+            input::TextEditAction::Cancel => {
+                transition = Some(ScreenTransition::ToTitle);
+                break;
+            }
+        }
+    }
+
+    terminal.draw(|frame| ui::render::draw_player_name_input(frame, state))?;
+
+    Ok(transition)
+}
+
 /// 設定画面(タイトルから開く独立画面)の1フレーム。
 ///
 /// 元の実装はループ内で`screen`へ直接代入しており、タイトルへ戻ると決めた後も同じ
@@ -1215,14 +1267,13 @@ pub fn tick_title(
             input::AnyKeyAction::Quit => return Ok(Some(ScreenTransition::Quit)),
             input::AnyKeyAction::OpenSettings => return Ok(Some(ScreenTransition::ToSettings)),
             input::AnyKeyAction::OpenHelp => return Ok(Some(ScreenTransition::ToHelp)),
-            // 対戦相手を探すロビーへ(#256)。表示名の入力UIは作らず、毎回生成した
-            // 名前をそのまま使う。探索用ソケットを確保できなかった場合(ポート使用中等)は
-            // タイトルに留まる。
+            // 表示名の入力画面へ(#270)。ロビーへ入るのはそこでEnterを押した後にする。
+            // 初期値には今まで使っていた自動生成名を入れ、そのまま決定もできるようにする。
             input::AnyKeyAction::OpenNetworkLobby => {
-                let my_name = format!("Player-{}", &uuid::Uuid::new_v4().to_string()[..4]);
-                if let Ok(state) = LobbyState::new(my_name) {
-                    return Ok(Some(ScreenTransition::ToNetworkLobby(Box::new(state))));
-                }
+                let initial_name = format!("Player-{}", &uuid::Uuid::new_v4().to_string()[..4]);
+                return Ok(Some(ScreenTransition::ToPlayerNameInput(
+                    TextEditState::new(&initial_name),
+                )));
             }
             input::AnyKeyAction::Advance => {
                 app.mode_select_choice =

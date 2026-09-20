@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{
     Alignment, Constraint, Direction as LayoutDirection, Layout, Position, Rect,
 };
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
@@ -23,6 +23,7 @@ use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
 use crate::game::{BombPhase, Game, GameOverChoice, GameStatus};
 use crate::lobby::{LobbyPhase, LobbyState};
+use crate::text_edit::TextEditState;
 use crate::ui::colors;
 
 use super::intro;
@@ -56,6 +57,11 @@ const HELP_OVERLAY_PERCENT_Y: u16 = 95;
 /// 対戦ロビー画面(#256)の枠の高さ(`centered_rect`のパーセント指定)。候補リストが
 /// 伸びても収まるよう、ヘルプ画面と同程度に取る。
 const LOBBY_OVERLAY_PERCENT_Y: u16 = 60;
+
+/// 表示名入力画面(#270)の枠の大きさ。内容は見出し・空行・入力行・空行・操作案内2行の
+/// 6行で固定のため、パーセントではなく行数・桁数で取る(上下ボーダー2行を含む)。
+const PLAYER_NAME_INPUT_BOX_W: u16 = 52;
+const PLAYER_NAME_INPUT_BOX_H: u16 = 8;
 
 /// 巻き戻し中オーバーレイ(#233)の枠の高さ(行数)。内容2行+上下ボーダー2行。
 /// 中央ではなく画面下端に寄せるため、割合ではなく固定行数で指定する(GameOver
@@ -505,6 +511,93 @@ pub fn draw_network_lobby(frame: &mut Frame, lobby: &LobbyState) {
         .style(Style::default().bg(colors::LETTERBOX_BG))
         .alignment(Alignment::Left);
     frame.render_widget(paragraph, lobby_area);
+}
+
+// ---------------------------------------------------------------------------
+// 表示名の入力画面(#270)
+// ---------------------------------------------------------------------------
+
+/// 編集中の1行を、カーソル位置と選択範囲が見える形のSpan列へ組む。
+///
+/// 選択範囲は背景色で塗り、カーソル位置は反転表示にする。カーソルが選択範囲の内側にある
+/// (後ろから前へ選択した)場合は選択の塗りをそのまま優先し、カーソルの反転は出さない
+/// (選択の端がカーソルなので、範囲が見えていれば位置も分かる)。カーソルが末尾にある
+/// ときは、文字が無いので空白1つを反転表示してそこに置く。
+fn player_name_input_spans(state: &TextEditState, text_style: Style) -> Vec<Span<'static>> {
+    let cursor_style = text_style.add_modifier(Modifier::REVERSED);
+    let selection_style = text_style.bg(Color::DarkGray);
+    let selection = state.selection_range();
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (index, c) in state.chars().iter().enumerate() {
+        let selected = selection.is_some_and(|(start, end)| index >= start && index < end);
+        let style = if selected {
+            selection_style
+        } else if index == state.cursor() {
+            cursor_style
+        } else {
+            text_style
+        };
+        spans.push(Span::styled(c.to_string(), style));
+    }
+    if state.cursor() >= state.chars().len() {
+        spans.push(Span::styled(" ".to_string(), cursor_style));
+    }
+    spans
+}
+
+/// 表示名の入力画面(`Screen::PlayerNameInput`)を描画する(#270)。ロビー画面と同じ
+/// 中央の枠付きボックスに、見出し・編集中の1行・操作案内を出す。
+pub fn draw_player_name_input(frame: &mut Frame, state: &TextEditState) {
+    let area = frame.area();
+
+    frame.buffer_mut().set_style(
+        area,
+        Style::default()
+            .fg(colors::LETTERBOX_BG)
+            .bg(colors::LETTERBOX_BG),
+    );
+
+    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+    let box_area =
+        centered_fixed_rect(PLAYER_NAME_INPUT_BOX_W, PLAYER_NAME_INPUT_BOX_H, frame_rect);
+    frame.render_widget(Clear, box_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let heading_style = Style::default()
+        .fg(colors::PANEL_BORDER)
+        .bg(colors::LETTERBOX_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let lines = vec![
+        Line::from(Span::styled("== 名前を入力 ==".to_string(), heading_style)),
+        Line::from(""),
+        Line::from(player_name_input_spans(state, text_style)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter: 決定 / Esc: タイトルへ".to_string(),
+            text_style,
+        )),
+        Line::from(Span::styled(
+            "Ctrl+A: 全選択 / Shift+←→: 範囲選択".to_string(),
+            text_style,
+        )),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::default().bg(colors::LETTERBOX_BG))
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, box_area);
 }
 
 // ---------------------------------------------------------------------------
@@ -3910,6 +4003,95 @@ mod tests {
             &render_network_lobby(&lobby),
             "相手に断られました"
         ));
+    }
+
+    // --- 表示名の入力画面(#270) ---
+
+    /// 表示名入力画面を実描画して、画面に見えている文字を返す。
+    fn render_player_name_input(state: &TextEditState) -> String {
+        rendered_screen_text(|frame| draw_player_name_input(frame, state))
+    }
+
+    #[test]
+    fn the_name_input_shows_the_edited_text_and_the_key_hints() {
+        // 編集中の内容と操作案内が枠に収まって見えることを実描画で確認する。
+        let state = TextEditState::new("Player-1a2b");
+        let text = render_player_name_input(&state);
+
+        assert!(
+            screen_shows(&text, "== 名前を入力 =="),
+            "見出しが出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Player-1a2b"),
+            "編集中の名前が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Enter: 決定 / Esc: タイトルへ"),
+            "決定/取り消しの案内がクリップされている:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "Ctrl+A: 全選択"),
+            "全選択の案内がクリップされている:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_name_input_shows_multibyte_text_as_it_is() {
+        // 日本語の名前でも、入力した文字がそのまま出る。
+        let state = TextEditState::new("よっち");
+        assert!(screen_shows(&render_player_name_input(&state), "よっち"));
+    }
+
+    #[test]
+    fn the_name_input_marks_the_cursor_position() {
+        // カーソル位置は反転表示にする。末尾にある場合は空白1つぶんを反転させる。
+        let base = Style::default();
+        let mut state = TextEditState::new("ab");
+        let spans = player_name_input_spans(&state, base);
+        assert_eq!(spans.len(), 3, "文字2つ+末尾カーソルの空白1つ");
+        assert_eq!(spans[2].content, " ");
+        assert!(
+            spans[2].style.add_modifier.contains(Modifier::REVERSED),
+            "末尾のカーソルが反転表示になっていない"
+        );
+        assert!(!spans[0].style.add_modifier.contains(Modifier::REVERSED));
+
+        // 文字の上にある場合はその文字を反転し、末尾の空白は足さない。
+        state.move_left(false);
+        let spans = player_name_input_spans(&state, base);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[1].content, "b");
+        assert!(
+            spans[1].style.add_modifier.contains(Modifier::REVERSED),
+            "カーソル位置の文字が反転表示になっていない"
+        );
+    }
+
+    #[test]
+    fn the_name_input_highlights_the_selected_range() {
+        // 選択範囲は背景色で塗る(選択の外の文字は塗らない)。
+        let base = Style::default();
+        let mut state = TextEditState::new("abc");
+        state.move_to_start(false);
+        state.move_right(true);
+        state.move_right(true);
+        assert_eq!(state.selection_range(), Some((0, 2)));
+
+        let spans = player_name_input_spans(&state, base);
+        assert_eq!(spans.len(), 3, "選択中は末尾カーソルの空白を足さない");
+        assert_eq!(spans[0].style.bg, Some(Color::DarkGray));
+        assert_eq!(spans[1].style.bg, Some(Color::DarkGray));
+        assert_eq!(spans[2].style.bg, None, "選択の外は塗らない");
+    }
+
+    #[test]
+    fn the_name_input_shows_a_cursor_even_when_the_text_is_empty() {
+        // 全消しした状態でもカーソルが見えるようにする。
+        let spans = player_name_input_spans(&TextEditState::new(""), Style::default());
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, " ");
+        assert!(spans[0].style.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

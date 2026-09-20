@@ -16,12 +16,15 @@ use crate::game::{GameEvent, GameStatus};
 /// MUSIC設定・現在の画面から、実際にタイトル画面用BGMを鳴らすべきかを判定する。
 /// タイトル画面にいる間だけ鳴らす。
 pub fn effective_title_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
-    // モードセレクト画面・対戦ロビー(#256)はタイトルから直接つながる短い経由画面のため、
-    // タイトルBGMをそのまま鳴らし続ける(往復で途切れさせない)。
+    // モードセレクト画面・表示名入力(#270)・対戦ロビー(#256)はタイトルから直接つながる
+    // 短い経由画面のため、タイトルBGMをそのまま鳴らし続ける(往復で途切れさせない)。
     settings_music_enabled
         && matches!(
             screen,
-            Screen::Title | Screen::ModeSelect | Screen::NetworkLobby(_)
+            Screen::Title
+                | Screen::ModeSelect
+                | Screen::PlayerNameInput(_)
+                | Screen::NetworkLobby(_)
         )
 }
 
@@ -33,8 +36,12 @@ pub fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Scr
         return false;
     }
     match screen {
-        // ロビー(#256)はタイトルBGMを鳴らし続ける経由画面のため、こちらは無音にする。
-        Screen::Title | Screen::ModeSelect | Screen::NetworkLobby(_) => false,
+        // 表示名入力(#270)・ロビー(#256)はタイトルBGMを鳴らし続ける経由画面のため、
+        // こちらは無音にする。
+        Screen::Title
+        | Screen::ModeSelect
+        | Screen::PlayerNameInput(_)
+        | Screen::NetworkLobby(_) => false,
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
         // 対戦中(#252)は自分の盤面の進行状態で判断する。対戦には一時停止が無く、
         // 決着(クリア/脱落)後はプレイ中BGMを止める点は通常プレイと同じ。
