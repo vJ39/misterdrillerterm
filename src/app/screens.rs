@@ -549,63 +549,24 @@ pub fn tick_playing(
                 };
             }
             // G: 無敵の単独トグル。オートプレイとは独立して切り替えられる。
-            InputAction::DebugToggleInvincible => {
-                game.set_invincible(!game.is_invincible());
-            }
-            InputAction::DebugUnifyNearbyColors => {
-                let events = game.debug_unify_nearby_colors();
-                handle_events(
-                    &events,
-                    app.mixer.as_ref(),
-                    &app.se_enabled,
-                    app.settings.se_volume_percent,
-                );
-            }
-            InputAction::DebugAddLife => game.debug_add_life(),
-            InputAction::DebugFillAir => game.debug_fill_air(),
-            InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
-            InputAction::DebugStarifyVisibleScreen => game.debug_starify_visible_screen(),
-            InputAction::DebugPlaceBomb => game.debug_place_bomb(),
-            InputAction::DebugReceiveOpponentAttack => game.debug_receive_opponent_attack(),
-            // 速度系デバッグショートカット([ ] - = , .)。落下・揺れの速度は
-            // スナップショット(Game丸ごと)にも含まれるため、変更前の履歴へ
-            // 戻ると変更を取り消したのと同じことになる。混乱を避けるため、
-            // 速度を変えた時点で履歴を捨てる(#233)。
-            InputAction::DebugBlockFallSlower => {
-                app.rewind_history.clear();
-                game.debug_adjust_block_fall_speed(false);
-                app.settings.block_fall_tick_ms = game.block_fall_tick_ms();
-                app.settings.save();
-            }
-            InputAction::DebugBlockFallFaster => {
-                app.rewind_history.clear();
-                game.debug_adjust_block_fall_speed(true);
-                app.settings.block_fall_tick_ms = game.block_fall_tick_ms();
-                app.settings.save();
-            }
-            InputAction::DebugPlayerFallSlower => {
-                app.rewind_history.clear();
-                game.debug_adjust_player_fall_speed(false);
-                app.settings.player_fall_tick_ms = game.player_fall_tick_ms();
-                app.settings.save();
-            }
-            InputAction::DebugPlayerFallFaster => {
-                app.rewind_history.clear();
-                game.debug_adjust_player_fall_speed(true);
-                app.settings.player_fall_tick_ms = game.player_fall_tick_ms();
-                app.settings.save();
-            }
-            InputAction::DebugShakeDurationLonger => {
-                app.rewind_history.clear();
-                game.debug_adjust_shake_duration(true);
-                app.settings.shake_duration_ms = game.shake_duration_ms();
-                app.settings.save();
-            }
-            InputAction::DebugShakeDurationShorter => {
-                app.rewind_history.clear();
-                game.debug_adjust_shake_duration(false);
-                app.settings.shake_duration_ms = game.shake_duration_ms();
-                app.settings.save();
+            // #313: Vキー対戦(#296)限定でこれ以降の14項目(DebugToggleAutopilotを除く)を
+            // 解禁するため、共通処理は`apply_debug_shortcut`へ抽出した(位置を移すだけで
+            // 動作は変えていない)。
+            InputAction::DebugToggleInvincible
+            | InputAction::DebugUnifyNearbyColors
+            | InputAction::DebugAddLife
+            | InputAction::DebugFillAir
+            | InputAction::DebugClearAbovePlayer
+            | InputAction::DebugStarifyVisibleScreen
+            | InputAction::DebugPlaceBomb
+            | InputAction::DebugReceiveOpponentAttack
+            | InputAction::DebugBlockFallSlower
+            | InputAction::DebugBlockFallFaster
+            | InputAction::DebugPlayerFallSlower
+            | InputAction::DebugPlayerFallFaster
+            | InputAction::DebugShakeDurationLonger
+            | InputAction::DebugShakeDurationShorter => {
+                apply_debug_shortcut(action, app, game);
             }
         }
     }
@@ -695,6 +656,76 @@ pub fn tick_playing(
     Ok(None)
 }
 
+/// デバッグショートカット14項目(#313)。`tick_playing`から抽出し、Vキー対戦(#296)限定で
+/// 解禁する対戦画面(`tick_battle`)とも共有する。戻り値はこの14項目のいずれかとして
+/// 処理したか(該当しなければfalse)。DebugToggleAutopilotは対象外(対戦が人間対AIの体を
+/// 成さなくなるため)で、`tick_playing`にそのまま残す。
+fn apply_debug_shortcut(action: InputAction, app: &mut App, game: &mut Game) -> bool {
+    match action {
+        // G: 無敵の単独トグル。オートプレイとは独立して切り替えられる。
+        InputAction::DebugToggleInvincible => {
+            game.set_invincible(!game.is_invincible());
+        }
+        InputAction::DebugUnifyNearbyColors => {
+            let events = game.debug_unify_nearby_colors();
+            handle_events(
+                &events,
+                app.mixer.as_ref(),
+                &app.se_enabled,
+                app.settings.se_volume_percent,
+            );
+        }
+        InputAction::DebugAddLife => game.debug_add_life(),
+        InputAction::DebugFillAir => game.debug_fill_air(),
+        InputAction::DebugClearAbovePlayer => game.debug_clear_above_player(),
+        InputAction::DebugStarifyVisibleScreen => game.debug_starify_visible_screen(),
+        InputAction::DebugPlaceBomb => game.debug_place_bomb(),
+        InputAction::DebugReceiveOpponentAttack => game.debug_receive_opponent_attack(),
+        // 速度系デバッグショートカット([ ] - = , .)。落下・揺れの速度は
+        // スナップショット(Game丸ごと)にも含まれるため、変更前の履歴へ
+        // 戻ると変更を取り消したのと同じことになる。混乱を避けるため、
+        // 速度を変えた時点で履歴を捨てる(#233)。
+        InputAction::DebugBlockFallSlower => {
+            app.rewind_history.clear();
+            game.debug_adjust_block_fall_speed(false);
+            app.settings.block_fall_tick_ms = game.block_fall_tick_ms();
+            app.settings.save();
+        }
+        InputAction::DebugBlockFallFaster => {
+            app.rewind_history.clear();
+            game.debug_adjust_block_fall_speed(true);
+            app.settings.block_fall_tick_ms = game.block_fall_tick_ms();
+            app.settings.save();
+        }
+        InputAction::DebugPlayerFallSlower => {
+            app.rewind_history.clear();
+            game.debug_adjust_player_fall_speed(false);
+            app.settings.player_fall_tick_ms = game.player_fall_tick_ms();
+            app.settings.save();
+        }
+        InputAction::DebugPlayerFallFaster => {
+            app.rewind_history.clear();
+            game.debug_adjust_player_fall_speed(true);
+            app.settings.player_fall_tick_ms = game.player_fall_tick_ms();
+            app.settings.save();
+        }
+        InputAction::DebugShakeDurationLonger => {
+            app.rewind_history.clear();
+            game.debug_adjust_shake_duration(true);
+            app.settings.shake_duration_ms = game.shake_duration_ms();
+            app.settings.save();
+        }
+        InputAction::DebugShakeDurationShorter => {
+            app.rewind_history.clear();
+            game.debug_adjust_shake_duration(false);
+            app.settings.shake_duration_ms = game.shake_duration_ms();
+            app.settings.save();
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// 対戦中(`Screen::Battle`)に受け付ける入力の分類(#252。spec.md 12.5)。
 ///
 /// 対戦中に使えない操作のための個別の無効化フラグは持たず、ここに挙げたもの以外を
@@ -710,12 +741,16 @@ enum BattleInput {
     ToggleMusic,
     /// SEのトグル。扱いは`ToggleMusic`と同じ。
     ToggleSe,
+    /// Vキー対戦(#296)限定で有効なデバッグショートカット(#313)。DebugToggleAutopilotを
+    /// 除く14項目が対象。通常の対戦(通信あり)では`Ignored`になる。
+    Debug(InputAction),
     /// 対戦中は無視する操作(一時停止・巻き戻し・設定/ヘルプ・デバッグ系等)。
     Ignored,
 }
 
-/// 入力を対戦中の扱い(`BattleInput`)へ振り分ける。
-fn classify_battle_input(action: InputAction) -> BattleInput {
+/// 入力を対戦中の扱い(`BattleInput`)へ振り分ける。`is_local_ai_only`はVキー対戦(#296)
+/// かどうか(#313。デバッグショートカットの解禁判定に使う)。
+fn classify_battle_input(action: InputAction, is_local_ai_only: bool) -> BattleInput {
     match action {
         InputAction::MoveLeft
         | InputAction::MoveRight
@@ -725,19 +760,39 @@ fn classify_battle_input(action: InputAction) -> BattleInput {
         InputAction::ToggleMusic => BattleInput::ToggleMusic,
         InputAction::ToggleSe => BattleInput::ToggleSe,
         InputAction::Quit => BattleInput::Quit,
+        // #313: Vキー対戦限定でデバッグショートカットを有効にする。DebugToggleAutopilotは
+        // 対戦が人間対AIの体を成さなくなるため対象外。
+        InputAction::DebugUnifyNearbyColors
+        | InputAction::DebugAddLife
+        | InputAction::DebugFillAir
+        | InputAction::DebugClearAbovePlayer
+        | InputAction::DebugStarifyVisibleScreen
+        | InputAction::DebugPlaceBomb
+        | InputAction::DebugReceiveOpponentAttack
+        | InputAction::DebugBlockFallSlower
+        | InputAction::DebugBlockFallFaster
+        | InputAction::DebugPlayerFallSlower
+        | InputAction::DebugPlayerFallFaster
+        | InputAction::DebugShakeDurationLonger
+        | InputAction::DebugShakeDurationShorter
+        | InputAction::DebugToggleInvincible
+            if is_local_ai_only =>
+        {
+            BattleInput::Debug(action)
+        }
         _ => BattleInput::Ignored,
     }
 }
 
 /// このフレームにキューされた入力列から、自分の入力として採用する1つを選ぶ。
 /// 2つ目以降は次フレームへ持ち越さず捨てる(1フレームにつき高々1アクション。spec.md 12.2)。
-fn first_local_action(actions: &[InputAction]) -> Option<InputAction> {
-    actions
-        .iter()
-        .find_map(|&action| match classify_battle_input(action) {
+fn first_local_action(actions: &[InputAction], is_local_ai_only: bool) -> Option<InputAction> {
+    actions.iter().find_map(
+        |&action| match classify_battle_input(action, is_local_ai_only) {
             BattleInput::Local(local) => Some(local),
             _ => None,
-        })
+        },
+    )
 }
 
 /// 対戦中(`Screen::Battle`)の1フレーム(#252。spec.md 12章)。
@@ -751,19 +806,25 @@ pub fn tick_battle(
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<Option<ScreenTransition>> {
     let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
+    // #313: Vキー対戦(#296)かどうかで、デバッグショートカットの解禁と決着前Escの扱いが
+    // 変わる。このフレームで使い回すため1回だけ求める。
+    let is_local_ai_only = state.is_local_ai_only();
 
     // 決着後は結果表示だけの画面になる(#256)。ここを抜ける操作は「表示名の入力画面へ
-    // 戻る」のみで(#321)、盤面の操作・音声トグルはもう意味を持たない。
-    if battle_leaves_screen(state.outcome(), &actions) {
+    // 戻る」のみで(#321)、盤面の操作・音声トグルはもう意味を持たない。Vキー対戦は
+    // 他の参加者に影響しないため、決着前でもEscで中断できる(#313)。
+    if battle_leaves_screen(state.outcome(), &actions)
+        || local_ai_battle_interrupted_early(is_local_ai_only, &actions)
+    {
         state.notify_bye();
         return Ok(Some(battle_exit_transition(&state.player_names[0])));
     }
 
     for &action in &actions {
-        match classify_battle_input(action) {
+        match classify_battle_input(action, is_local_ai_only) {
             // 決着前のEscは無視する(#303)。以前はここで即タイトルへ戻していたが、
             // 対戦相手を置いて抜けられてしまうため、決着後の`battle_leaves_screen`に
-            // よる離脱だけを残した。
+            // よる離脱だけを残した(Vキー対戦の決着前Escは上の早期returnで処理済み)。
             BattleInput::Quit => {}
             BattleInput::ToggleMusic => {
                 app.settings.music_enabled = !app.settings.music_enabled;
@@ -778,6 +839,11 @@ pub fn tick_battle(
                     .store(app.settings.se_enabled, Ordering::Relaxed);
                 app.settings.save();
             }
+            // #313: Vキー対戦限定のデバッグショートカット。`tick_playing`と共通の
+            // `apply_debug_shortcut`へそのまま渡す。
+            BattleInput::Debug(action) => {
+                apply_debug_shortcut(action, app, &mut state.games[0]);
+            }
             // 自分の操作は1フレームにつき高々1つのため、`first_local_action`でまとめて選ぶ。
             BattleInput::Local(_) | BattleInput::Ignored => {}
         }
@@ -787,7 +853,7 @@ pub fn tick_battle(
     let now = Instant::now();
     let delta = now.duration_since(app.last_tick);
     app.last_tick = now;
-    state.advance(delta, first_local_action(&actions));
+    state.advance(delta, first_local_action(&actions, is_local_ai_only));
 
     let events = state.take_local_events();
     handle_events(
@@ -832,6 +898,13 @@ fn leaves_battle_result(action: InputAction) -> bool {
 /// 待機中の案内を出す(#302)。
 fn battle_leaves_screen(outcome: Option<BattleOutcome>, actions: &[InputAction]) -> bool {
     outcome.is_some() && actions.iter().any(|&action| leaves_battle_result(action))
+}
+
+/// Vキー対戦(#296)限定で、決着前でもEscで中断できるか(#313)。通常の対戦(通信あり)は
+/// 相手を置いて抜けられてしまうため、決着前のEscは`battle_leaves_screen`の対象外の
+/// まま(#303)にする。
+fn local_ai_battle_interrupted_early(is_local_ai_only: bool, actions: &[InputAction]) -> bool {
+    is_local_ai_only && actions.contains(&InputAction::Quit)
 }
 
 /// 決着後に対戦画面を抜けた先の遷移(#321)。タイトルではなく表示名の入力画面へ戻し、
@@ -1485,7 +1558,7 @@ mod tests {
             InputAction::Drill,
         ] {
             assert_eq!(
-                classify_battle_input(action),
+                classify_battle_input(action, false),
                 BattleInput::Local(action),
                 "{action:?}は対戦中の自分の入力として扱うはず"
             );
@@ -1497,26 +1570,49 @@ mod tests {
         // 音声トグルはローカル専用でシミュレーションに影響しないため常時受け付ける。
         // Escは決着後に結果表示から抜ける操作として扱う(決着前は無視。#303)。
         assert_eq!(
-            classify_battle_input(InputAction::ToggleMusic),
+            classify_battle_input(InputAction::ToggleMusic, false),
             BattleInput::ToggleMusic
         );
         assert_eq!(
-            classify_battle_input(InputAction::ToggleSe),
+            classify_battle_input(InputAction::ToggleSe, false),
             BattleInput::ToggleSe
         );
-        assert_eq!(classify_battle_input(InputAction::Quit), BattleInput::Quit);
+        assert_eq!(
+            classify_battle_input(InputAction::Quit, false),
+            BattleInput::Quit
+        );
     }
 
     #[test]
     fn battle_ignores_pause_rewind_overlay_and_debug_actions() {
-        // spec.md 12.5の無効化は、これらを握りつぶすことで実現する。
+        // spec.md 12.5の無効化は、これらを握りつぶすことで実現する。DebugToggleAutopilotは
+        // #313でも対象外(Vキー対戦が人間対AIの体を成さなくなるため)なので、
+        // is_local_ai_onlyの値に関わらず無視されることも合わせて見る。
+        for is_local_ai_only in [false, true] {
+            for action in [
+                InputAction::TogglePause,
+                InputAction::Rewind,
+                InputAction::OpenSettings,
+                InputAction::OpenHelp,
+                InputAction::Confirm,
+                InputAction::UnboundKey,
+                InputAction::DebugToggleAutopilot,
+            ] {
+                assert_eq!(
+                    classify_battle_input(action, is_local_ai_only),
+                    BattleInput::Ignored,
+                    "{action:?}(is_local_ai_only={is_local_ai_only})は対戦中には無視するはず"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn battle_enables_the_debug_shortcuts_only_for_a_local_ai_only_battle() {
+        // #313: Vキー対戦(#296。is_local_ai_only=true)限定でDebugToggleAutopilotを除く
+        // 14項目を解禁する。通信あり対戦(false)では従来通りIgnoredのまま(既存動作の
+        // 回帰確認)。
         for action in [
-            InputAction::TogglePause,
-            InputAction::Rewind,
-            InputAction::OpenSettings,
-            InputAction::OpenHelp,
-            InputAction::Confirm,
-            InputAction::UnboundKey,
             InputAction::DebugUnifyNearbyColors,
             InputAction::DebugAddLife,
             InputAction::DebugFillAir,
@@ -1524,19 +1620,23 @@ mod tests {
             InputAction::DebugStarifyVisibleScreen,
             InputAction::DebugPlaceBomb,
             InputAction::DebugReceiveOpponentAttack,
-            InputAction::DebugToggleAutopilot,
-            InputAction::DebugToggleInvincible,
             InputAction::DebugBlockFallSlower,
             InputAction::DebugBlockFallFaster,
             InputAction::DebugPlayerFallSlower,
             InputAction::DebugPlayerFallFaster,
             InputAction::DebugShakeDurationLonger,
             InputAction::DebugShakeDurationShorter,
+            InputAction::DebugToggleInvincible,
         ] {
             assert_eq!(
-                classify_battle_input(action),
+                classify_battle_input(action, true),
+                BattleInput::Debug(action),
+                "{action:?}はVキー対戦なら解禁されるはず"
+            );
+            assert_eq!(
+                classify_battle_input(action, false),
                 BattleInput::Ignored,
-                "{action:?}は対戦中には無視するはず"
+                "{action:?}は通信あり対戦では無視のままのはず"
             );
         }
     }
@@ -1551,14 +1651,20 @@ mod tests {
             InputAction::MoveRight,
             InputAction::Drill,
         ];
-        assert_eq!(first_local_action(&actions), Some(InputAction::MoveRight));
+        assert_eq!(
+            first_local_action(&actions, false),
+            Some(InputAction::MoveRight)
+        );
     }
 
     #[test]
     fn a_frame_without_any_gameplay_action_produces_no_local_input() {
-        assert_eq!(first_local_action(&[]), None);
+        assert_eq!(first_local_action(&[], false), None);
         assert_eq!(
-            first_local_action(&[InputAction::TogglePause, InputAction::DebugAddLife]),
+            first_local_action(
+                &[InputAction::TogglePause, InputAction::DebugAddLife],
+                false
+            ),
             None
         );
     }
@@ -1645,13 +1751,16 @@ mod tests {
     }
 
     /// `tick_battle`の離脱判定だけを1フレーム分再現する。端末と実キー入力を伴わせないため、
-    /// 決着状態・自分の名前・そのフレームの入力を直接渡す。
+    /// 決着状態・Vキー対戦(#296)かどうか・自分の名前・そのフレームの入力を直接渡す。
     fn feed_battle_exit_frame(
         outcome: Option<BattleOutcome>,
+        is_local_ai_only: bool,
         own_name: &str,
         actions: &[InputAction],
     ) -> Option<ScreenTransition> {
-        if battle_leaves_screen(outcome, actions) {
+        if battle_leaves_screen(outcome, actions)
+            || local_ai_battle_interrupted_early(is_local_ai_only, actions)
+        {
             return Some(battle_exit_transition(own_name));
         }
         None
@@ -1665,7 +1774,12 @@ mod tests {
             InputAction::TogglePause,
             InputAction::Quit,
         ] {
-            match feed_battle_exit_frame(Some(BattleOutcome::Ranked(1)), "Player-9f2a", &[action]) {
+            match feed_battle_exit_frame(
+                Some(BattleOutcome::Ranked(1)),
+                false,
+                "Player-9f2a",
+                &[action],
+            ) {
                 Some(ScreenTransition::ToPlayerNameInputDiscardingGame(edit)) => {
                     assert_eq!(edit.text(), "Player-9f2a", "直前の名前を初期値に入れる");
                 }
@@ -1676,10 +1790,20 @@ mod tests {
 
     #[test]
     fn the_battle_exit_does_not_happen_before_the_outcome_is_decided() {
-        // 決着前(#303)は離脱操作でも遷移しない。
+        // 決着前(#303)は離脱操作でも遷移しない。通信あり対戦が前提(Vキー対戦の決着前
+        // Esc中断は#313で別に許可する。次のテストを参照)。
         assert!(
-            feed_battle_exit_frame(None, "Player-9f2a", &[InputAction::Quit]).is_none(),
+            feed_battle_exit_frame(None, false, "Player-9f2a", &[InputAction::Quit]).is_none(),
             "決着前のEscでは対戦画面を抜けない"
+        );
+    }
+
+    #[test]
+    fn a_local_ai_only_battle_exits_early_with_escape_before_the_outcome_is_decided() {
+        // #313: Vキー対戦(#296)は他の参加者に影響しないため、決着前でもEscで中断できる。
+        assert!(
+            feed_battle_exit_frame(None, true, "Player-9f2a", &[InputAction::Quit]).is_some(),
+            "Vキー対戦は決着前のEscでも対戦画面を抜けられるはず"
         );
     }
 
@@ -1693,6 +1817,7 @@ mod tests {
 
         match feed_battle_exit_frame(
             Some(BattleOutcome::Ranked(1)),
+            false,
             &state.player_names[0],
             &[InputAction::Confirm],
         ) {

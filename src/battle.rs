@@ -304,6 +304,12 @@ impl BattleState {
         self.outcome
     }
 
+    /// Vキー(#296)の通信なしAI対戦かどうか(#313)。通信あり対戦は必ず`from_peer_streams`
+    /// (`peers`はSome)を経由するため、`peers`がNoneならVキー対戦と判定できる。
+    pub fn is_local_ai_only(&self) -> bool {
+        self.peers.is_none()
+    }
+
     /// 自分の盤面の描画用。#299で固定tickを廃止し、自分の操作は受け取った瞬間に
     /// `games[0]`へ適用されるようになったため、先行反映用のコピー(#292)は不要になり、
     /// 常に自分の盤面そのものを返す(呼び出し元は変更しなくてよい)。
@@ -2683,6 +2689,18 @@ mod tests {
 
         assert!(state.peers.is_none(), "AI対戦中に通信路が生えてはいけない");
         state.notify_bye();
+    }
+
+    #[test]
+    fn is_local_ai_only_reflects_the_construction_path() {
+        // #313: デバッグショートカット解禁の判定に使うため、生成経路ごとに正しい値を
+        // 返すことを確認する。Vキー対戦(#296のnew_local_vs_ai)はtrue、通信あり
+        // (#274のfrom_peer_streams)はfalseになるはず。
+        let local_ai = ai_battle(1);
+        assert!(local_ai.is_local_ai_only());
+
+        let (networked, _raw_peers) = battle_with_raw_peers(2, 9401);
+        assert!(!networked.is_local_ai_only());
     }
 
     #[test]
