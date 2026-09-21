@@ -16,16 +16,18 @@ use crate::game::{GameEvent, GameStatus};
 /// MUSIC設定・現在の画面から、実際にタイトル画面用BGMを鳴らすべきかを判定する。
 /// タイトル画面にいる間だけ鳴らす。
 pub fn effective_title_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
-    // モードセレクト画面・表示名入力(#270)・対戦ロビー(#256)はタイトルから直接つながる
-    // 短い経由画面のため、タイトルBGMをそのまま鳴らし続ける(往復で途切れさせない)。
-    settings_music_enabled
-        && matches!(
-            screen,
-            Screen::Title
-                | Screen::ModeSelect
-                | Screen::PlayerNameInput(_)
-                | Screen::NetworkLobby(_)
-        )
+    // モードセレクト画面はタイトルから直接つながる短い経由画面のため、タイトルBGMを
+    // そのまま鳴らし続ける(往復で途切れさせない)。表示名入力(#270)・対戦ロビー(#256)は
+    // 対戦準備BGM(`effective_battle_prep_bgm_enabled`)の担当に切り替えた
+    // (TERM独自拡張。#328)。
+    settings_music_enabled && matches!(screen, Screen::Title | Screen::ModeSelect)
+}
+
+/// MUSIC設定・現在の画面から、実際に対戦準備BGMを鳴らすべきかを判定する
+/// (TERM独自拡張。#328)。表示名入力(#270)からロビー(#256)で対戦が成立するまでの間
+/// 鳴らす(以前はこの間もタイトルBGMを鳴らし続けていたが、専用の曲に切り替えた)。
+pub fn effective_battle_prep_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+    settings_music_enabled && matches!(screen, Screen::PlayerNameInput(_) | Screen::NetworkLobby(_))
 }
 
 /// MUSIC設定・現在の画面から、実際にプレイ中BGM(交代制プレイリスト)を鳴らすべきかを
@@ -36,16 +38,15 @@ pub fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Scr
         return false;
     }
     match screen {
-        // 表示名入力(#270)・ロビー(#256)はタイトルBGMを鳴らし続ける経由画面のため、
-        // こちらは無音にする。
+        // 表示名入力(#270)・ロビー(#256)は対戦準備BGMの担当のため、こちらは無音にする。
         Screen::Title
         | Screen::ModeSelect
         | Screen::PlayerNameInput(_)
         | Screen::NetworkLobby(_) => false,
         Screen::Playing(game) => matches!(game.status, GameStatus::Playing | GameStatus::Paused),
-        // 対戦中(#252)は自分の盤面の進行状態で判断する。対戦には一時停止が無く、
-        // 決着(クリア/脱落)後はプレイ中BGMを止める点は通常プレイと同じ。
-        Screen::Battle(state) => state.games[0].status == GameStatus::Playing,
+        // 対戦中(#252)は対戦中BGM・対戦リザルトBGMの専用2系統に分けたため、こちらは
+        // 常に無音にする(TERM独自拡張。#328)。
+        Screen::Battle(_) => false,
         Screen::Settings => true,
         // 独立画面としてのヘルプはジュークボックス試聴の置き場のため、プレイ中BGMを
         // 流すと試聴と二重に聞こえてしまう。常に無音にし、聞こえる音は選んだ曲のプレビュー
@@ -54,10 +55,38 @@ pub fn effective_gameplay_bgm_enabled(settings_music_enabled: bool, screen: &Scr
     }
 }
 
-/// タイトルBGMを先頭から再生し直すべきかを、直前フレームの有効状態(`was_enabled`)と
-/// 現在の有効状態(`now_enabled`)から判定する。無効→有効に転じた瞬間だけtrueを返す
-/// (有効のまま/無効のままでは巻き戻さない)。
-pub fn should_restart_title_bgm(was_enabled: bool, now_enabled: bool) -> bool {
+/// MUSIC設定・現在の画面から、実際に1人プレイリザルトBGMを鳴らすべきかを判定する
+/// (TERM独自拡張。#328)。1人プレイでミス・ゴールした直後、ダイアログ表示中だけ鳴らす
+/// (プレイ中BGMはこの間`effective_gameplay_bgm_enabled`により止まっている)。
+pub fn effective_solo_result_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+    settings_music_enabled
+        && matches!(
+            screen,
+            Screen::Playing(game)
+                if matches!(game.status, GameStatus::GameOver | GameStatus::Cleared)
+        )
+}
+
+/// MUSIC設定・現在の画面から、実際に対戦中BGMを鳴らすべきかを判定する
+/// (TERM独自拡張。#328)。対戦中(#252)は自分の盤面がまだプレイ中の間だけ鳴らす。
+pub fn effective_battle_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+    settings_music_enabled
+        && matches!(screen, Screen::Battle(state) if state.games[0].status == GameStatus::Playing)
+}
+
+/// MUSIC設定・現在の画面から、実際に対戦リザルトBGMを鳴らすべきかを判定する
+/// (TERM独自拡張。#328)。自分の盤面が決着した後は、観戦中(#271)・リザルト表示中の
+/// どちらでも鳴らし続ける。
+pub fn effective_battle_result_bgm_enabled(settings_music_enabled: bool, screen: &Screen) -> bool {
+    settings_music_enabled
+        && matches!(screen, Screen::Battle(state) if state.games[0].status != GameStatus::Playing)
+}
+
+/// BGMを先頭から再生し直すべきかを、直前フレームの有効状態(`was_enabled`)と現在の
+/// 有効状態(`now_enabled`)から判定する。無効→有効に転じた瞬間だけtrueを返す
+/// (有効のまま/無効のままでは巻き戻さない)。6系統のBGM全てに共通する判定のため、
+/// 特定の曲に結びつかない名前にしている(TERM独自拡張。#328。旧名`should_restart_title_bgm`)。
+pub fn should_restart_bgm(was_enabled: bool, now_enabled: bool) -> bool {
     now_enabled && !was_enabled
 }
 
@@ -135,7 +164,27 @@ pub fn handle_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::battle::BattleState;
     use crate::game::Game;
+    use crate::lobby::LobbyState;
+    use crate::text_edit::TextEditState;
+
+    /// 対戦中(#252)の画面を、自分の盤面のstatusだけ指定して作るテスト用ヘルパー。
+    fn battle_screen_with_my_status(status: GameStatus) -> Screen {
+        let mut my_game = Game::new(1);
+        my_game.status = status;
+        Screen::Battle(Box::new(BattleState::new(
+            vec![my_game, Game::new(1)],
+            vec!["me".to_string(), "opponent".to_string()],
+        )))
+    }
+
+    /// 1人プレイ中の画面を、statusだけ指定して作るテスト用ヘルパー。
+    fn playing_screen_with_status(status: GameStatus) -> Screen {
+        let mut game = Game::new(1);
+        game.status = status;
+        Screen::Playing(Box::new(game))
+    }
 
     #[test]
     fn effective_title_bgm_enabled_is_true_only_on_title() {
@@ -149,6 +198,43 @@ mod tests {
         assert!(!effective_title_bgm_enabled(
             true,
             &Screen::Playing(Box::new(game))
+        ));
+    }
+
+    #[test]
+    fn effective_title_bgm_enabled_is_false_on_player_name_input_and_network_lobby() {
+        // 表示名入力(#270)・ロビー(#256)は対戦準備BGMの担当に切り替えたため、
+        // タイトルBGM側は鳴らないはず(TERM独自拡張。#328)。
+        let player_name_input = Screen::PlayerNameInput(TextEditState::new(""));
+        assert!(!effective_title_bgm_enabled(true, &player_name_input));
+
+        let lobby =
+            LobbyState::new_on_loopback("me".to_string()).expect("ループバックで開けるはず");
+        let network_lobby = Screen::NetworkLobby(Box::new(lobby));
+        assert!(!effective_title_bgm_enabled(true, &network_lobby));
+    }
+
+    #[test]
+    fn effective_battle_prep_bgm_enabled_is_true_only_on_player_name_input_and_network_lobby() {
+        // 表示名入力(#270)からロビー(#256)で対戦が成立するまでの間だけ鳴らす
+        // (TERM独自拡張。#328)。
+        let player_name_input = Screen::PlayerNameInput(TextEditState::new(""));
+        assert!(effective_battle_prep_bgm_enabled(true, &player_name_input));
+        assert!(!effective_battle_prep_bgm_enabled(
+            false,
+            &player_name_input
+        ));
+
+        let lobby =
+            LobbyState::new_on_loopback("me".to_string()).expect("ループバックで開けるはず");
+        let network_lobby = Screen::NetworkLobby(Box::new(lobby));
+        assert!(effective_battle_prep_bgm_enabled(true, &network_lobby));
+        assert!(!effective_battle_prep_bgm_enabled(false, &network_lobby));
+
+        assert!(!effective_battle_prep_bgm_enabled(true, &Screen::Title));
+        assert!(!effective_battle_prep_bgm_enabled(
+            true,
+            &Screen::Playing(Box::new(Game::new(1)))
         ));
     }
 
@@ -222,40 +308,127 @@ mod tests {
     }
 
     #[test]
-    fn effective_gameplay_bgm_enabled_follows_the_local_game_while_battling() {
-        // 対戦中(#252)は自分の盤面がプレイ中の間だけプレイ中BGMを鳴らし、決着後は止める。
-        use crate::battle::BattleState;
+    fn effective_gameplay_bgm_enabled_is_always_false_while_battling_regardless_of_status() {
+        // 対戦中(#252)は対戦中BGM・対戦リザルトBGMの専用2系統に分けたため、プレイ中BGM側は
+        // 自分の盤面のstatusに関わらず常に無音のはず(TERM独自拡張。#328)。
+        for status in [
+            GameStatus::Playing,
+            GameStatus::Paused,
+            GameStatus::GameOver,
+            GameStatus::Cleared,
+        ] {
+            let screen = battle_screen_with_my_status(status);
+            assert!(!effective_gameplay_bgm_enabled(true, &screen));
+            assert!(!effective_gameplay_bgm_enabled(false, &screen));
+        }
+    }
 
-        let battling = |local_status: GameStatus| {
-            let mut my_game = Game::new(1);
-            my_game.status = local_status;
-            Screen::Battle(Box::new(BattleState::new(
-                vec![my_game, Game::new(1)],
-                vec!["me".to_string(), "opponent".to_string()],
-            )))
-        };
-
-        assert!(effective_gameplay_bgm_enabled(
+    #[test]
+    fn effective_battle_bgm_enabled_is_true_only_while_the_local_game_is_playing() {
+        // 対戦中(#252)は自分の盤面がまだプレイ中の間だけ鳴らす(TERM独自拡張。#328)。
+        assert!(effective_battle_bgm_enabled(
             true,
-            &battling(GameStatus::Playing)
+            &battle_screen_with_my_status(GameStatus::Playing)
         ));
-        assert!(!effective_gameplay_bgm_enabled(
+        assert!(!effective_battle_bgm_enabled(
             false,
-            &battling(GameStatus::Playing)
+            &battle_screen_with_my_status(GameStatus::Playing)
         ));
-        assert!(!effective_gameplay_bgm_enabled(
+        for status in [
+            GameStatus::Paused,
+            GameStatus::GameOver,
+            GameStatus::Cleared,
+        ] {
+            assert!(!effective_battle_bgm_enabled(
+                true,
+                &battle_screen_with_my_status(status)
+            ));
+        }
+        assert!(!effective_battle_bgm_enabled(true, &Screen::Title));
+    }
+
+    #[test]
+    fn effective_battle_result_bgm_enabled_is_true_only_while_the_local_game_is_not_playing() {
+        // 自分の盤面が決着した後は、観戦中(#271)・リザルト表示中のどちらでも鳴らす
+        // (TERM独自拡張。#328)。
+        assert!(!effective_battle_result_bgm_enabled(
             true,
-            &battling(GameStatus::Cleared)
+            &battle_screen_with_my_status(GameStatus::Playing)
         ));
-        assert!(!effective_gameplay_bgm_enabled(
-            true,
-            &battling(GameStatus::GameOver)
-        ));
-        // 対戦画面はタイトル画面ではないため、タイトルBGM側は常に無音。
-        assert!(!effective_title_bgm_enabled(
-            true,
-            &battling(GameStatus::Playing)
-        ));
+        for status in [
+            GameStatus::Paused,
+            GameStatus::GameOver,
+            GameStatus::Cleared,
+        ] {
+            let screen = battle_screen_with_my_status(status);
+            assert!(effective_battle_result_bgm_enabled(true, &screen));
+            assert!(!effective_battle_result_bgm_enabled(false, &screen));
+        }
+        assert!(!effective_battle_result_bgm_enabled(true, &Screen::Title));
+    }
+
+    #[test]
+    fn effective_solo_result_bgm_enabled_is_true_only_after_game_over_or_cleared() {
+        // 1人プレイでミス・ゴールした直後のダイアログ表示中だけ鳴らす(TERM独自拡張。#328)。
+        for status in [GameStatus::GameOver, GameStatus::Cleared] {
+            let screen = playing_screen_with_status(status);
+            assert!(effective_solo_result_bgm_enabled(true, &screen));
+            assert!(!effective_solo_result_bgm_enabled(false, &screen));
+        }
+        for status in [GameStatus::Playing, GameStatus::Paused] {
+            assert!(!effective_solo_result_bgm_enabled(
+                true,
+                &playing_screen_with_status(status)
+            ));
+        }
+        assert!(!effective_solo_result_bgm_enabled(true, &Screen::Title));
+    }
+
+    #[test]
+    fn exactly_one_or_zero_of_the_six_bgm_kinds_is_enabled_on_any_screen() {
+        // 6系統(タイトル・対戦準備・プレイ中・1人プレイリザルト・対戦中・対戦リザルト)は
+        // 同時に2つ以上鳴ってはならない(TERM独自拡張。#328)。Screenの各バリアント・
+        // Game/BattleStateの各statusの組み合わせで、trueを返す関数が0個か1個だけである
+        // ことを確認する。
+        let lobby =
+            LobbyState::new_on_loopback("me".to_string()).expect("ループバックで開けるはず");
+
+        let mut labeled_screens: Vec<(&str, Screen)> = vec![
+            ("Title", Screen::Title),
+            ("ModeSelect", Screen::ModeSelect),
+            ("Settings", Screen::Settings),
+            ("Help", Screen::Help),
+            (
+                "PlayerNameInput",
+                Screen::PlayerNameInput(TextEditState::new("")),
+            ),
+            ("NetworkLobby", Screen::NetworkLobby(Box::new(lobby))),
+        ];
+        for status in [
+            GameStatus::Playing,
+            GameStatus::Paused,
+            GameStatus::GameOver,
+            GameStatus::Cleared,
+        ] {
+            labeled_screens.push(("Playing", playing_screen_with_status(status)));
+            labeled_screens.push(("Battle", battle_screen_with_my_status(status)));
+        }
+
+        for (label, screen) in &labeled_screens {
+            let flags = [
+                effective_title_bgm_enabled(true, screen),
+                effective_battle_prep_bgm_enabled(true, screen),
+                effective_gameplay_bgm_enabled(true, screen),
+                effective_solo_result_bgm_enabled(true, screen),
+                effective_battle_bgm_enabled(true, screen),
+                effective_battle_result_bgm_enabled(true, screen),
+            ];
+            let enabled_count = flags.iter().filter(|&&enabled| enabled).count();
+            assert!(
+                enabled_count <= 1,
+                "{label}で{enabled_count}個のBGMが同時に有効になっている"
+            );
+        }
     }
 
     #[test]
@@ -279,22 +452,22 @@ mod tests {
     }
 
     #[test]
-    fn should_restart_title_bgm_only_on_the_disabled_to_enabled_transition() {
+    fn should_restart_bgm_only_on_the_disabled_to_enabled_transition() {
         // 無効→有効に転じた瞬間だけ巻き戻すべきで、有効のまま/無効のままでは巻き戻さない。
         assert!(
-            should_restart_title_bgm(false, true),
+            should_restart_bgm(false, true),
             "無効→有効の遷移では巻き戻すはず"
         );
         assert!(
-            !should_restart_title_bgm(true, true),
+            !should_restart_bgm(true, true),
             "有効のままなら巻き戻さないはず"
         );
         assert!(
-            !should_restart_title_bgm(false, false),
+            !should_restart_bgm(false, false),
             "無効のままなら巻き戻さないはず"
         );
         assert!(
-            !should_restart_title_bgm(true, false),
+            !should_restart_bgm(true, false),
             "有効→無効の遷移では巻き戻さないはず"
         );
     }

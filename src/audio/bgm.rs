@@ -9,6 +9,10 @@
 //! Last_Coin_Standing.mp3 タイトル画面は、これで!」)。呼び出し側(main.rs)が
 //! 画面状態に応じて双方の`music_enabled`を排他的に(同時に両方trueにならないよう)
 //! 切り替えることで、常にどちらか一方だけが聞こえる。
+//!
+//! 対戦準備・対戦中・対戦リザルト・1人プレイリザルトの4系統を追加し、合計6系統に
+//! 拡張した(TERM独自拡張。#328)。仕組みは同じで、呼び出し側が画面状態に応じて
+//! 全系統の`music_enabled`を排他的に切り替える。
 
 use std::io::Cursor;
 use std::sync::Arc;
@@ -48,6 +52,21 @@ const GAMEPLAY_TRACKS: [&[u8]; 3] = [
     include_bytes!("../../assets/bgm.mp3"),       // Last Piece Dropping
     include_bytes!("../../assets/bgm-chitei.mp3"), // 地底のダンス
 ];
+
+/// 対戦準備BGM(TERM独自拡張。#328。原曲「Before The Final Strike」)。表示名入力から
+/// ロビーで対戦が始まるまでの間に流す。
+const BATTLE_PREP_TRACK: &[u8] = include_bytes!("../../assets/bgm-battle-prep.mp3");
+
+/// 対戦中BGM(TERM独自拡張。#328。原曲「地下のダンス」)。自分の盤面がまだプレイ中の間だけ流す。
+const BATTLE_TRACK: &[u8] = include_bytes!("../../assets/bgm-battle.mp3");
+
+/// 対戦リザルトBGM(TERM独自拡張。#328。原曲「After The Final Bell」)。自分の盤面が
+/// 決着した後、観戦中(#271)・リザルト表示中を通して流す。
+const BATTLE_RESULT_TRACK: &[u8] = include_bytes!("../../assets/bgm-battle-result.mp3");
+
+/// 1人プレイリザルトBGM(TERM独自拡張。#328。原曲「Bonus Life Granted」)。1人プレイで
+/// ミス・ゴールした直後のダイアログ表示中に流す。
+const SOLO_RESULT_TRACK: &[u8] = include_bytes!("../../assets/bgm-solo-result.mp3");
 
 /// MUSIC設定の切り替え・曲の再生完了を確認する間隔。
 const POLL_MS: u64 = 100;
@@ -175,14 +194,96 @@ pub fn spawn_gameplay_bgm_thread(
     );
 }
 
+/// 対戦準備BGMスレッドを立てる(TERM独自拡張。#328)。`restart_requested`は表示名入力画面へ
+/// 入るたびに曲を先頭から再生し直すためのフラグ。
+pub fn spawn_battle_prep_bgm_thread(
+    mixer: Mixer,
+    stop_flag: Arc<AtomicBool>,
+    music_enabled: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
+    volume_percent: Arc<AtomicU32>,
+) {
+    spawn_playlist_thread(
+        mixer,
+        stop_flag,
+        music_enabled,
+        &[BATTLE_PREP_TRACK],
+        Some(restart_requested),
+        volume_percent,
+    );
+}
+
+/// 対戦中BGMスレッドを立てる(TERM独自拡張。#328)。`restart_requested`は対戦が始まるたびに
+/// 曲を先頭から再生し直すためのフラグ。
+pub fn spawn_battle_bgm_thread(
+    mixer: Mixer,
+    stop_flag: Arc<AtomicBool>,
+    music_enabled: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
+    volume_percent: Arc<AtomicU32>,
+) {
+    spawn_playlist_thread(
+        mixer,
+        stop_flag,
+        music_enabled,
+        &[BATTLE_TRACK],
+        Some(restart_requested),
+        volume_percent,
+    );
+}
+
+/// 対戦リザルトBGMスレッドを立てる(TERM独自拡張。#328)。`restart_requested`は自分の盤面が
+/// 決着するたびに曲を先頭から再生し直すためのフラグ。
+pub fn spawn_battle_result_bgm_thread(
+    mixer: Mixer,
+    stop_flag: Arc<AtomicBool>,
+    music_enabled: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
+    volume_percent: Arc<AtomicU32>,
+) {
+    spawn_playlist_thread(
+        mixer,
+        stop_flag,
+        music_enabled,
+        &[BATTLE_RESULT_TRACK],
+        Some(restart_requested),
+        volume_percent,
+    );
+}
+
+/// 1人プレイリザルトBGMスレッドを立てる(TERM独自拡張。#328)。`restart_requested`は
+/// ミス・ゴールのたびに曲を先頭から再生し直すためのフラグ。
+pub fn spawn_solo_result_bgm_thread(
+    mixer: Mixer,
+    stop_flag: Arc<AtomicBool>,
+    music_enabled: Arc<AtomicBool>,
+    restart_requested: Arc<AtomicBool>,
+    volume_percent: Arc<AtomicU32>,
+) {
+    spawn_playlist_thread(
+        mixer,
+        stop_flag,
+        music_enabled,
+        &[SOLO_RESULT_TRACK],
+        Some(restart_requested),
+        volume_percent,
+    );
+}
+
 /// ヘルプ画面のジュークボックスで選んで試聴できる曲の一覧(TERM独自拡張。#151。
 /// ユーザー指摘: 「ヘルプページミュージック選んで再生する機能ほしい」)。
-/// タイトル用・プレイ中用トラックをまとめて試聴できるようにする。
-pub const JUKEBOX_TRACKS: [(&str, &[u8]); 4] = [
+/// タイトル用・プレイ中用トラックをまとめて試聴できるようにする。6系統への拡張
+/// (TERM独自拡張。#328)に合わせて対戦準備・対戦中・対戦リザルト・1人プレイリザルトの
+/// 4曲を追加した。
+pub const JUKEBOX_TRACKS: [(&str, &[u8]); 8] = [
     ("Last Coin Standing(タイトル)", TITLE_TRACK),
     ("The Last Token", GAMEPLAY_TRACKS[0]),
     ("Last Piece Dropping", GAMEPLAY_TRACKS[1]),
     ("地底のダンス", GAMEPLAY_TRACKS[2]),
+    ("Before The Final Strike", BATTLE_PREP_TRACK),
+    ("地下のダンス", BATTLE_TRACK),
+    ("After The Final Bell", BATTLE_RESULT_TRACK),
+    ("Bonus Life Granted", SOLO_RESULT_TRACK),
 ];
 
 /// ジュークボックスで再生中の1曲を制御するハンドル(TERM独自拡張。#151)。
@@ -242,6 +343,30 @@ mod tests {
             Decoder::new(Cursor::new(track))
                 .expect("each embedded gameplay BGM track must be a valid, decodable mp3");
         }
+    }
+
+    #[test]
+    fn embedded_battle_prep_track_decodes_successfully() {
+        Decoder::new(Cursor::new(BATTLE_PREP_TRACK))
+            .expect("assets/bgm-battle-prep.mp3 must be a valid, decodable mp3");
+    }
+
+    #[test]
+    fn embedded_battle_track_decodes_successfully() {
+        Decoder::new(Cursor::new(BATTLE_TRACK))
+            .expect("assets/bgm-battle.mp3 must be a valid, decodable mp3");
+    }
+
+    #[test]
+    fn embedded_battle_result_track_decodes_successfully() {
+        Decoder::new(Cursor::new(BATTLE_RESULT_TRACK))
+            .expect("assets/bgm-battle-result.mp3 must be a valid, decodable mp3");
+    }
+
+    #[test]
+    fn embedded_solo_result_track_decodes_successfully() {
+        Decoder::new(Cursor::new(SOLO_RESULT_TRACK))
+            .expect("assets/bgm-solo-result.mp3 must be a valid, decodable mp3");
     }
 
     #[test]

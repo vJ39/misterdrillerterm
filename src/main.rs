@@ -31,7 +31,9 @@ use crossterm::execute;
 use rodio::mixer::Mixer;
 
 use app::audio::{
-    effective_gameplay_bgm_enabled, effective_title_bgm_enabled, play_se, should_restart_title_bgm,
+    effective_battle_bgm_enabled, effective_battle_prep_bgm_enabled,
+    effective_battle_result_bgm_enabled, effective_gameplay_bgm_enabled,
+    effective_solo_result_bgm_enabled, effective_title_bgm_enabled, play_se, should_restart_bgm,
 };
 use app::screens::{
     tick_battle, tick_help_screen, tick_mode_select, tick_network_lobby, tick_player_name_input,
@@ -82,8 +84,8 @@ struct App {
     /// プレイ中BGMの実効ON/OFF。BGMスレッドと共有する。
     gameplay_music_enabled: Arc<AtomicBool>,
     se_enabled: Arc<AtomicBool>,
-    /// MUSIC音量(#224)。タイトル用・プレイ中用の両BGMスレッドで共有する
-    /// (MUSIC音量は画面によらず1つ)。
+    /// MUSIC音量(#224)。6系統のBGMスレッド全てで共有する(MUSIC音量は画面によらず1つ。
+    /// 6系統への拡張はTERM独自拡張。#328)。
     music_volume_percent: Arc<AtomicU32>,
     /// タイトル画面へ戻るたびにタイトルBGMを先頭から再生し直すためのフラグ。
     title_bgm_restart: Arc<AtomicBool>,
@@ -94,6 +96,37 @@ struct App {
     /// `title_bgm_restart`とはトリガー条件が異なる(あちらは「無効→有効」の切り替わり、
     /// こちらは「タイトル画面へ戻った瞬間」)ため、別フラグとして扱う。
     gameplay_bgm_restart: Arc<AtomicBool>,
+    /// 対戦準備BGMの実効ON/OFF。BGMスレッドと共有する(TERM独自拡張。#328)。
+    battle_prep_music_enabled: Arc<AtomicBool>,
+    /// 対戦準備画面へ入るたびに対戦準備BGMを先頭から再生し直すためのフラグ
+    /// (TERM独自拡張。#328)。
+    battle_prep_bgm_restart: Arc<AtomicBool>,
+    /// 直前フレームでの対戦準備BGMの実効ON/OFF。`battle_prep_bgm_restart`を立てる
+    /// 「無効→有効」の切り替わり判定に使う(TERM独自拡張。#328)。
+    was_battle_prep_bgm_enabled_flag: bool,
+    /// 対戦中BGMの実効ON/OFF。BGMスレッドと共有する(TERM独自拡張。#328)。
+    battle_music_enabled: Arc<AtomicBool>,
+    /// 対戦が始まるたびに対戦中BGMを先頭から再生し直すためのフラグ(TERM独自拡張。#328)。
+    battle_bgm_restart: Arc<AtomicBool>,
+    /// 直前フレームでの対戦中BGMの実効ON/OFF。`battle_bgm_restart`を立てる
+    /// 「無効→有効」の切り替わり判定に使う(TERM独自拡張。#328)。
+    was_battle_bgm_enabled_flag: bool,
+    /// 対戦リザルトBGMの実効ON/OFF。BGMスレッドと共有する(TERM独自拡張。#328)。
+    battle_result_music_enabled: Arc<AtomicBool>,
+    /// 自分の盤面が決着するたびに対戦リザルトBGMを先頭から再生し直すためのフラグ
+    /// (TERM独自拡張。#328)。
+    battle_result_bgm_restart: Arc<AtomicBool>,
+    /// 直前フレームでの対戦リザルトBGMの実効ON/OFF。`battle_result_bgm_restart`を立てる
+    /// 「無効→有効」の切り替わり判定に使う(TERM独自拡張。#328)。
+    was_battle_result_bgm_enabled_flag: bool,
+    /// 1人プレイリザルトBGMの実効ON/OFF。BGMスレッドと共有する(TERM独自拡張。#328)。
+    solo_result_music_enabled: Arc<AtomicBool>,
+    /// ミス・ゴールするたびに1人プレイリザルトBGMを先頭から再生し直すためのフラグ
+    /// (TERM独自拡張。#328)。
+    solo_result_bgm_restart: Arc<AtomicBool>,
+    /// 直前フレームでの1人プレイリザルトBGMの実効ON/OFF。`solo_result_bgm_restart`を立てる
+    /// 「無効→有効」の切り替わり判定に使う(TERM独自拡張。#328)。
+    was_solo_result_bgm_enabled_flag: bool,
     bgm_stop: Arc<AtomicBool>,
     rng: rand::rngs::ThreadRng,
     last_tick: Instant,
@@ -184,12 +217,37 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         settings.music_enabled,
         &Screen::Title,
     )));
+    // 対戦準備・対戦中・対戦リザルト・1人プレイリザルトの4系統を追加(TERM独自拡張。#328)。
+    // 起動直後はタイトル画面のため、いずれも無音になる。
+    let battle_prep_music_enabled = Arc::new(AtomicBool::new(effective_battle_prep_bgm_enabled(
+        settings.music_enabled,
+        &Screen::Title,
+    )));
+    let battle_music_enabled = Arc::new(AtomicBool::new(effective_battle_bgm_enabled(
+        settings.music_enabled,
+        &Screen::Title,
+    )));
+    let battle_result_music_enabled = Arc::new(AtomicBool::new(
+        effective_battle_result_bgm_enabled(settings.music_enabled, &Screen::Title),
+    ));
+    let solo_result_music_enabled = Arc::new(AtomicBool::new(effective_solo_result_bgm_enabled(
+        settings.music_enabled,
+        &Screen::Title,
+    )));
     let se_enabled = Arc::new(AtomicBool::new(settings.se_enabled));
     let music_volume_percent = Arc::new(AtomicU32::new(settings.music_volume_percent));
     // 起動直後の初回表示は「戻ってきた」わけではないので、ここではまだ立てない。
     let title_bgm_restart = Arc::new(AtomicBool::new(false));
     let was_title_bgm_enabled = title_music_enabled.load(Ordering::Relaxed);
     let gameplay_bgm_restart = Arc::new(AtomicBool::new(false));
+    let battle_prep_bgm_restart = Arc::new(AtomicBool::new(false));
+    let was_battle_prep_bgm_enabled_flag = battle_prep_music_enabled.load(Ordering::Relaxed);
+    let battle_bgm_restart = Arc::new(AtomicBool::new(false));
+    let was_battle_bgm_enabled_flag = battle_music_enabled.load(Ordering::Relaxed);
+    let battle_result_bgm_restart = Arc::new(AtomicBool::new(false));
+    let was_battle_result_bgm_enabled_flag = battle_result_music_enabled.load(Ordering::Relaxed);
+    let solo_result_bgm_restart = Arc::new(AtomicBool::new(false));
+    let was_solo_result_bgm_enabled_flag = solo_result_music_enabled.load(Ordering::Relaxed);
 
     let bgm_stop = Arc::new(AtomicBool::new(false));
     if let Some(m) = &mixer {
@@ -205,6 +263,34 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Arc::clone(&bgm_stop),
             Arc::clone(&gameplay_music_enabled),
             Arc::clone(&gameplay_bgm_restart),
+            Arc::clone(&music_volume_percent),
+        );
+        audio::bgm::spawn_battle_prep_bgm_thread(
+            m.clone(),
+            Arc::clone(&bgm_stop),
+            Arc::clone(&battle_prep_music_enabled),
+            Arc::clone(&battle_prep_bgm_restart),
+            Arc::clone(&music_volume_percent),
+        );
+        audio::bgm::spawn_battle_bgm_thread(
+            m.clone(),
+            Arc::clone(&bgm_stop),
+            Arc::clone(&battle_music_enabled),
+            Arc::clone(&battle_bgm_restart),
+            Arc::clone(&music_volume_percent),
+        );
+        audio::bgm::spawn_battle_result_bgm_thread(
+            m.clone(),
+            Arc::clone(&bgm_stop),
+            Arc::clone(&battle_result_music_enabled),
+            Arc::clone(&battle_result_bgm_restart),
+            Arc::clone(&music_volume_percent),
+        );
+        audio::bgm::spawn_solo_result_bgm_thread(
+            m.clone(),
+            Arc::clone(&bgm_stop),
+            Arc::clone(&solo_result_music_enabled),
+            Arc::clone(&solo_result_bgm_restart),
             Arc::clone(&music_volume_percent),
         );
     }
@@ -224,6 +310,18 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         title_bgm_restart,
         was_title_bgm_enabled,
         gameplay_bgm_restart,
+        battle_prep_music_enabled,
+        battle_prep_bgm_restart,
+        was_battle_prep_bgm_enabled_flag,
+        battle_music_enabled,
+        battle_bgm_restart,
+        was_battle_bgm_enabled_flag,
+        battle_result_music_enabled,
+        battle_result_bgm_restart,
+        was_battle_result_bgm_enabled_flag,
+        solo_result_music_enabled,
+        solo_result_bgm_restart,
+        was_solo_result_bgm_enabled_flag,
         bgm_stop,
         // 通常プレイはOS乱数から生成したシードを使う(spec.md 3章)。
         rng: rand::rng(),
@@ -300,7 +398,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         }
 
         // 画面遷移(タイトルへ戻る/タイトルから抜ける)を反映して、BGMスレッドが参照する
-        // 実効MUSIC状態を毎フレーム同期する。タイトル用・プレイ中用のいずれか一方だけがtrueになる。
+        // 実効MUSIC状態を毎フレーム同期する。6系統のうちどれか1つだけがtrueになる。
         let title_bgm_now_enabled =
             effective_title_bgm_enabled(app.settings.music_enabled, &screen);
         app.title_music_enabled
@@ -311,10 +409,58 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         );
         // タイトル画面へ戻ってきた(無効→有効に転じた)瞬間に、タイトルBGMを
         // 先頭から再生し直す。
-        if should_restart_title_bgm(app.was_title_bgm_enabled, title_bgm_now_enabled) {
+        if should_restart_bgm(app.was_title_bgm_enabled, title_bgm_now_enabled) {
             app.title_bgm_restart.store(true, Ordering::Relaxed);
         }
         app.was_title_bgm_enabled = title_bgm_now_enabled;
+
+        // 対戦準備・対戦中・対戦リザルト・1人プレイリザルトの4系統も同様に同期する
+        // (TERM独自拡張。#328)。いずれも「無効→有効に転じた瞬間だけ先頭から再生し直す」
+        // 方式で、タイトルBGMと同じ扱いにする。
+        let battle_prep_bgm_now_enabled =
+            effective_battle_prep_bgm_enabled(app.settings.music_enabled, &screen);
+        app.battle_prep_music_enabled
+            .store(battle_prep_bgm_now_enabled, Ordering::Relaxed);
+        if should_restart_bgm(
+            app.was_battle_prep_bgm_enabled_flag,
+            battle_prep_bgm_now_enabled,
+        ) {
+            app.battle_prep_bgm_restart.store(true, Ordering::Relaxed);
+        }
+        app.was_battle_prep_bgm_enabled_flag = battle_prep_bgm_now_enabled;
+
+        let battle_bgm_now_enabled =
+            effective_battle_bgm_enabled(app.settings.music_enabled, &screen);
+        app.battle_music_enabled
+            .store(battle_bgm_now_enabled, Ordering::Relaxed);
+        if should_restart_bgm(app.was_battle_bgm_enabled_flag, battle_bgm_now_enabled) {
+            app.battle_bgm_restart.store(true, Ordering::Relaxed);
+        }
+        app.was_battle_bgm_enabled_flag = battle_bgm_now_enabled;
+
+        let battle_result_bgm_now_enabled =
+            effective_battle_result_bgm_enabled(app.settings.music_enabled, &screen);
+        app.battle_result_music_enabled
+            .store(battle_result_bgm_now_enabled, Ordering::Relaxed);
+        if should_restart_bgm(
+            app.was_battle_result_bgm_enabled_flag,
+            battle_result_bgm_now_enabled,
+        ) {
+            app.battle_result_bgm_restart.store(true, Ordering::Relaxed);
+        }
+        app.was_battle_result_bgm_enabled_flag = battle_result_bgm_now_enabled;
+
+        let solo_result_bgm_now_enabled =
+            effective_solo_result_bgm_enabled(app.settings.music_enabled, &screen);
+        app.solo_result_music_enabled
+            .store(solo_result_bgm_now_enabled, Ordering::Relaxed);
+        if should_restart_bgm(
+            app.was_solo_result_bgm_enabled_flag,
+            solo_result_bgm_now_enabled,
+        ) {
+            app.solo_result_bgm_restart.store(true, Ordering::Relaxed);
+        }
+        app.was_solo_result_bgm_enabled_flag = solo_result_bgm_now_enabled;
     }
 
     app.bgm_stop.store(true, Ordering::Relaxed);
@@ -481,6 +627,18 @@ mod tests {
             title_bgm_restart: Arc::new(AtomicBool::new(false)),
             was_title_bgm_enabled: false,
             gameplay_bgm_restart: Arc::new(AtomicBool::new(false)),
+            battle_prep_music_enabled: Arc::new(AtomicBool::new(false)),
+            battle_prep_bgm_restart: Arc::new(AtomicBool::new(false)),
+            was_battle_prep_bgm_enabled_flag: false,
+            battle_music_enabled: Arc::new(AtomicBool::new(false)),
+            battle_bgm_restart: Arc::new(AtomicBool::new(false)),
+            was_battle_bgm_enabled_flag: false,
+            battle_result_music_enabled: Arc::new(AtomicBool::new(false)),
+            battle_result_bgm_restart: Arc::new(AtomicBool::new(false)),
+            was_battle_result_bgm_enabled_flag: false,
+            solo_result_music_enabled: Arc::new(AtomicBool::new(false)),
+            solo_result_bgm_restart: Arc::new(AtomicBool::new(false)),
+            was_solo_result_bgm_enabled_flag: false,
             bgm_stop: Arc::new(AtomicBool::new(false)),
             settings,
             rng: rand::rng(),
