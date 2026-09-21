@@ -316,9 +316,11 @@ impl LobbyState {
         match (&self.phase, packet.packet_type) {
             // 参加リクエストが届いた。ゲストが既にいても受け付ける(N人対戦なので、
             // 満員(`ROOM_MAX_PLAYERS`)になるまでは追加で迎え入れられる。#293)。
+            // 満員かどうかは自分+ゲスト+AIの合計で見る(#310。AIを数えていなかったため、
+            // ゲスト1人+AI2人で埋まっているのにもう1人受理して5人になっていた)。
             (LobbyPhase::Discovering { guests, .. }, PacketType::Invite) => {
                 let from = self.peer_of(packet)?;
-                if guests.len() + 1 >= ROOM_MAX_PLAYERS {
+                if guests.len() + 1 + self.room_ai_count >= ROOM_MAX_PLAYERS {
                     Some(PacketEffect::DeclineWhileHosting(from))
                 } else {
                     Some(PacketEffect::IncomingInvite(from))
@@ -760,8 +762,9 @@ impl LobbyState {
     /// 満員(`ROOM_MAX_PLAYERS`)に達していれば、順番待ち全員へ断りを送って捨てる。
     /// 1件ずつ許可していく間にguestsが増えるため、`packet_effect`の人数チェック
     /// (受信時点の人数)だけでは、許可を重ねるうちに上限を超えて迎え入れてしまう。
+    /// 人数は`packet_effect`と同じく自分+ゲスト+AIの合計で数える(#310)。
     fn back_to_discovering(&mut self, guests: Vec<HostedGuest>, pending: Vec<DiscoveredPeer>) {
-        if guests.len() + 1 >= ROOM_MAX_PLAYERS {
+        if guests.len() + 1 + self.room_ai_count >= ROOM_MAX_PLAYERS {
             for peer in &pending {
                 let _ = self.discovery.send_decline(peer);
             }
@@ -783,9 +786,9 @@ impl LobbyState {
 
     /// 選択中の候補へ参加リクエストを送る(送った側は許可され次第ゲストになる。#293)。
     /// 候補が1件も無い、またはルームが既に上限人数(`ROOM_MAX_PLAYERS`)に達していれば
-    /// 何もしない。
+    /// 何もしない。人数は自分+ゲスト+AIの合計で数える(#310)。
     fn invite_selected(&mut self) {
-        if self.hosted_guests().len() + 1 >= ROOM_MAX_PLAYERS {
+        if self.hosted_guests().len() + 1 + self.room_ai_count >= ROOM_MAX_PLAYERS {
             return;
         }
         let Some(target) = self.discovery.peers().get(self.selection).cloned() else {
@@ -1874,6 +1877,90 @@ mod tests {
         // #309: 以前はAIの枠を`Discovering`だけが持っていたため、参加リクエストを
         // 受理して一度フェーズを離れるたびに0へ戻り、ホストが追加したはずのAIが
         // 対戦に混ざらなかった。
+        //
+        // AIは1人だけにする。2人目のゲストが入って自分+ゲスト2人+AI1人=4人になり、
+        // ちょうど`ROOM_MAX_PLAYERS`に収まる(#310で満員判定がAIも数えるようになり、
+        // AI2人では2人目のゲストが入れなくなった)。
+        let mut lobbies = facing_lobbies_of(&["host", "guest1", "guest2"]);
+        discover_all(&mut lobbies);
+        let mut guest2 = lobbies.pop().unwrap();
+        let mut guest1 = lobbies.pop().unwrap();
+        let mut host = lobbies.pop().unwrap();
+
+        request_and_join(&mut host, &mut guest1, "guest1");
+        host.update(&[InputAction::IncreaseRoomAiCount], test_config());
+        assert_eq!(
+            host.room_ai_count(),
+            1,
+            "前提: AIを1人ぶん追加できているはず"
+        );
+
+        request_and_join(&mut host, &mut guest2, "guest2");
+
+        assert_eq!(
+            host.hosted_guests().len(),
+            2,
+            "前提: 2人目のゲストも迎え入れているはず"
+        );
+        assert_eq!(
+            host.room_ai_count(),
+            1,
+            "2人目のゲストを迎えた後もAIの枠は保たれるはず"
+        );
+    }
+
+    #[test]
+    fn a_join_request_is_declined_once_the_ai_slots_leave_no_space() {
+        // #310: 満員判定がゲストの人数だけを見ていたため、AIで埋まったルームでも参加
+        // リクエストを受理し、`ROOM_MAX_PLAYERS`(4人)を超えていた。AIをN人混ぜたら
+        // 迎え入れられるゲストは`ROOM_MAX_PLAYERS - 1 - N`人まで。
+        for ai_count in 1..ROOM_MAX_PLAYERS {
+            let guest_count = ROOM_MAX_PLAYERS - 1 - ai_count;
+            let (mut host, mut other) = facing_lobbies();
+            discover_each_other(&mut host, &mut other);
+            let guests = (0..guest_count)
+                .map(|index| HostedGuest::for_test(&format!("g{index}")))
+                .collect();
+            host.set_phase(LobbyPhase::Discovering { guests });
+            let increases = vec![InputAction::IncreaseRoomAiCount; ai_count];
+            host.update(&increases, test_config());
+            assert_eq!(
+                host.room_ai_count(),
+                ai_count,
+                "前提: AIを{ai_count}人ぶん追加できているはず"
+            );
+
+            invite_by_name(&mut other, "host");
+            for _ in 0..200 {
+                host.update(&[], test_config());
+                other.update(&[], test_config());
+                if matches!(other.phase(), LobbyPhase::Notice { .. }) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+
+            assert!(
+                matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == guest_count),
+                "ゲスト{guest_count}人+AI{ai_count}人で満員なので確認画面へは移らないはず"
+            );
+            assert_eq!(
+                host.room_ai_count(),
+                ai_count,
+                "断ってもAIの枠は変わらないはず"
+            );
+            assert!(
+                matches!(other.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
+                "申し込んだ側には断られた通知が出るはず(ゲスト{guest_count}人+AI{ai_count}人)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_guest_cannot_join_once_the_ai_slots_fill_the_room() {
+        // #310の再現手順。ゲスト1人を迎えてからAIを2人足すと自分+ゲスト1人+AI2人=4人で
+        // 満員。ここへ届いた2人目の参加リクエストは断られるはず(以前は受理してしまい、
+        // 5人のまま対戦を開始できなくなっていた)。
         let mut lobbies = facing_lobbies_of(&["host", "guest1", "guest2"]);
         discover_all(&mut lobbies);
         let mut guest2 = lobbies.pop().unwrap();
@@ -1894,17 +1981,137 @@ mod tests {
             "前提: AIを2人ぶん追加できているはず"
         );
 
-        request_and_join(&mut host, &mut guest2, "guest2");
+        invite_by_name(&mut guest2, "host");
+        for _ in 0..MAX_PUMPS {
+            // 確認画面へ移ってしまった場合は許可まで進め、5人目が入れることを取り
+            // こぼさないようにする。
+            let actions: &[InputAction] =
+                if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
+                    &[InputAction::Confirm]
+                } else {
+                    &[]
+                };
+            host.update(actions, test_config());
+            guest1.update(&[], test_config());
+            guest2.update(&[], test_config());
+            if matches!(guest2.phase(), LobbyPhase::Notice { .. }) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
 
         assert_eq!(
             host.hosted_guests().len(),
-            2,
-            "前提: 2人目のゲストも迎え入れているはず"
+            1,
+            "AIで枠が埋まっているので2人目のゲストは迎え入れないはず"
+        );
+        assert_eq!(host.room_ai_count(), 2, "断った後もAIの枠は保たれるはず");
+        assert!(
+            matches!(guest2.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
+            "2人目には断られた通知が出るはず"
+        );
+        assert!(
+            matches!(guest1.phase(), LobbyPhase::WaitingForRoomStart { .. }),
+            "先に加わったゲストは開始待ちのままのはず"
+        );
+    }
+
+    #[test]
+    fn a_queued_join_request_is_declined_once_the_guest_and_the_ai_fill_the_room() {
+        // #310: 順番待ちを取り出すときの満員判定にもAIを数える。AIを2人混ぜた状態で
+        // 2人から申し込まれたら、1人目を許可した時点で自分+ゲスト1人+AI2人=4人に
+        // なるため、2人目は断られるはず。
+        let mut lobbies = facing_lobbies_of(&["host", "guest-a", "guest-b"]);
+        discover_all(&mut lobbies);
+        let (host, rest) = lobbies.split_first_mut().unwrap();
+        let (guest_a, rest) = rest.split_first_mut().unwrap();
+        let guest_b = &mut rest[0];
+
+        host.update(
+            &[
+                InputAction::IncreaseRoomAiCount,
+                InputAction::IncreaseRoomAiCount,
+            ],
+            test_config(),
         );
         assert_eq!(
             host.room_ai_count(),
             2,
-            "2人目のゲストを迎えた後もAIの枠は保たれるはず"
+            "前提: AIを2人ぶん追加できているはず"
+        );
+
+        invite_by_name(guest_a, "host");
+        invite_by_name(guest_b, "host");
+
+        for _ in 0..MAX_PUMPS {
+            let actions: &[InputAction] =
+                if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
+                    &[InputAction::Confirm]
+                } else {
+                    &[]
+                };
+            host.update(actions, test_config());
+            guest_a.update(&[], test_config());
+            guest_b.update(&[], test_config());
+            if matches!(guest_a.phase(), LobbyPhase::Notice { .. })
+                || matches!(guest_b.phase(), LobbyPhase::Notice { .. })
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(
+            host.hosted_guests().len(),
+            1,
+            "AI2人ぶんの枠があるので迎え入れられるゲストは1人だけのはず"
+        );
+        assert_eq!(host.room_ai_count(), 2, "断った後もAIの枠は保たれるはず");
+        let (accepted, declined) = if matches!(guest_a.phase(), LobbyPhase::Notice { .. }) {
+            (guest_b, guest_a)
+        } else {
+            (guest_a, guest_b)
+        };
+        assert!(
+            matches!(accepted.phase(), LobbyPhase::WaitingForRoomStart { .. }),
+            "先に許可された側はルームへ加わっているはず"
+        );
+        assert!(
+            matches!(declined.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
+            "満員になった後に順番が回ってきた側は断られるはず"
+        );
+    }
+
+    #[test]
+    fn inviting_a_candidate_does_nothing_once_the_ai_slots_fill_the_room() {
+        // #310: 自分から誘うときの上限判定もAIを数える。ゲスト2人+AI1人で満員なので、
+        // 候補にConfirmしても参加リクエストは飛ばない。
+        let (mut host, mut other) = facing_lobbies();
+        discover_each_other(&mut host, &mut other);
+        host.set_phase(LobbyPhase::Discovering {
+            guests: vec![HostedGuest::for_test("g1"), HostedGuest::for_test("g2")],
+        });
+        host.update(&[InputAction::IncreaseRoomAiCount], test_config());
+        assert_eq!(
+            host.room_ai_count(),
+            1,
+            "前提: AIを1人ぶん追加できているはず"
+        );
+
+        host.update(&[InputAction::Confirm], test_config());
+        for _ in 0..50 {
+            host.update(&[], test_config());
+            other.update(&[], test_config());
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        assert!(
+            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 2),
+            "満員の間はConfirmしても応答待ちへ移らないはず"
+        );
+        assert!(
+            matches!(other.phase(), LobbyPhase::Discovering { .. }),
+            "誘われていないので相手は探索のままのはず"
         );
     }
 
