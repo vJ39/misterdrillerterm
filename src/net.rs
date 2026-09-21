@@ -297,6 +297,16 @@ impl BattleConfig {
 /// フレーミングのペイロード長を表すプレフィックスのバイト数(u32のビッグエンディアン)。
 const LENGTH_PREFIX_BYTES: usize = 4;
 
+/// 受信時に受け付けるペイロード長の上限(バイト)。長さプレフィックスはu32なので、
+/// 相手が送ってきた値をそのまま確保サイズに使うと1件で最大約4.29GBを求められ、
+/// メモリ不足で落とされる。UDP探索で見つけた相手へ自動接続する作りのため、
+/// 壊れた相手や別実装が繋がる場合に備えてここで上限を設ける。
+///
+/// 実測では現行の最大メッセージが8人ぶんの`RoomRoster`で347バイト、`StartConfig`は
+/// 全項目を型の最大値にしても253バイトのため、1MiBあれば対戦人数や設定項目が増えても
+/// 足りる。上限に当たった時点でその接続は破棄されるので、余裕を大きく取っている。
+const MAX_MESSAGE_PAYLOAD_BYTES: usize = 1024 * 1024;
+
 /// `bincode`の設定。送受信の両側で同じ設定を使う必要があるため、この1箇所に閉じる。
 fn bincode_config() -> bincode::config::Configuration {
     bincode::config::standard()
@@ -314,12 +324,21 @@ pub fn write_message<W: Write>(writer: &mut W, msg: &GameMessage) -> io::Result<
     Ok(())
 }
 
-/// メッセージを1件読み込む(`write_message`の逆)。相手が同じ実装である前提のため、
-/// 長さの妥当性チェックは行わない。デシリアライズに失敗した場合は`InvalidData`にする。
+/// メッセージを1件読み込む(`write_message`の逆)。長さプレフィックスは相手から届く値で
+/// あり、そのまま確保サイズには使えないため、`MAX_MESSAGE_PAYLOAD_BYTES`を超えていれば
+/// 確保する前に`InvalidData`で断る。デシリアライズに失敗した場合も`InvalidData`にする。
 pub fn read_message<R: Read>(reader: &mut R) -> io::Result<GameMessage> {
     let mut length_bytes = [0u8; LENGTH_PREFIX_BYTES];
     reader.read_exact(&mut length_bytes)?;
     let length = u32::from_be_bytes(length_bytes) as usize;
+    if length > MAX_MESSAGE_PAYLOAD_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "ペイロード長{length}バイトが上限{MAX_MESSAGE_PAYLOAD_BYTES}バイトを超えている"
+            ),
+        ));
+    }
 
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload)?;
@@ -836,6 +855,43 @@ mod tests {
         write_message(&mut truncated, &GameMessage::SeedAgree { seed: 1 }).unwrap();
         truncated.pop();
         assert!(read_message(&mut truncated.as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_payload_at_the_size_limit_is_still_read_back() {
+        // 上限ちょうどのメッセージは通ること。名前の長さでペイロードを上限へ合わせる
+        // (内訳は判別子1バイト+文字列長のvarint 5バイト+名前本体)。
+        let msg = GameMessage::Hello {
+            name: "x".repeat(MAX_MESSAGE_PAYLOAD_BYTES - 6),
+        };
+
+        let mut buffer = Vec::new();
+        write_message(&mut buffer, &msg).unwrap();
+        assert_eq!(
+            buffer.len() - LENGTH_PREFIX_BYTES,
+            MAX_MESSAGE_PAYLOAD_BYTES,
+            "上限ちょうどのペイロードになっていない"
+        );
+
+        assert_eq!(read_message(&mut buffer.as_slice()).unwrap(), msg);
+    }
+
+    #[test]
+    fn a_length_prefix_over_the_limit_is_rejected_before_allocating() {
+        // 上限を超える長さプレフィックスだけを渡す。ペイロードは1バイトも用意しないので、
+        // 確保前に断っていなければ読み込み側でUnexpectedEofになり種別が変わる。
+        for length in [
+            u32::try_from(MAX_MESSAGE_PAYLOAD_BYTES + 1).unwrap(),
+            u32::MAX,
+        ] {
+            let mut cursor = io::Cursor::new(length.to_be_bytes().to_vec());
+
+            let err = read_message(&mut cursor).unwrap_err();
+
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "length={length}");
+            // 長さプレフィックスの4バイトを読んだところで止まっていること。
+            assert_eq!(cursor.position(), LENGTH_PREFIX_BYTES as u64);
+        }
     }
 
     #[test]
