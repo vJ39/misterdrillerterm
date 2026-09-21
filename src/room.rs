@@ -2,7 +2,7 @@
 //!
 //! #274のフルメッシュ対戦(`BattleState::from_peer_streams`)が要求する「確立済みの
 //! TCP接続N-1本」を用意するところを担う。主催者が参加者を集めて`RoomRoster`・対戦設定・
-//! シード・開始時刻を配布し、全員が同じ`members`の並び(room内インデックス)を見て
+//! シードを配布し、全員が同じ`members`の並び(room内インデックス)を見て
 //! C(n,2)本のメッシュ接続を張る。
 //!
 //! ロビーUI(ルーム作成・参加者一覧の表示・開始操作)は#276の範囲のため、ここは
@@ -32,7 +32,7 @@ pub type RoomStartResult = (
 
 /// 主催者側。既に`JoinRoom`を受け取った各ゲストとの接続(`guest_room_streams`。
 /// `JoinRoom`を受信した順=room内インデックス1,2,3...と対応)へ`RoomRoster`・対戦設定・
-/// シード・開始時刻を配布し、フルメッシュのメッシュ接続(自分以外、room内インデックス順)を
+/// シードを配布し、フルメッシュのメッシュ接続(自分以外、room内インデックス順)を
 /// 確立する(設計書4節)。
 ///
 /// `guest_names`/`guest_mesh_addrs`は`guest_room_streams`と同じ順で、それぞれ`JoinRoom`の
@@ -83,9 +83,8 @@ pub fn start_room_as_host(
     }
 
     // シードは主催者がOS乱数から単独で決める(2人版`run_host_handshake`と同じ取り決め。
-    // spec.md 12.2ステップ3)。開始時刻も同じ猶予を使う。
+    // spec.md 12.2ステップ3)。
     let seed: u64 = rand::rng().random();
-    let start_at_unix_ms = net::countdown_start_time_ms();
 
     for (guest_index, stream) in guest_room_streams.iter_mut().enumerate() {
         // `your_index`だけ送り先ごとに変える(名前が重複していても各参加者が自分を
@@ -99,7 +98,6 @@ pub fn start_room_as_host(
         )?;
         net::write_message(stream, &GameMessage::StartConfig(Box::new(config)))?;
         net::write_message(stream, &GameMessage::SeedAgree { seed })?;
-        net::write_message(stream, &GameMessage::StartCountdown { start_at_unix_ms })?;
     }
 
     let streams = establish_full_mesh(&members, 0, my_name, my_mesh_listener)?;
@@ -110,7 +108,6 @@ pub fn start_room_as_host(
             opponent_name: String::new(),
             config,
             seed,
-            start_at_unix_ms,
         },
     ))
 }
@@ -198,10 +195,6 @@ pub fn await_room_start(
         GameMessage::SeedAgree { seed } => seed,
         other => return Err(net::unexpected_message("SeedAgree", &other)),
     };
-    let start_at_unix_ms = match net::read_message(&mut room_stream)? {
-        GameMessage::StartCountdown { start_at_unix_ms } => start_at_unix_ms,
-        other => return Err(net::unexpected_message("StartCountdown", &other)),
-    };
 
     let streams = establish_full_mesh(&members, my_index, my_name, my_mesh_listener)?;
     let other_names = members
@@ -223,7 +216,6 @@ pub fn await_room_start(
             opponent_name: String::new(),
             config,
             seed,
-            start_at_unix_ms,
         },
     ))
 }
@@ -579,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn everyone_in_the_room_ends_up_with_the_same_config_seed_and_start_time() {
+    fn everyone_in_the_room_ends_up_with_the_same_config_and_seed() {
         let participants = run_room(&numbered_names(4));
 
         let host = &participants[0].handshake;
@@ -590,10 +582,6 @@ mod tests {
                 "参加者{index}は主催者の設定に従うはず"
             );
             assert_eq!(participant.handshake.seed, host.seed);
-            assert_eq!(
-                participant.handshake.start_at_unix_ms,
-                host.start_at_unix_ms
-            );
         }
     }
 
@@ -650,14 +638,8 @@ mod tests {
                     .collect();
                 let mut player_names = vec![participant.name];
                 player_names.extend(participant.other_names);
-                BattleState::from_peer_streams(
-                    games,
-                    player_names,
-                    participant.streams,
-                    my_index,
-                    participant.handshake.start_at_unix_ms,
-                )
-                .unwrap()
+                BattleState::from_peer_streams(games, player_names, participant.streams, my_index)
+                    .unwrap()
             })
             .collect();
 

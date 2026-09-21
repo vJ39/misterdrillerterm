@@ -716,13 +716,7 @@ impl LobbyState {
         player_names.push(self.my_name.clone());
         player_names.extend(other_names);
 
-        match BattleState::from_peer_streams(
-            games,
-            player_names,
-            streams,
-            my_index,
-            handshake.start_at_unix_ms,
-        ) {
+        match BattleState::from_peer_streams(games, player_names, streams, my_index) {
             Ok(state) => LobbyOutcome::Battle(Box::new(state)),
             Err(_) => {
                 self.phase = notice(CONNECT_FAILED_MESSAGE, Vec::new(), Vec::new());
@@ -1368,7 +1362,6 @@ mod tests {
             opponent_name: String::new(),
             config,
             seed: 4242,
-            start_at_unix_ms: 0,
         };
 
         let outcome = lobby.battle_from_room(

@@ -1,7 +1,7 @@
 //! 対戦の通信層(#253。spec.md 12.1・12.2)。
 //!
 //! TCP接続が確立済みの2ホストが、メッセージのフレーミングを介してハンドシェイク
-//! (Hello交換 → StartConfig → SeedAgree → StartCountdown)を行うところと、対戦中の
+//! (Hello交換 → StartConfig → SeedAgree)を行うところと、対戦中の
 //! 受信専用スレッド(#254)、およびUDP探索のパケット形式(#256)を担う。
 //! 受信したメッセージを自分のシミュレーションへどう反映するか(#254)はゲームロジック側の
 //! 責務のため`battle.rs`に置く。ハンドシェイクの結果から`Game`を組み立てるのも同じ理由で
@@ -14,7 +14,6 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
@@ -23,14 +22,9 @@ use uuid::Uuid;
 use crate::game::InputAction;
 use crate::settings::Settings;
 
-/// `StartCountdown`で指定する開始時刻を、ホストの現在時刻からどれだけ先にするか(ms)。
-/// 両者はこの猶予の間に「3, 2, 1, GO」のカウントダウンをローカルの時計で独立表示する
-/// (spec.md 12.2ステップ5)。
-const START_COUNTDOWN_LEAD_MS: u64 = 3000;
-
 /// TCP接続後にやり取りするメッセージ(spec.md 12.2)。
 ///
-/// `Hello`〜`StartCountdown`が開始前のハンドシェイク用、`Input`以降が対戦中用。
+/// `Hello`〜`SeedAgree`が開始前のハンドシェイク用、`Input`以降が対戦中用。
 /// 対戦中のメッセージはtick番号を持たない。各参加者が自分の実時間でシミュレーションを
 /// 進める非同期方式のため、届いた順にそのまま反映すればよい(spec.md 12.3)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,9 +59,6 @@ pub enum GameMessage {
     SeedAgree {
         seed: u64,
     },
-    StartCountdown {
-        start_at_unix_ms: u64,
-    },
     /// 自分の操作1つ。受け取った側は自分が持つ送信元のインスタンスへ即座に適用する。
     /// TCPが順序を保証するため、送った順=適用される順になる。
     Input {
@@ -89,7 +80,6 @@ pub enum GameMessage {
     },
     Result {
         reached_goal: bool,
-        time_ms: u64,
         /// `Input`と同じ意味。`Some`はホストがAI(#300)の結果を代理送信する場合のみ。
         proxy_for: Option<usize>,
     },
@@ -355,11 +345,10 @@ pub struct HandshakeResult {
     pub opponent_name: String,
     pub config: BattleConfig,
     pub seed: u64,
-    pub start_at_unix_ms: u64,
 }
 
-/// TCPサーバ役(ACCEPTした側)=ホストのハンドシェイク(spec.md 12.2シーケンス1〜3、5)。
-/// 自分の設定・シード・開始時刻を相手に一方的に通知する。
+/// TCPサーバ役(ACCEPTした側)=ホストのハンドシェイク(spec.md 12.2シーケンス1〜3)。
+/// 自分の設定・シードを相手に一方的に通知する。
 ///
 /// タイムアウト処理(`INVITE_TIMEOUT_MS`等)は#256の範囲のためここでは行わず、
 /// `TcpStream`の読み書きはブロッキングのままとする。
@@ -392,18 +381,14 @@ pub fn run_host_handshake(
     let seed: u64 = rand::rng().random();
     write_message(stream, &GameMessage::SeedAgree { seed })?;
 
-    let start_at_unix_ms = countdown_start_time_ms();
-    write_message(stream, &GameMessage::StartCountdown { start_at_unix_ms })?;
-
     Ok(HandshakeResult {
         opponent_name,
         config,
         seed,
-        start_at_unix_ms,
     })
 }
 
-/// TCPクライアント役(INVITEした側)のハンドシェイク。ホストの設定・シード・開始時刻を
+/// TCPクライアント役(INVITEした側)のハンドシェイク。ホストの設定・シードを
 /// そのまま受け取って従う(受け取った設定は対戦セッション中のみ適用し、自分の
 /// `settings.json`へは保存しない)。
 ///
@@ -431,24 +416,11 @@ pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result
         other => return Err(unexpected_message("SeedAgree", &other)),
     };
 
-    let start_at_unix_ms = match read_message(stream)? {
-        GameMessage::StartCountdown { start_at_unix_ms } => start_at_unix_ms,
-        other => return Err(unexpected_message("StartCountdown", &other)),
-    };
-
     Ok(HandshakeResult {
         opponent_name,
         config,
         seed,
-        start_at_unix_ms,
     })
-}
-
-/// `StartCountdown`で通知する開始時刻。開始を決めた側(2人版のホスト・N人版の主催者)の
-/// 現在時刻から`START_COUNTDOWN_LEAD_MS`先にする。N人版(`room.rs`)も同じ猶予を使うため
-/// 関数として切り出している。
-pub(crate) fn countdown_start_time_ms() -> u64 {
-    unix_time_ms().saturating_add(START_COUNTDOWN_LEAD_MS)
 }
 
 /// ハンドシェイクの途中で想定外のメッセージ種別を受信したときのエラー。
@@ -656,16 +628,6 @@ fn decode_player_name(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-/// 現在のUNIX時刻(ms)。システム時計がUNIXエポックより前を指している場合は0を返す
-/// (対戦開始時刻の共有はNTP的な厳密同期を前提にしていないため、ここでは失敗させない)。
-/// 対戦中の`Result`送信(#254)でも経過時間の算出に使うため`pub(crate)`にしている。
-pub(crate) fn unix_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,9 +727,6 @@ mod tests {
         assert_round_trips(&GameMessage::SeedAgree {
             seed: 0xdead_beef_0123_4567,
         });
-        assert_round_trips(&GameMessage::StartCountdown {
-            start_at_unix_ms: 1_700_000_000_000,
-        });
         assert_round_trips(&GameMessage::Input {
             action: NetAction::Drill,
             proxy_for: None,
@@ -780,7 +739,6 @@ mod tests {
         });
         assert_round_trips(&GameMessage::Result {
             reached_goal: true,
-            time_ms: 56_789,
             proxy_for: None,
         });
         // #300: AIの代理送信(room内インデックス付き)も同じフレーミングで運べること。
@@ -795,7 +753,6 @@ mod tests {
         });
         assert_round_trips(&GameMessage::Result {
             reached_goal: false,
-            time_ms: 12_345,
             proxy_for: Some(1),
         });
         assert_round_trips(&GameMessage::Bye);
@@ -959,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn the_handshake_leaves_both_sides_with_the_same_config_seed_and_start_time() {
+    fn the_handshake_leaves_both_sides_with_the_same_config_and_seed() {
         let config = test_config();
 
         let (host, client) = run_loopback_handshake(config);
@@ -970,7 +927,6 @@ mod tests {
         );
         assert_eq!(client.config, config, "クライアントはホストの設定に従う");
         assert_eq!(host.seed, client.seed);
-        assert_eq!(host.start_at_unix_ms, client.start_at_unix_ms);
     }
 
     #[test]
@@ -979,22 +935,6 @@ mod tests {
 
         assert_eq!(host.opponent_name, "client");
         assert_eq!(client.opponent_name, "host");
-    }
-
-    #[test]
-    fn the_start_time_is_about_three_seconds_ahead_of_the_hosts_clock() {
-        let before = unix_time_ms();
-        let (host, _) = run_loopback_handshake(test_config());
-        let after = unix_time_ms();
-
-        assert!(
-            host.start_at_unix_ms >= before + START_COUNTDOWN_LEAD_MS,
-            "開始時刻はハンドシェイク開始時刻+3000ms以降のはず"
-        );
-        assert!(
-            host.start_at_unix_ms <= after + START_COUNTDOWN_LEAD_MS,
-            "開始時刻はハンドシェイク終了時刻+3000msを超えないはず"
-        );
     }
 
     #[test]

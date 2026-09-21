@@ -84,9 +84,6 @@ pub struct BattleState {
     /// (`games_index_for_room_index`/`room_index_for_games_index`)に使う。通信なしの
     /// 対戦では意味を持たないため0。
     my_room_index: usize,
-    /// 対戦開始時刻(ハンドシェイクの`StartCountdown`の値)。AI(#300)の`Result`を代理送信
-    /// するときの経過時間の算出に使う(`PeerLink::start_at_unix_ms`と同じ値)。
-    start_at_unix_ms: u64,
 }
 
 /// 対戦相手1人との通信路(#274。#254の`NetworkLink`を複数保持できるよう改名した)。
@@ -103,9 +100,6 @@ struct PeerLink {
     last_remote_activity: Instant,
     /// 最後にHeartbeatを送信した時刻。
     last_heartbeat_sent: Instant,
-    /// 対戦開始時刻(ハンドシェイクの`StartCountdown`の値)。Result送信時の
-    /// `time_ms`(経過時間)の算出に使う。
-    start_at_unix_ms: u64,
     /// 自分のResultは送信済みか。決着直後に一度だけ送るためのフラグ。
     result_sent: bool,
     /// 相手の切断を検知済みか(Bye受信・ソケットエラー・受信の途絶)。
@@ -116,7 +110,7 @@ impl PeerLink {
     /// 確立済みのTCP接続1本から通信路を組み立てる(#274)。`stream`は呼び出し元が
     /// ハンドシェイクに使ったものをそのまま渡す(内部で`try_clone`して読み書き用に分け、
     /// 読み側は受信専用スレッドへ預ける)。
-    fn new(stream: TcpStream, start_at_unix_ms: u64) -> io::Result<Self> {
+    fn new(stream: TcpStream) -> io::Result<Self> {
         // Input/Attack/Result/Heartbeatは1件あたり数十バイトの小さいメッセージを
         // 頻繁に送り合う。Nagleアルゴリズムが有効だと、直前の送信のACKを待つ間ここが
         // バッファされ、操作の反映までの遅延が積み重なる(#287、実機で「対戦がまだ重い」
@@ -133,7 +127,6 @@ impl PeerLink {
             _receiver_thread: receiver_thread,
             last_remote_activity: now,
             last_heartbeat_sent: now,
-            start_at_unix_ms,
             result_sent: false,
             disconnected: false,
         })
@@ -160,7 +153,6 @@ impl BattleState {
             outcome: None,
             peers: None,
             my_room_index: 0,
-            start_at_unix_ms: 0,
         }
     }
 
@@ -196,15 +188,13 @@ impl BattleState {
             outcome: None,
             peers: None,
             my_room_index: 0,
-            start_at_unix_ms: 0,
         }
     }
 
     /// N人分の確立済みTCP接続から通信ありの対戦状態を組み立てる(#274)。
     ///
     /// `games`/`player_names`は既にseed/configから生成済み(index 0が自分)で、`streams`は
-    /// 自分以外の各参加者との接続(`games`のindex 1..と対応する順)。`start_at_unix_ms`は
-    /// ハンドシェイクで合意した開始時刻(`Result`送信時の経過時間の算出に使う)。
+    /// 自分以外の各参加者との接続(`games`のindex 1..と対応する順)。
     ///
     /// #300: `streams[i]`が`None`なら`games[i+1]`はAI(接続を持たない追加参加者)。ホスト
     /// (`my_index`が0)だけがそのAIをローカルで動かし、入力・妨害岩・結果を代理送信する。
@@ -217,7 +207,6 @@ impl BattleState {
         player_names: Vec<String>,
         streams: Vec<Option<TcpStream>>,
         my_index: usize,
-        start_at_unix_ms: u64,
     ) -> io::Result<Self> {
         debug_assert_eq!(
             games.len(),
@@ -242,11 +231,7 @@ impl BattleState {
         let ai_result_sent = vec![false; ai_pilots.len()];
         let peers = streams
             .into_iter()
-            .map(|stream| {
-                stream
-                    .map(|stream| PeerLink::new(stream, start_at_unix_ms))
-                    .transpose()
-            })
+            .map(|stream| stream.map(PeerLink::new).transpose())
             .collect::<io::Result<Vec<Option<PeerLink>>>>()?;
 
         Ok(Self {
@@ -259,7 +244,6 @@ impl BattleState {
             outcome: None,
             peers: Some(peers),
             my_room_index: my_index,
-            start_at_unix_ms,
         })
     }
 
@@ -312,13 +296,7 @@ impl BattleState {
         let player_names = vec![my_name.to_string(), handshake.opponent_name];
 
         // 2人版にAI(#300)は混ざらないため、自分のroom内インデックスは0でよい。
-        Self::from_peer_streams(
-            games,
-            player_names,
-            vec![Some(stream)],
-            0,
-            handshake.start_at_unix_ms,
-        )
+        Self::from_peer_streams(games, player_names, vec![Some(stream)], 0)
     }
 
     /// 決着(#256)。`Some`なら対戦は終わっており、画面側は結果表示へ切り替える。
@@ -789,12 +767,10 @@ impl BattleState {
             }
             peer.result_sent = true;
 
-            let time_ms = net::unix_time_ms().saturating_sub(peer.start_at_unix_ms);
             let _ = net::write_message(
                 &mut peer.writer,
                 &GameMessage::Result {
                     reached_goal,
-                    time_ms,
                     // 自分自身の結果なので代理送信ではない(#300)。
                     proxy_for: None,
                 },
@@ -824,11 +800,9 @@ impl BattleState {
             };
             self.ai_result_sent[i] = true;
 
-            let time_ms = net::unix_time_ms().saturating_sub(self.start_at_unix_ms);
             let proxy_for = Some(self.room_index_for_games_index(i + 1));
             self.broadcast(&GameMessage::Result {
                 reached_goal,
-                time_ms,
                 proxy_for,
             });
         }
@@ -1937,7 +1911,6 @@ mod tests {
                 &mut peer,
                 &GameMessage::Result {
                     reached_goal,
-                    time_ms: 0,
                     proxy_for: None,
                 },
             )
@@ -2110,8 +2083,6 @@ mod tests {
             sockets[b][a] = Some(to_a);
         }
 
-        // 開始時刻はハンドシェイク(#275)で合意する値の代わり。
-        let start_at_unix_ms = net::unix_time_ms();
         let mut states = Vec::with_capacity(n);
         for (h, mut row) in sockets.into_iter().enumerate() {
             let order = participant_order(n, h);
@@ -2131,7 +2102,6 @@ mod tests {
                     streams,
                     // 参加者番号とルーム内インデックスを同じ並びで扱う。
                     h,
-                    start_at_unix_ms,
                 )
                 .unwrap(),
             );
@@ -2156,14 +2126,7 @@ mod tests {
             .map(|_| new_game_from_battle_config(seed, &config))
             .collect();
         let player_names: Vec<String> = (0..n).map(|p| format!("p{p}")).collect();
-        let state = BattleState::from_peer_streams(
-            games,
-            player_names,
-            host_streams,
-            0,
-            net::unix_time_ms(),
-        )
-        .unwrap();
+        let state = BattleState::from_peer_streams(games, player_names, host_streams, 0).unwrap();
         (state, raw_peers)
     }
 
@@ -2754,14 +2717,7 @@ mod tests {
             .iter()
             .map(|&p| room_member_name(human_count, p))
             .collect();
-        let state = BattleState::from_peer_streams(
-            games,
-            player_names,
-            streams,
-            my_index,
-            net::unix_time_ms(),
-        )
-        .unwrap();
+        let state = BattleState::from_peer_streams(games, player_names, streams, my_index).unwrap();
         (state, raw_peers)
     }
 
@@ -2782,8 +2738,6 @@ mod tests {
             sockets[b][a] = Some(to_a);
         }
 
-        // 開始時刻はハンドシェイク(#275)で合意する値の代わり。
-        let start_at_unix_ms = net::unix_time_ms();
         let mut states = Vec::with_capacity(human_count);
         for (h, mut row) in sockets.into_iter().enumerate() {
             let order = participant_order(total, h);
@@ -2801,10 +2755,7 @@ mod tests {
                     (p < human_count).then(|| row[p].take().expect("各ペアに1本ずつ用意している"))
                 })
                 .collect();
-            states.push(
-                BattleState::from_peer_streams(games, player_names, streams, h, start_at_unix_ms)
-                    .unwrap(),
-            );
+            states.push(BattleState::from_peer_streams(games, player_names, streams, h).unwrap());
         }
         states
     }
@@ -2928,7 +2879,6 @@ mod tests {
             &mut peers[0],
             &GameMessage::Result {
                 reached_goal: true,
-                time_ms: 1_234,
                 proxy_for: Some(AI_ROOM_INDEX),
             },
         )
