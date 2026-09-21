@@ -1216,6 +1216,30 @@ struct BattleConfig {
     move_cooldown_ms: u64,
     dodge_recovery_ms: u64,
     chain_vanish_interval_ms: u64,
+    // 以下はAI専用のミラー値(#312。12.9)。AIを動かすのはホストだけ(#300)だが、ゲストも
+    // ゴースト表示(#301)や決着判定のためにAIの盤面コピーを手元でシミュレートするため、
+    // AI専用値もホストから配らないとゲスト側のコピーが別の地形になる。
+    // 反応速度系(move_cooldown_ms/dodge_recovery_ms)はAI専用値を持たない。
+    ai_rock_spawn_rate_percent: u32,
+    ai_air_spawn_rate_percent: u32,
+    ai_star_spawn_rate_percent: u32,
+    ai_diamond_spawn_rate_percent: u32,
+    ai_item_clear_above_rate_percent: u32,
+    ai_item_unify_colors_rate_percent: u32,
+    ai_item_starify_screen_rate_percent: u32,
+    ai_color_count: u8,
+    ai_color_cluster_rate_percent: u32,
+    ai_bomb_spawn_rate_percent: u32,
+    ai_bomb_fuse_ms: u32,
+    ai_attack_blocks_per_rock: u32,
+    ai_attack_rocks_per_wave_max: u32,
+    ai_attack_blocks_per_bomb: u32,
+    ai_attack_bombs_per_wave_max: u32,
+    ai_attack_bomb_ratio_percent: u32,
+    ai_block_fall_tick_ms: u64,
+    ai_player_fall_tick_ms: u64,
+    ai_shake_duration_ms: u64,
+    ai_chain_vanish_interval_ms: u64,
 }
 
 /// 1章のInputActionのうちネットワーク同期に必要な要素のみを送る。
@@ -1415,6 +1439,57 @@ TERM独自拡張のうち、以下は公平性を壊すため対戦中は無効�
 - 相殺・変換・投下は受信側のインスタンスの中で完結する
 - 自分が持っている他の参加者のコピーも掘削で攻撃力を溜めるが、この値は`Attack`メッセージと二重に数えないよう毎フレーム取り出して捨てる(正式な量は各参加者が自分で送ってくる)
 - 通信なしの対戦(ローカル専用・AI対戦#296)では相手の状態を直接見られるため、送信側でPlayingの参加者だけに渡す形で同じルールを再現する
+
+### 12.9 AI専用設定画面(#312)
+
+AIの盤面だけに効く設定を、人間側(10章の設定画面)とは別の集合として持つ。AIに不利な盤面を渡してハンディキャップを付ける、逆に厳しい相手にするといった調整を、自分のプレイ条件を変えずに行うためのもの。
+
+- AIと人間で値を分けるだけで、盤面の生成規則そのものは同じ。AI専用の挙動を追加するものではない
+- 反応速度系(`move_cooldown_ms`・`dodge_recovery_ms`)はAI専用値を持たない。AIは人間と同じ入力経路を通らないため、値を分けても意味が無い
+- 対戦では他の設定と同じくホストの値を一方的に採用する(12.2の`ai_*`フィールド)。ゲストもAIの盤面コピーを手元で進めるため、AI専用値も配る必要がある
+- 人間側と同じく`settings.json`へ永続化する
+
+#### 開き方と操作
+
+ロビー(12.1)の待機中に**S**キーで開き、ロビー画面の上へ重ねて表示する。独立した画面としては持たず、ロビーのソケットを持ち直さずに開閉できるようにする。
+
+| 操作 | 内容 |
+|---|---|
+| S | 開く/閉じる |
+| Esc | 閉じる(ロビーからの離脱には使わない) |
+| ↑↓ | 項目の選択 |
+| ←→ | 値を1段ずつ増減 |
+
+- 開けるのは「相手を探している間」と「AIと対戦する人数を選んでいる間」(#296)の2つの局面だけ。招待の応答待ち・接続中には開かない
+- 開いている間はロビーの操作(候補の選択・招待・ルームのAIの枠・開始)を受け付けない。↑↓がAIと対戦する人数の選択と重なるため、入力はこの画面で使い切る。閉じた瞬間のフレームも同様に扱い、同じフレームに残った入力がロビーへ届かないようにする
+- 開いている間はロビーの状態更新も止まる。探索の反映が数秒遅れるだけなので許容する
+
+#### 設定項目
+
+人間側の設定画面と同じ順・同じ値の範囲・同じ刻み幅で、次の20項目を持つ。
+
+| 画面の項目 | 対応するフィールド |
+|---|---|
+| ブロック落下速度(小さいほど速い) | `ai_block_fall_tick_ms` |
+| キャラの落下速度(小さいほど速い) | `ai_player_fall_tick_ms` |
+| 落下待ち時間(揺れ) | `ai_shake_duration_ms` |
+| Xブロック配分 | `ai_rock_spawn_rate_percent` |
+| AIR配分 | `ai_air_spawn_rate_percent` |
+| スター配分 | `ai_star_spawn_rate_percent` |
+| ダイヤ配分 | `ai_diamond_spawn_rate_percent` |
+| Rアイテム配分 | `ai_item_clear_above_rate_percent` |
+| Cアイテム配分 | `ai_item_unify_colors_rate_percent` |
+| Kアイテム配分 | `ai_item_starify_screen_rate_percent` |
+| 色数 | `ai_color_count` |
+| 色ブロック結合割合 | `ai_color_cluster_rate_percent` |
+| ボム出現頻度 | `ai_bomb_spawn_rate_percent` |
+| ボム爆発までの時間 | `ai_bomb_fuse_ms` |
+| 岩1個に必要な攻撃力 | `ai_attack_blocks_per_rock` |
+| 一度に降る岩の上限 | `ai_attack_rocks_per_wave_max` |
+| ボム1個に必要な攻撃力 | `ai_attack_blocks_per_bomb` |
+| 一度に降るボムの上限 | `ai_attack_bombs_per_wave_max` |
+| 攻撃力のボム化比率 | `ai_attack_bomb_ratio_percent` |
+| 連鎖消滅インターバル | `ai_chain_vanish_interval_ms` |
 
 ---
 

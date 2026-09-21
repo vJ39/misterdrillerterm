@@ -104,6 +104,9 @@ struct App {
     /// 一時停止中にオーバーレイ表示する設定/ヘルプ画面。Gameを作り直さずScreen::Playingの
     /// まま上に重ねて描画するだけなので、画面遷移ではなくこの状態フラグで管理する。
     pause_overlay: PauseOverlay,
+    /// 対戦ロビーでオーバーレイ表示するAI専用設定画面(#312)のカーソル位置。`None`は非表示。
+    /// ロビーのソケットを持ち直さずに開閉したいため、画面遷移ではなくこの状態で管理する。
+    lobby_ai_settings_selection: Option<ui::render::AiSettingsChoice>,
     /// ヘルプ画面(タイトルから開く独立画面)のジュークボックスのカーソル位置。
     /// 画面を離れても保持する。
     help_jukebox_selection: usize,
@@ -221,6 +224,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         mode_select_choice,
         settings_selection: ui::render::SettingsChoice::Music,
         pause_overlay: PauseOverlay::None,
+        lobby_ai_settings_selection: None,
         help_jukebox_selection: 0,
         help_jukebox_playing: None,
         autopilot: None,

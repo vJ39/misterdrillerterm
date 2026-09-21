@@ -67,25 +67,25 @@
 
 ## UI設計
 
-新規画面(`Screen`に1バリアント追加。仮に`AiSettings`)。既存の設定画面(`draw_settings`)と同じ構造で別関数`draw_ai_settings`を新設し、20項目を一覧表示・上下キーでカーソル移動・左右キー(または+/-)で増減する既存パラダイムをそのまま使う。
+新規`Screen`バリアントは作らず、既存の`PauseOverlay`(`Screen::Playingのまま`上に重ね描画する状態)と同じ考え方で、ロビー画面専用のオーバーレイとして実装した。`App`に`lobby_ai_settings_selection: Option<ui::render::AiSettingsChoice>`を持たせ、`Screen::NetworkLobby`のtick関数(`tick_network_lobby`)内でこの状態を見て、開いている間はロビー本体の入力処理(`LobbyState::update`)を呼ばずオーバーレイの操作だけを処理する。
 
 入り口:
-- ロビー画面(`Screen::NetworkLobby`、`LobbyPhase::Discovering`)でI/Dキーの説明の近くに新規キー(未使用のキーを選定)を割り当て、`AiSettings`へ遷移
-- AI対戦の人数選択画面(`LobbyPhase::SelectingAiOpponentCount`)からも同じキーで遷移できるようにする
+- ロビー画面(`LobbyPhase::Discovering`)、AI対戦の人数選択画面(`LobbyPhase::SelectingAiOpponentCount`)の両方で、既存の`InputAction::OpenSettings`(Sキー)を割り当てた。両フェーズともこのキーは元々何も処理していなかったため、既存操作と衝突しない
 
-戻り先: 開いた場所(ロビーまたは人数選択画面)へ戻る。既存の一時停止中の設定画面呼び出し(#23)が同種の「元の画面に戻る」パターンを持っているはずなので、それに合わせる。
+戻り先: 画面遷移自体が発生しないため「戻る」操作は不要。Sキーの再押下またはEscで`lobby_ai_settings_selection`を`None`に戻すだけで、元のロビー画面がそのまま続く。
 
-## 影響ファイル(見積り)
+## 実装ファイル
 
 - `src/settings.rs`: 20フィールド追加(構造体・Default・JSON手書きシリアライズ・パース・テスト)
-- `src/net.rs`: `BattleConfig`に20フィールド追加、`from_settings`、ラウンドトリップテスト
-- `src/battle.rs`: `new_ai_game_from_battle_config`新設
-- `src/lobby.rs`: `start_ai_battle`/`battle_from_room`の生成分岐、新規画面への遷移キー処理(2箇所)
-- `src/app/screens.rs`: `Screen`新規バリアント、tick関数
-- `src/app/settings_menu.rs`: adjust系関数20個
-- `src/ui/render.rs`: `draw_ai_settings`、選択項目の列挙、テスト
-- `src/input.rs`: 新規キー割り当て・`InputAction`
-- `docs/spec.md`: 新セクション
+- `src/net.rs`: `BattleConfig`に20フィールド追加、`with_ai_values()`、ラウンドトリップテスト
+- `src/battle.rs`: `new_ai_game_from_battle_config`新設(`with_ai_values()`経由で既存の`new_game_from_battle_config`へ委譲)
+- `src/room.rs`: `GameMessage::StartConfig`のBox化に伴う受け渡し2行(`clippy::large_enum_variant`対応)
+- `src/lobby.rs`: `start_ai_battle`/`battle_from_room`の生成分岐
+- `src/main.rs`: `App`に`lobby_ai_settings_selection`を追加
+- `src/app/screens.rs`: `tick_network_lobby`内の分岐処理、オーバーレイの入力処理
+- `src/app/settings_menu.rs`: `adjust_ai_setting`(20項目をmatchで振り分ける1関数)
+- `src/ui/render.rs`: `AiSettingsChoice`(20バリアント)、`draw_ai_settings`
+- `docs/spec.md`: `BattleConfig`一覧の更新、新セクション
 
 ## 実装規模と進め方
 

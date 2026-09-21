@@ -23,6 +23,7 @@ use crate::game::board::{Board, Cell as BoardCell, ColorKind, ItemEffect, Pos};
 use crate::game::player::Direction;
 use crate::game::{BombPhase, Game, GameOverChoice, GameStatus};
 use crate::lobby::{LobbyPhase, LobbyState};
+use crate::settings::Settings;
 use crate::text_edit::TextEditState;
 use crate::ui::colors;
 
@@ -1445,6 +1446,281 @@ pub fn draw_settings(
             } else {
                 "配分・音量・色数は←→で調整 / Escで閉じる"
             },
+            text_style,
+        )),
+    ])
+    .block(block)
+    .style(Style::default().bg(colors::LETTERBOX_BG))
+    .alignment(Alignment::Center);
+    frame.render_widget(paragraph, settings_area);
+}
+
+// ---------------------------------------------------------------------------
+// AI専用設定画面(#312)
+// ---------------------------------------------------------------------------
+
+/// AI専用設定画面での選択項目。人間側の`SettingsChoice`とは別の集合で、
+/// `Settings`の`ai_*`フィールドの宣言順に並べる。
+/// ロビーのAI人数選択(#296)とは無関係な、AIの盤面難易度の項目である。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiSettingsChoice {
+    /// AI側のブロック落下速度(tick間隔, ms)。
+    BlockFallSpeed,
+    /// AI側のキャラ自身の自由落下速度(tick間隔, ms)。
+    PlayerFallSpeed,
+    /// AI側の揺れ時間(ms)。
+    ShakeDuration,
+    /// AI側のXブロック(岩)の出現率(%)。
+    RockRate,
+    /// AI側のAIR(酸素カプセル)の出現率(%)。
+    AirRate,
+    /// AI側のスターブロックの出現率(%)。
+    StarRate,
+    /// AI側のダイヤブロックの出現率(%)。
+    DiamondRate,
+    /// AI側のアイテムブロック(ClearAbove)の出現率(%)。
+    ItemClearAboveRate,
+    /// AI側のアイテムブロック(UnifyColors)の出現率(%)。
+    ItemUnifyColorsRate,
+    /// AI側のアイテムブロック(StarifyScreen)の出現率(%)。
+    ItemStarifyScreenRate,
+    /// AI側の色ブロックの色数(1〜4)。
+    ColorCount,
+    /// AI側の色ブロックの結合しやすさ(%)。
+    ColorClusterRate,
+    /// AI側のボム出現頻度(%)。
+    BombRate,
+    /// AI側のボム設置から爆発までの時間(ms)。
+    BombFuse,
+    /// AI側で岩1個を降らせるのに必要な攻撃力。
+    AttackBlocksPerRock,
+    /// AI側で1回に降らせる岩の個数上限。
+    AttackRocksPerWaveMax,
+    /// AI側でボム1個を降らせるのに必要な攻撃力。
+    AttackBlocksPerBomb,
+    /// AI側で1回に降らせるボムの個数上限。
+    AttackBombsPerWaveMax,
+    /// AI側で攻撃力のうちボムとして送る割合(%)。
+    AttackBombRatioPercent,
+    /// AI側の連鎖消滅インターバル(ms)。
+    ChainVanishInterval,
+}
+
+impl AiSettingsChoice {
+    /// ↓キーでの選択項目の巡回。
+    pub fn cycle(self) -> Self {
+        match self {
+            AiSettingsChoice::BlockFallSpeed => AiSettingsChoice::PlayerFallSpeed,
+            AiSettingsChoice::PlayerFallSpeed => AiSettingsChoice::ShakeDuration,
+            AiSettingsChoice::ShakeDuration => AiSettingsChoice::RockRate,
+            AiSettingsChoice::RockRate => AiSettingsChoice::AirRate,
+            AiSettingsChoice::AirRate => AiSettingsChoice::StarRate,
+            AiSettingsChoice::StarRate => AiSettingsChoice::DiamondRate,
+            AiSettingsChoice::DiamondRate => AiSettingsChoice::ItemClearAboveRate,
+            AiSettingsChoice::ItemClearAboveRate => AiSettingsChoice::ItemUnifyColorsRate,
+            AiSettingsChoice::ItemUnifyColorsRate => AiSettingsChoice::ItemStarifyScreenRate,
+            AiSettingsChoice::ItemStarifyScreenRate => AiSettingsChoice::ColorCount,
+            AiSettingsChoice::ColorCount => AiSettingsChoice::ColorClusterRate,
+            AiSettingsChoice::ColorClusterRate => AiSettingsChoice::BombRate,
+            AiSettingsChoice::BombRate => AiSettingsChoice::BombFuse,
+            AiSettingsChoice::BombFuse => AiSettingsChoice::AttackBlocksPerRock,
+            AiSettingsChoice::AttackBlocksPerRock => AiSettingsChoice::AttackRocksPerWaveMax,
+            AiSettingsChoice::AttackRocksPerWaveMax => AiSettingsChoice::AttackBlocksPerBomb,
+            AiSettingsChoice::AttackBlocksPerBomb => AiSettingsChoice::AttackBombsPerWaveMax,
+            AiSettingsChoice::AttackBombsPerWaveMax => AiSettingsChoice::AttackBombRatioPercent,
+            AiSettingsChoice::AttackBombRatioPercent => AiSettingsChoice::ChainVanishInterval,
+            AiSettingsChoice::ChainVanishInterval => AiSettingsChoice::BlockFallSpeed,
+        }
+    }
+
+    /// ↑キーでの選択項目の巡回(`cycle`の厳密な逆方向)。
+    pub fn cycle_back(self) -> Self {
+        match self {
+            AiSettingsChoice::BlockFallSpeed => AiSettingsChoice::ChainVanishInterval,
+            AiSettingsChoice::PlayerFallSpeed => AiSettingsChoice::BlockFallSpeed,
+            AiSettingsChoice::ShakeDuration => AiSettingsChoice::PlayerFallSpeed,
+            AiSettingsChoice::RockRate => AiSettingsChoice::ShakeDuration,
+            AiSettingsChoice::AirRate => AiSettingsChoice::RockRate,
+            AiSettingsChoice::StarRate => AiSettingsChoice::AirRate,
+            AiSettingsChoice::DiamondRate => AiSettingsChoice::StarRate,
+            AiSettingsChoice::ItemClearAboveRate => AiSettingsChoice::DiamondRate,
+            AiSettingsChoice::ItemUnifyColorsRate => AiSettingsChoice::ItemClearAboveRate,
+            AiSettingsChoice::ItemStarifyScreenRate => AiSettingsChoice::ItemUnifyColorsRate,
+            AiSettingsChoice::ColorCount => AiSettingsChoice::ItemStarifyScreenRate,
+            AiSettingsChoice::ColorClusterRate => AiSettingsChoice::ColorCount,
+            AiSettingsChoice::BombRate => AiSettingsChoice::ColorClusterRate,
+            AiSettingsChoice::BombFuse => AiSettingsChoice::BombRate,
+            AiSettingsChoice::AttackBlocksPerRock => AiSettingsChoice::BombFuse,
+            AiSettingsChoice::AttackRocksPerWaveMax => AiSettingsChoice::AttackBlocksPerRock,
+            AiSettingsChoice::AttackBlocksPerBomb => AiSettingsChoice::AttackRocksPerWaveMax,
+            AiSettingsChoice::AttackBombsPerWaveMax => AiSettingsChoice::AttackBlocksPerBomb,
+            AiSettingsChoice::AttackBombRatioPercent => AiSettingsChoice::AttackBombsPerWaveMax,
+            AiSettingsChoice::ChainVanishInterval => AiSettingsChoice::AttackBombRatioPercent,
+        }
+    }
+}
+
+/// AI専用設定画面(#312)をロビーの上に重ねて描画する。見た目は`draw_settings`に合わせるが、
+/// 20項目ぶんの引数を並べると呼び出し側が読めなくなるため`Settings`ごと受け取り、
+/// 参照するのは`ai_*`フィールドだけに限る。
+pub fn draw_ai_settings(frame: &mut Frame, selection: AiSettingsChoice, settings: &Settings) {
+    let area = frame.area();
+    let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+    // 20項目+見出し+案内2行が枠からクリップしないよう、人間側と同じ固定行数の枠を使う
+    // (収まっているかは`ai_settings_box_is_tall_enough_...`で確認する)。
+    let settings_area = settings_box_rect(area, frame_rect);
+    frame.render_widget(Clear, settings_area);
+
+    let text_style = Style::default()
+        .fg(colors::PANEL_TEXT)
+        .bg(colors::LETTERBOX_BG);
+    let selected_style = Style::default()
+        .fg(colors::LETTERBOX_BG)
+        .bg(colors::PANEL_TEXT);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(colors::PANEL_BORDER)
+                .bg(colors::LETTERBOX_BG),
+        )
+        .style(Style::default().bg(colors::LETTERBOX_BG));
+
+    let row_style = |is_selected: bool| {
+        if is_selected {
+            selected_style
+        } else {
+            text_style
+        }
+    };
+    let rate_line = |label: &str, percent: u32, is_selected: bool| {
+        let prefix = if is_selected { "> " } else { "  " };
+        Line::from(Span::styled(
+            format!("{prefix}{label}: {percent}%"),
+            row_style(is_selected),
+        ))
+    };
+    let count_line = |label: &str, count: u32, is_selected: bool| {
+        Line::from(Span::styled(
+            format!("{}{label}: {count}", if is_selected { "> " } else { "  " }),
+            row_style(is_selected),
+        ))
+    };
+    let ms_line = |label: &str, ms: u64, is_selected: bool| {
+        Line::from(Span::styled(
+            format!("{}{label}: {ms}ms", if is_selected { "> " } else { "  " }),
+            row_style(is_selected),
+        ))
+    };
+
+    let paragraph = Paragraph::new(vec![
+        Line::from(Span::styled("AI SETTINGS", text_style)),
+        ms_line(
+            "ブロック落下速度(小さいほど速い)",
+            settings.ai_block_fall_tick_ms,
+            selection == AiSettingsChoice::BlockFallSpeed,
+        ),
+        ms_line(
+            "キャラの落下速度(小さいほど速い)",
+            settings.ai_player_fall_tick_ms,
+            selection == AiSettingsChoice::PlayerFallSpeed,
+        ),
+        ms_line(
+            "落下待ち時間(揺れ)",
+            settings.ai_shake_duration_ms,
+            selection == AiSettingsChoice::ShakeDuration,
+        ),
+        rate_line(
+            "Xブロック配分",
+            settings.ai_rock_spawn_rate_percent,
+            selection == AiSettingsChoice::RockRate,
+        ),
+        rate_line(
+            "AIR配分",
+            settings.ai_air_spawn_rate_percent,
+            selection == AiSettingsChoice::AirRate,
+        ),
+        rate_line(
+            "スター配分",
+            settings.ai_star_spawn_rate_percent,
+            selection == AiSettingsChoice::StarRate,
+        ),
+        rate_line(
+            "ダイヤ配分",
+            settings.ai_diamond_spawn_rate_percent,
+            selection == AiSettingsChoice::DiamondRate,
+        ),
+        rate_line(
+            "Rアイテム配分",
+            settings.ai_item_clear_above_rate_percent,
+            selection == AiSettingsChoice::ItemClearAboveRate,
+        ),
+        rate_line(
+            "Cアイテム配分",
+            settings.ai_item_unify_colors_rate_percent,
+            selection == AiSettingsChoice::ItemUnifyColorsRate,
+        ),
+        rate_line(
+            "Kアイテム配分",
+            settings.ai_item_starify_screen_rate_percent,
+            selection == AiSettingsChoice::ItemStarifyScreenRate,
+        ),
+        count_line(
+            "色数",
+            u32::from(settings.ai_color_count),
+            selection == AiSettingsChoice::ColorCount,
+        ),
+        rate_line(
+            "色ブロック結合割合",
+            settings.ai_color_cluster_rate_percent,
+            selection == AiSettingsChoice::ColorClusterRate,
+        ),
+        rate_line(
+            "ボム出現頻度",
+            settings.ai_bomb_spawn_rate_percent,
+            selection == AiSettingsChoice::BombRate,
+        ),
+        ms_line(
+            "ボム爆発までの時間",
+            u64::from(settings.ai_bomb_fuse_ms),
+            selection == AiSettingsChoice::BombFuse,
+        ),
+        count_line(
+            "岩1個に必要な攻撃力",
+            settings.ai_attack_blocks_per_rock,
+            selection == AiSettingsChoice::AttackBlocksPerRock,
+        ),
+        count_line(
+            "一度に降る岩の上限",
+            settings.ai_attack_rocks_per_wave_max,
+            selection == AiSettingsChoice::AttackRocksPerWaveMax,
+        ),
+        count_line(
+            "ボム1個に必要な攻撃力",
+            settings.ai_attack_blocks_per_bomb,
+            selection == AiSettingsChoice::AttackBlocksPerBomb,
+        ),
+        count_line(
+            "一度に降るボムの上限",
+            settings.ai_attack_bombs_per_wave_max,
+            selection == AiSettingsChoice::AttackBombsPerWaveMax,
+        ),
+        rate_line(
+            "攻撃力のボム化比率",
+            settings.ai_attack_bomb_ratio_percent,
+            selection == AiSettingsChoice::AttackBombRatioPercent,
+        ),
+        ms_line(
+            "連鎖消滅インターバル",
+            settings.ai_chain_vanish_interval_ms,
+            selection == AiSettingsChoice::ChainVanishInterval,
+        ),
+        Line::from(Span::styled(
+            "AI対戦の相手側にだけ効く設定 / 自分の設定は変わらない",
+            text_style,
+        )),
+        Line::from(Span::styled(
+            "↑↓で選択 / ←→で調整 / SかEscで閉じる",
             text_style,
         )),
     ])
@@ -4166,6 +4442,168 @@ mod tests {
             screen_shows(&text, "> 対戦: 攻撃力のボム化比率: 20%"),
             "選択中の「攻撃力のボム化比率」の行が画面に出ていない:\n{text}"
         );
+    }
+
+    // --- AI専用設定画面(#312) ---
+
+    #[test]
+    fn ai_settings_box_is_tall_enough_for_all_content_lines() {
+        // 見出し1+AI専用の設定項目20+案内2行=23行、枠(上下)2行込みで25行必要。
+        // 人間側と同じ枠(SETTINGS_BOX_H)を使うため現状は余裕があるが、項目を追加したら
+        // この定数も増やすこと。
+        const REQUIRED_CONTENT_LINES: u16 = 23;
+        let area = Rect::new(0, 0, 200, 60);
+        let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
+        let settings_area = settings_box_rect(area, frame_rect);
+        assert!(
+            settings_area.height >= REQUIRED_CONTENT_LINES + 2,
+            "AI専用設定画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
+            REQUIRED_CONTENT_LINES,
+            settings_area.height
+        );
+    }
+
+    /// テスト用のAI専用設定値。行と`ai_*`フィールドの対応の取り違えを検知するため、
+    /// 20項目すべてに別々の値を入れる。
+    fn ai_settings_for_render_test() -> Settings {
+        Settings {
+            ai_block_fall_tick_ms: 111,
+            ai_player_fall_tick_ms: 122,
+            ai_shake_duration_ms: 133,
+            ai_rock_spawn_rate_percent: 141,
+            ai_air_spawn_rate_percent: 152,
+            ai_star_spawn_rate_percent: 163,
+            ai_diamond_spawn_rate_percent: 174,
+            ai_item_clear_above_rate_percent: 185,
+            ai_item_unify_colors_rate_percent: 196,
+            ai_item_starify_screen_rate_percent: 207,
+            ai_color_count: 3,
+            ai_color_cluster_rate_percent: 218,
+            ai_bomb_spawn_rate_percent: 229,
+            ai_bomb_fuse_ms: 3500,
+            ai_attack_blocks_per_rock: 11,
+            ai_attack_rocks_per_wave_max: 5,
+            ai_attack_blocks_per_bomb: 22,
+            ai_attack_bombs_per_wave_max: 7,
+            ai_attack_bomb_ratio_percent: 33,
+            ai_chain_vanish_interval_ms: 240,
+            ..Settings::default()
+        }
+    }
+
+    #[test]
+    fn the_ai_settings_screen_shows_all_twenty_items_with_their_values() {
+        // 20項目すべてが値つきで枠内に見えていることを実描画で確認する。
+        let settings = ai_settings_for_render_test();
+        let text = rendered_screen_text(|frame| {
+            draw_ai_settings(frame, AiSettingsChoice::RockRate, &settings)
+        });
+        for expected in [
+            "ブロック落下速度(小さいほど速い): 111ms",
+            "キャラの落下速度(小さいほど速い): 122ms",
+            "落下待ち時間(揺れ): 133ms",
+            "Xブロック配分: 141%",
+            "AIR配分: 152%",
+            "スター配分: 163%",
+            "ダイヤ配分: 174%",
+            "Rアイテム配分: 185%",
+            "Cアイテム配分: 196%",
+            "Kアイテム配分: 207%",
+            "色数: 3",
+            "色ブロック結合割合: 218%",
+            "ボム出現頻度: 229%",
+            "ボム爆発までの時間: 3500ms",
+            "岩1個に必要な攻撃力: 11",
+            "一度に降る岩の上限: 5",
+            "ボム1個に必要な攻撃力: 22",
+            "一度に降るボムの上限: 7",
+            "攻撃力のボム化比率: 33%",
+            "連鎖消滅インターバル: 240ms",
+        ] {
+            assert!(
+                screen_shows(&text, expected),
+                "「{expected}」の行が画面に出ていない:\n{text}"
+            );
+        }
+        assert!(
+            screen_shows(&text, "AI SETTINGS"),
+            "見出しが出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "> Xブロック配分: 141%"),
+            "選択中の項目にカーソル(>)が付いていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_ai_settings_screen_marks_the_last_item_when_it_is_selected() {
+        // 末尾の項目はクリップの影響を最初に受けるため、カーソル付きで見えることを個別に確認する。
+        let settings = ai_settings_for_render_test();
+        let text = rendered_screen_text(|frame| {
+            draw_ai_settings(frame, AiSettingsChoice::ChainVanishInterval, &settings)
+        });
+        assert!(
+            screen_shows(&text, "> 連鎖消滅インターバル: 240ms"),
+            "末尾の項目が選択状態で出ていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_ai_settings_screen_stays_visible_when_it_is_drawn_over_the_lobby() {
+        // `tick_network_lobby`と同じ順(ロビー→AI専用設定)で1フレームに重ねても、
+        // 設定側の見出しと項目がロビーの描画に埋もれないことを確認する。
+        let lobby = LobbyState::new_on_loopback("me".to_string())
+            .expect("ループバックのソケットは確保できるはず");
+        let settings = ai_settings_for_render_test();
+        let text = rendered_screen_text(|frame| {
+            draw_network_lobby(frame, &lobby);
+            draw_ai_settings(frame, AiSettingsChoice::RockRate, &settings);
+        });
+        for expected in [
+            "AI SETTINGS",
+            "> Xブロック配分: 141%",
+            "連鎖消滅インターバル: 240ms",
+            "SかEscで閉じる",
+        ] {
+            assert!(
+                screen_shows(&text, expected),
+                "ロビーに重ねると{expected}が見えない:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn ai_settings_choice_visits_every_item_once_per_round() {
+        // 20項目を1周して元へ戻る(巡回の抜け・重複はここで表に出る)。
+        let mut seen = Vec::new();
+        let mut choice = AiSettingsChoice::BlockFallSpeed;
+        for _ in 0..20 {
+            assert!(
+                !seen.contains(&choice),
+                "巡回中に同じ項目へ二度来た: {choice:?}"
+            );
+            seen.push(choice);
+            choice = choice.cycle();
+        }
+        assert_eq!(
+            choice,
+            AiSettingsChoice::BlockFallSpeed,
+            "20回のcycleで先頭へ戻らなかった"
+        );
+        assert_eq!(seen.len(), 20, "巡回できた項目数が20でない");
+    }
+
+    #[test]
+    fn ai_settings_choice_cycle_back_is_the_exact_reverse_of_cycle() {
+        let mut choice = AiSettingsChoice::BlockFallSpeed;
+        for _ in 0..20 {
+            assert_eq!(
+                choice.cycle().cycle_back(),
+                choice,
+                "cycleの逆方向になっていない: {choice:?}"
+            );
+            choice = choice.cycle();
+        }
     }
 
     // --- 対戦ロビー画面(#256) ---

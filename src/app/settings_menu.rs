@@ -352,6 +352,117 @@ pub fn adjust_sound_volume_percent(current: u32, increase: bool) -> u32 {
     }
 }
 
+/// AI専用設定(`Settings`の`ai_*`、#312)を1ステップぶん調整する。値の範囲・刻み幅は
+/// 人間側と同じ定数をそのまま使い、AIにだけ別の値を持たせるためにフィールドを分けている。
+/// 全項目を扱うため対象外の分岐は無い。`Settings::save`は呼び出し側の責務。
+pub fn adjust_ai_setting(
+    settings: &mut Settings,
+    choice: ui::render::AiSettingsChoice,
+    increase: bool,
+) {
+    match choice {
+        ui::render::AiSettingsChoice::BlockFallSpeed => {
+            settings.ai_block_fall_tick_ms =
+                adjust_fall_speed_ms(settings.ai_block_fall_tick_ms, increase);
+        }
+        ui::render::AiSettingsChoice::PlayerFallSpeed => {
+            settings.ai_player_fall_tick_ms =
+                adjust_fall_speed_ms(settings.ai_player_fall_tick_ms, increase);
+        }
+        ui::render::AiSettingsChoice::ShakeDuration => {
+            settings.ai_shake_duration_ms =
+                adjust_shake_duration_ms(settings.ai_shake_duration_ms, increase);
+        }
+        ui::render::AiSettingsChoice::RockRate => {
+            settings.ai_rock_spawn_rate_percent = adjust_rate_percent(
+                settings.ai_rock_spawn_rate_percent,
+                increase,
+                SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::AirRate => {
+            settings.ai_air_spawn_rate_percent = adjust_rate_percent(
+                settings.ai_air_spawn_rate_percent,
+                increase,
+                SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::StarRate => {
+            settings.ai_star_spawn_rate_percent =
+                adjust_star_rate_percent(settings.ai_star_spawn_rate_percent, increase);
+        }
+        ui::render::AiSettingsChoice::DiamondRate => {
+            settings.ai_diamond_spawn_rate_percent = adjust_rate_percent(
+                settings.ai_diamond_spawn_rate_percent,
+                increase,
+                DIAMOND_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::ItemClearAboveRate => {
+            settings.ai_item_clear_above_rate_percent = adjust_rate_percent(
+                settings.ai_item_clear_above_rate_percent,
+                increase,
+                ITEM_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::ItemUnifyColorsRate => {
+            settings.ai_item_unify_colors_rate_percent = adjust_rate_percent(
+                settings.ai_item_unify_colors_rate_percent,
+                increase,
+                ITEM_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::ItemStarifyScreenRate => {
+            settings.ai_item_starify_screen_rate_percent = adjust_rate_percent(
+                settings.ai_item_starify_screen_rate_percent,
+                increase,
+                ITEM_SPAWN_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::ColorCount => {
+            settings.ai_color_count = adjust_color_count(settings.ai_color_count, increase);
+        }
+        ui::render::AiSettingsChoice::ColorClusterRate => {
+            settings.ai_color_cluster_rate_percent = adjust_rate_percent(
+                settings.ai_color_cluster_rate_percent,
+                increase,
+                COLOR_CLUSTER_RATE_PERCENT_MIN,
+            );
+        }
+        ui::render::AiSettingsChoice::BombRate => {
+            settings.ai_bomb_spawn_rate_percent =
+                adjust_bomb_rate_percent(settings.ai_bomb_spawn_rate_percent, increase);
+        }
+        ui::render::AiSettingsChoice::BombFuse => {
+            settings.ai_bomb_fuse_ms = adjust_bomb_fuse_ms(settings.ai_bomb_fuse_ms, increase);
+        }
+        ui::render::AiSettingsChoice::AttackBlocksPerRock => {
+            settings.ai_attack_blocks_per_rock =
+                adjust_attack_blocks_per_rock(settings.ai_attack_blocks_per_rock, increase);
+        }
+        ui::render::AiSettingsChoice::AttackRocksPerWaveMax => {
+            settings.ai_attack_rocks_per_wave_max =
+                adjust_attack_rocks_per_wave_max(settings.ai_attack_rocks_per_wave_max, increase);
+        }
+        ui::render::AiSettingsChoice::AttackBlocksPerBomb => {
+            settings.ai_attack_blocks_per_bomb =
+                adjust_attack_blocks_per_bomb(settings.ai_attack_blocks_per_bomb, increase);
+        }
+        ui::render::AiSettingsChoice::AttackBombsPerWaveMax => {
+            settings.ai_attack_bombs_per_wave_max =
+                adjust_attack_bombs_per_wave_max(settings.ai_attack_bombs_per_wave_max, increase);
+        }
+        ui::render::AiSettingsChoice::AttackBombRatioPercent => {
+            settings.ai_attack_bomb_ratio_percent =
+                adjust_attack_bomb_ratio_percent(settings.ai_attack_bomb_ratio_percent, increase);
+        }
+        ui::render::AiSettingsChoice::ChainVanishInterval => {
+            settings.ai_chain_vanish_interval_ms =
+                adjust_chain_vanish_interval_ms(settings.ai_chain_vanish_interval_ms, increase);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,5 +707,252 @@ mod tests {
     #[test]
     fn adjust_sound_volume_percent_increases_by_one_step() {
         assert_eq!(adjust_sound_volume_percent(90, true), 100);
+    }
+
+    // --- AI専用設定(#312) ---
+
+    /// AI専用設定の全項目。巡回の対象と調整の対象が食い違わないよう、
+    /// `AiSettingsChoice`の宣言順に並べる。
+    const ALL_AI_CHOICES: [ui::render::AiSettingsChoice; 20] = [
+        ui::render::AiSettingsChoice::BlockFallSpeed,
+        ui::render::AiSettingsChoice::PlayerFallSpeed,
+        ui::render::AiSettingsChoice::ShakeDuration,
+        ui::render::AiSettingsChoice::RockRate,
+        ui::render::AiSettingsChoice::AirRate,
+        ui::render::AiSettingsChoice::StarRate,
+        ui::render::AiSettingsChoice::DiamondRate,
+        ui::render::AiSettingsChoice::ItemClearAboveRate,
+        ui::render::AiSettingsChoice::ItemUnifyColorsRate,
+        ui::render::AiSettingsChoice::ItemStarifyScreenRate,
+        ui::render::AiSettingsChoice::ColorCount,
+        ui::render::AiSettingsChoice::ColorClusterRate,
+        ui::render::AiSettingsChoice::BombRate,
+        ui::render::AiSettingsChoice::BombFuse,
+        ui::render::AiSettingsChoice::AttackBlocksPerRock,
+        ui::render::AiSettingsChoice::AttackRocksPerWaveMax,
+        ui::render::AiSettingsChoice::AttackBlocksPerBomb,
+        ui::render::AiSettingsChoice::AttackBombsPerWaveMax,
+        ui::render::AiSettingsChoice::AttackBombRatioPercent,
+        ui::render::AiSettingsChoice::ChainVanishInterval,
+    ];
+
+    /// 値が違うAI専用フィールドの名前を返す。どの項目がどのフィールドへ書かれたかを
+    /// 名前で突き合わせ、書き先の取り違え・重複を検知する。
+    fn changed_ai_field_names(before: &Settings, after: &Settings) -> Vec<&'static str> {
+        [
+            (
+                "ai_block_fall_tick_ms",
+                before.ai_block_fall_tick_ms != after.ai_block_fall_tick_ms,
+            ),
+            (
+                "ai_player_fall_tick_ms",
+                before.ai_player_fall_tick_ms != after.ai_player_fall_tick_ms,
+            ),
+            (
+                "ai_shake_duration_ms",
+                before.ai_shake_duration_ms != after.ai_shake_duration_ms,
+            ),
+            (
+                "ai_rock_spawn_rate_percent",
+                before.ai_rock_spawn_rate_percent != after.ai_rock_spawn_rate_percent,
+            ),
+            (
+                "ai_air_spawn_rate_percent",
+                before.ai_air_spawn_rate_percent != after.ai_air_spawn_rate_percent,
+            ),
+            (
+                "ai_star_spawn_rate_percent",
+                before.ai_star_spawn_rate_percent != after.ai_star_spawn_rate_percent,
+            ),
+            (
+                "ai_diamond_spawn_rate_percent",
+                before.ai_diamond_spawn_rate_percent != after.ai_diamond_spawn_rate_percent,
+            ),
+            (
+                "ai_item_clear_above_rate_percent",
+                before.ai_item_clear_above_rate_percent != after.ai_item_clear_above_rate_percent,
+            ),
+            (
+                "ai_item_unify_colors_rate_percent",
+                before.ai_item_unify_colors_rate_percent != after.ai_item_unify_colors_rate_percent,
+            ),
+            (
+                "ai_item_starify_screen_rate_percent",
+                before.ai_item_starify_screen_rate_percent
+                    != after.ai_item_starify_screen_rate_percent,
+            ),
+            (
+                "ai_color_count",
+                before.ai_color_count != after.ai_color_count,
+            ),
+            (
+                "ai_color_cluster_rate_percent",
+                before.ai_color_cluster_rate_percent != after.ai_color_cluster_rate_percent,
+            ),
+            (
+                "ai_bomb_spawn_rate_percent",
+                before.ai_bomb_spawn_rate_percent != after.ai_bomb_spawn_rate_percent,
+            ),
+            (
+                "ai_bomb_fuse_ms",
+                before.ai_bomb_fuse_ms != after.ai_bomb_fuse_ms,
+            ),
+            (
+                "ai_attack_blocks_per_rock",
+                before.ai_attack_blocks_per_rock != after.ai_attack_blocks_per_rock,
+            ),
+            (
+                "ai_attack_rocks_per_wave_max",
+                before.ai_attack_rocks_per_wave_max != after.ai_attack_rocks_per_wave_max,
+            ),
+            (
+                "ai_attack_blocks_per_bomb",
+                before.ai_attack_blocks_per_bomb != after.ai_attack_blocks_per_bomb,
+            ),
+            (
+                "ai_attack_bombs_per_wave_max",
+                before.ai_attack_bombs_per_wave_max != after.ai_attack_bombs_per_wave_max,
+            ),
+            (
+                "ai_attack_bomb_ratio_percent",
+                before.ai_attack_bomb_ratio_percent != after.ai_attack_bomb_ratio_percent,
+            ),
+            (
+                "ai_chain_vanish_interval_ms",
+                before.ai_chain_vanish_interval_ms != after.ai_chain_vanish_interval_ms,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, changed)| *changed)
+        .map(|(name, _)| name)
+        .collect()
+    }
+
+    /// 既定値から1ステップ動かした結果を返す。既定値が上限に張り付いている項目
+    /// (色数)は増やす方向では動かないため、減らす方向で動かす。
+    fn adjusted_from_default(choice: ui::render::AiSettingsChoice) -> (Settings, Settings) {
+        let before = Settings::default();
+        let mut after = before;
+        adjust_ai_setting(&mut after, choice, true);
+        if after == before {
+            adjust_ai_setting(&mut after, choice, false);
+        }
+        (before, after)
+    }
+
+    #[test]
+    fn adjust_ai_setting_moves_the_selected_value_by_one_step() {
+        let mut settings = Settings::default();
+        let block_fall_before = settings.ai_block_fall_tick_ms;
+        adjust_ai_setting(
+            &mut settings,
+            ui::render::AiSettingsChoice::BlockFallSpeed,
+            true,
+        );
+        assert_eq!(
+            settings.ai_block_fall_tick_ms,
+            block_fall_before + DEBUG_FALL_TICK_STEP_MS
+        );
+
+        let rock_before = settings.ai_rock_spawn_rate_percent;
+        adjust_ai_setting(&mut settings, ui::render::AiSettingsChoice::RockRate, true);
+        assert_eq!(
+            settings.ai_rock_spawn_rate_percent,
+            rock_before + SPAWN_RATE_PERCENT_STEP
+        );
+
+        let color_count_before = settings.ai_color_count;
+        adjust_ai_setting(
+            &mut settings,
+            ui::render::AiSettingsChoice::ColorCount,
+            false,
+        );
+        assert_eq!(settings.ai_color_count, color_count_before - 1);
+    }
+
+    #[test]
+    fn adjust_ai_setting_writes_only_its_own_field_for_every_item() {
+        // 20項目それぞれが、自分のフィールドだけを動かすことを確認する
+        // (書き先の取り違え・使い回しはここで表に出る)。
+        let mut touched = Vec::new();
+        for choice in ALL_AI_CHOICES {
+            let (before, after) = adjusted_from_default(choice);
+            assert_ne!(
+                before, after,
+                "{choice:?}はどちらの方向にも動かなかった(調整が未実装)"
+            );
+            let changed = changed_ai_field_names(&before, &after);
+            assert_eq!(
+                changed.len(),
+                1,
+                "{choice:?}で動いたフィールドが1つでない: {changed:?}"
+            );
+            touched.push(changed[0]);
+        }
+        let mut unique = touched.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            ALL_AI_CHOICES.len(),
+            "複数の項目が同じフィールドへ書いている: {touched:?}"
+        );
+    }
+
+    #[test]
+    fn adjust_ai_setting_never_touches_the_human_side_values() {
+        // AI専用設定の調整で人間側の値が動くと対戦の公平性が崩れるため、
+        // AI専用フィールド以外が変わらないことを全項目で確認する。
+        for choice in ALL_AI_CHOICES {
+            let (before, after) = adjusted_from_default(choice);
+            let human_side_only = Settings {
+                ai_block_fall_tick_ms: before.ai_block_fall_tick_ms,
+                ai_player_fall_tick_ms: before.ai_player_fall_tick_ms,
+                ai_shake_duration_ms: before.ai_shake_duration_ms,
+                ai_rock_spawn_rate_percent: before.ai_rock_spawn_rate_percent,
+                ai_air_spawn_rate_percent: before.ai_air_spawn_rate_percent,
+                ai_star_spawn_rate_percent: before.ai_star_spawn_rate_percent,
+                ai_diamond_spawn_rate_percent: before.ai_diamond_spawn_rate_percent,
+                ai_item_clear_above_rate_percent: before.ai_item_clear_above_rate_percent,
+                ai_item_unify_colors_rate_percent: before.ai_item_unify_colors_rate_percent,
+                ai_item_starify_screen_rate_percent: before.ai_item_starify_screen_rate_percent,
+                ai_color_count: before.ai_color_count,
+                ai_color_cluster_rate_percent: before.ai_color_cluster_rate_percent,
+                ai_bomb_spawn_rate_percent: before.ai_bomb_spawn_rate_percent,
+                ai_bomb_fuse_ms: before.ai_bomb_fuse_ms,
+                ai_attack_blocks_per_rock: before.ai_attack_blocks_per_rock,
+                ai_attack_rocks_per_wave_max: before.ai_attack_rocks_per_wave_max,
+                ai_attack_blocks_per_bomb: before.ai_attack_blocks_per_bomb,
+                ai_attack_bombs_per_wave_max: before.ai_attack_bombs_per_wave_max,
+                ai_attack_bomb_ratio_percent: before.ai_attack_bomb_ratio_percent,
+                ai_chain_vanish_interval_ms: before.ai_chain_vanish_interval_ms,
+                ..after
+            };
+            assert_eq!(
+                human_side_only, before,
+                "{choice:?}の調整で人間側の設定が変わっている"
+            );
+        }
+    }
+
+    #[test]
+    fn adjust_ai_setting_clamps_every_item_at_both_ends() {
+        // 破損したsettings.jsonの値でも飽和するだけ、という人間側と同じ性質を全項目で確認する。
+        for choice in ALL_AI_CHOICES {
+            for increase in [true, false] {
+                let mut settings = Settings::default();
+                for _ in 0..100 {
+                    adjust_ai_setting(&mut settings, choice, increase);
+                }
+                let saturated = settings;
+                adjust_ai_setting(&mut settings, choice, increase);
+                assert_eq!(
+                    settings,
+                    saturated,
+                    "{choice:?}を{}方向へ動かし続けたのに範囲へ収まっていない",
+                    if increase { "増やす" } else { "減らす" }
+                );
+            }
+        }
     }
 }

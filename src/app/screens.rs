@@ -13,19 +13,21 @@ use rand::RngExt;
 
 use crate::app::audio::{handle_events, play_se};
 use crate::app::settings_menu::{
-    adjust_attack_blocks_per_bomb, adjust_attack_blocks_per_rock, adjust_attack_bomb_ratio_percent,
-    adjust_attack_bombs_per_wave_max, adjust_attack_rocks_per_wave_max, adjust_bomb_fuse_ms,
-    adjust_bomb_rate_percent, adjust_chain_vanish_interval_ms, adjust_dodge_recovery_ms,
-    adjust_fall_speed_ms, adjust_field_width, adjust_move_cooldown_ms, adjust_rewind_stock_max,
-    adjust_shake_duration_ms, adjust_sound_volume_percent, adjust_spawn_rate_setting,
+    adjust_ai_setting, adjust_attack_blocks_per_bomb, adjust_attack_blocks_per_rock,
+    adjust_attack_bomb_ratio_percent, adjust_attack_bombs_per_wave_max,
+    adjust_attack_rocks_per_wave_max, adjust_bomb_fuse_ms, adjust_bomb_rate_percent,
+    adjust_chain_vanish_interval_ms, adjust_dodge_recovery_ms, adjust_fall_speed_ms,
+    adjust_field_width, adjust_move_cooldown_ms, adjust_rewind_stock_max, adjust_shake_duration_ms,
+    adjust_sound_volume_percent, adjust_spawn_rate_setting,
 };
 use crate::battle::{BattleOutcome, BattleState};
 use crate::constants::{
     ATTRACT_MODE_IDLE_MS, FRAME_INTERVAL_MS, SPAWN_RATE_REROLL_SAFE_MARGIN_ROWS,
 };
 use crate::game::{Game, GameOverChoice, GameStatus, InputAction};
-use crate::lobby::{LobbyOutcome, LobbyState};
+use crate::lobby::{LobbyOutcome, LobbyPhase, LobbyState};
 use crate::net::{self, BattleConfig};
+use crate::settings::Settings;
 use crate::text_edit::TextEditState;
 use crate::{
     App, PauseOverlay, ScreenTransition, advance_rewind_session, audio, autoplay,
@@ -832,6 +834,64 @@ fn battle_leaves_screen(outcome: Option<BattleOutcome>, actions: &[InputAction])
     outcome.is_some() && actions.iter().any(|&action| leaves_battle_result(action))
 }
 
+/// AI専用設定のオーバーレイ(#312)が、このフレームの入力をどう扱ったか。
+struct LobbyAiSettingsFrame {
+    /// このフレームはロビーの状態更新(`LobbyState::update`)を行わない。開いている間と、
+    /// 閉じた瞬間のフレームが対象。閉じたフレームも止めるのは、同じフレームに残った入力が
+    /// ロビーの操作(招待・開始)として届いてしまうのを避けるため。
+    blocks_lobby: bool,
+    /// 設定値が変わった。`Settings::save`はテストで実ファイルへ書かないよう呼び出し側で行う。
+    settings_changed: bool,
+}
+
+/// AI専用設定画面(#312)を開ける局面か。相手を待っている間だけ開けることにし、
+/// 招待の応答待ち・接続中のように次の状態へ進む途中では開かせない。
+fn lobby_phase_allows_ai_settings(phase: &LobbyPhase) -> bool {
+    matches!(
+        phase,
+        LobbyPhase::Discovering { .. } | LobbyPhase::SelectingAiOpponentCount { .. }
+    )
+}
+
+/// 対戦ロビーのAI専用設定オーバーレイ(#312)の開閉・カーソル移動・値の調整を、このフレームの
+/// 入力から処理する。
+///
+/// 開いている間はロビーの操作(候補選択・招待・AIの枠・開始)を通さない。↑↓が
+/// 「AIと対戦する人数」(#296)と重なっており、通したままではどちらが動いたのか分からなく
+/// なるため、入力はここで使い切る。
+fn apply_lobby_ai_settings_input(
+    selection: &mut Option<ui::render::AiSettingsChoice>,
+    settings: &mut Settings,
+    phase: &LobbyPhase,
+    actions: &[InputAction],
+) -> LobbyAiSettingsFrame {
+    let was_open = selection.is_some();
+    let mut settings_changed = false;
+
+    for &action in actions {
+        match (*selection, action) {
+            // ロビーのEscは離脱だが、開いている間は閉じるだけに使う。
+            (Some(_), InputAction::OpenSettings | InputAction::Quit) => *selection = None,
+            (Some(current), InputAction::FaceUp) => *selection = Some(current.cycle_back()),
+            (Some(current), InputAction::FaceDown) => *selection = Some(current.cycle()),
+            (Some(current), InputAction::MoveLeft | InputAction::MoveRight) => {
+                adjust_ai_setting(settings, current, action == InputAction::MoveRight);
+                settings_changed = true;
+            }
+            (Some(_), _) => {}
+            (None, InputAction::OpenSettings) if lobby_phase_allows_ai_settings(phase) => {
+                *selection = Some(ui::render::AiSettingsChoice::BlockFallSpeed);
+            }
+            (None, _) => {}
+        }
+    }
+
+    LobbyAiSettingsFrame {
+        blocks_lobby: was_open || selection.is_some(),
+        settings_changed,
+    }
+}
+
 /// 対戦相手を探すロビー(`Screen::NetworkLobby`)の1フレーム(#256。spec.md 12.1)。
 ///
 /// 探索・招待・接続の状態遷移は`LobbyState::update`が持ち、ここは入力の取り込みと
@@ -842,6 +902,29 @@ pub fn tick_network_lobby(
     terminal: &mut ratatui::DefaultTerminal,
 ) -> io::Result<Option<ScreenTransition>> {
     let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
+
+    // AI専用設定(#312)を開いている間はロビーを止め、入力をオーバーレイ側で使い切る。
+    // 止めている間は探索の更新も進まないが、設定を見ている数秒の間だけなので許容する。
+    let overlay = apply_lobby_ai_settings_input(
+        &mut app.lobby_ai_settings_selection,
+        &mut app.settings,
+        state.phase(),
+        &actions,
+    );
+    if overlay.settings_changed {
+        app.settings.save();
+    }
+    if overlay.blocks_lobby {
+        let selection = app.lobby_ai_settings_selection;
+        let settings = app.settings;
+        terminal.draw(|frame| {
+            ui::render::draw_network_lobby(frame, state);
+            if let Some(selection) = selection {
+                ui::render::draw_ai_settings(frame, selection, &settings);
+            }
+        })?;
+        return Ok(None);
+    }
 
     // 自分がホスト役になった場合に相手へ強制適用する設定(spec.md 12.2)。コースは
     // 前回選んだもの(モードセレクトの初期選択と同じ)を使う。
@@ -1553,5 +1636,251 @@ mod tests {
             &[InputAction::MoveLeft, InputAction::Drill]
         ));
         assert!(!battle_leaves_screen(None, &[]));
+    }
+
+    // --- ロビーのAI専用設定オーバーレイ(#312) ---
+
+    /// 探索中のフェーズ。ゲストを迎えていない通常の待ち状態。
+    fn discovering() -> LobbyPhase {
+        LobbyPhase::Discovering { guests: Vec::new() }
+    }
+
+    /// `tick_network_lobby`のうち、端末とキー入力を伴わない部分(オーバーレイの処理と
+    /// ロビーの状態更新の出し分け)だけを1フレーム分再現する。実際の通信を伴わせないため、
+    /// 呼び出し側はループバックで作った`LobbyState`を渡す。
+    fn feed_lobby_frame(
+        state: &mut LobbyState,
+        selection: &mut Option<ui::render::AiSettingsChoice>,
+        settings: &mut Settings,
+        actions: &[InputAction],
+    ) -> LobbyAiSettingsFrame {
+        let overlay = apply_lobby_ai_settings_input(selection, settings, state.phase(), actions);
+        if !overlay.blocks_lobby {
+            let config = BattleConfig::from_settings(settings, settings.last_course_depth_m);
+            state.update(actions, config);
+        }
+        overlay
+    }
+
+    #[test]
+    fn the_ai_settings_overlay_opens_with_the_settings_key_while_discovering() {
+        let mut selection = None;
+        let mut settings = Settings::default();
+
+        let overlay = apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &discovering(),
+            &[InputAction::OpenSettings],
+        );
+
+        assert_eq!(
+            selection,
+            Some(ui::render::AiSettingsChoice::BlockFallSpeed),
+            "開いた直後は先頭の項目を選ぶ"
+        );
+        assert!(overlay.blocks_lobby, "開いたフレームはロビーを止める");
+        assert!(!overlay.settings_changed, "開くだけでは値は変わらない");
+    }
+
+    #[test]
+    fn the_ai_settings_overlay_opens_while_the_ai_opponent_count_is_selected() {
+        // AIと対戦する人数の選択中(#296)からも開ける。
+        let mut selection = None;
+        let mut settings = Settings::default();
+
+        apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &LobbyPhase::SelectingAiOpponentCount { ai_count: 2 },
+            &[InputAction::OpenSettings],
+        );
+
+        assert_eq!(
+            selection,
+            Some(ui::render::AiSettingsChoice::BlockFallSpeed)
+        );
+    }
+
+    #[test]
+    fn the_ai_settings_overlay_does_not_open_outside_the_waiting_phases() {
+        // 通知の表示中のように次の状態へ進む途中では開かない。
+        let mut selection = None;
+        let mut settings = Settings::default();
+
+        let overlay = apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &LobbyPhase::Notice {
+                message: "テスト".to_string(),
+                shown_at: Instant::now(),
+                guests: Vec::new(),
+                pending: Vec::new(),
+            },
+            &[InputAction::OpenSettings],
+        );
+
+        assert_eq!(selection, None);
+        assert!(!overlay.blocks_lobby, "開いていないのでロビーは動かせる");
+    }
+
+    #[test]
+    fn the_ai_settings_overlay_closes_with_the_settings_key_or_esc() {
+        for closing in [InputAction::OpenSettings, InputAction::Quit] {
+            let mut selection = Some(ui::render::AiSettingsChoice::BombFuse);
+            let mut settings = Settings::default();
+
+            let overlay = apply_lobby_ai_settings_input(
+                &mut selection,
+                &mut settings,
+                &discovering(),
+                &[closing],
+            );
+
+            assert_eq!(selection, None, "{closing:?}で閉じるはず");
+            assert!(
+                overlay.blocks_lobby,
+                "閉じたフレームの残りの入力もロビーへ渡さない"
+            );
+        }
+    }
+
+    #[test]
+    fn the_open_ai_settings_overlay_moves_the_cursor_and_adjusts_the_value() {
+        let mut selection = Some(ui::render::AiSettingsChoice::BlockFallSpeed);
+        let mut settings = Settings::default();
+        let before = settings.ai_block_fall_tick_ms;
+
+        let overlay = apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &discovering(),
+            &[InputAction::MoveRight],
+        );
+        assert!(settings.ai_block_fall_tick_ms > before, "→で1段増える");
+        assert!(overlay.settings_changed);
+
+        apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &discovering(),
+            &[InputAction::MoveLeft, InputAction::MoveLeft],
+        );
+        assert!(settings.ai_block_fall_tick_ms < before, "←で1段減る");
+
+        apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &discovering(),
+            &[InputAction::FaceDown],
+        );
+        assert_eq!(
+            selection,
+            Some(ui::render::AiSettingsChoice::PlayerFallSpeed),
+            "↓で次の項目へ"
+        );
+
+        apply_lobby_ai_settings_input(
+            &mut selection,
+            &mut settings,
+            &discovering(),
+            &[InputAction::FaceUp, InputAction::FaceUp],
+        );
+        assert_eq!(
+            selection,
+            Some(ui::render::AiSettingsChoice::ChainVanishInterval),
+            "↑で前の項目へ戻り、先頭からは末尾へ巡回する"
+        );
+    }
+
+    #[test]
+    fn the_ai_opponent_count_does_not_move_while_the_ai_settings_overlay_is_open() {
+        // ↑↓はAI専用設定のカーソル移動として使い切り、AIと対戦する人数(#296)には届かせない。
+        let mut state =
+            LobbyState::new_on_loopback("me".to_string()).expect("ループバックで開けるはず");
+        state.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 1 });
+        let mut selection = None;
+        let mut settings = Settings::default();
+
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::OpenSettings],
+        );
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::FaceUp],
+        );
+        assert!(matches!(
+            state.phase(),
+            LobbyPhase::SelectingAiOpponentCount { ai_count: 1 }
+        ));
+
+        // 閉じたフレームも止めるため、人数が動き出すのは次のフレームから。
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::OpenSettings, InputAction::FaceUp],
+        );
+        assert!(matches!(
+            state.phase(),
+            LobbyPhase::SelectingAiOpponentCount { ai_count: 1 }
+        ));
+
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::FaceUp],
+        );
+        assert!(
+            matches!(
+                state.phase(),
+                LobbyPhase::SelectingAiOpponentCount { ai_count: 2 }
+            ),
+            "閉じた後は元どおり人数が変わる"
+        );
+    }
+
+    #[test]
+    fn the_room_ai_count_does_not_change_while_the_ai_settings_overlay_is_open() {
+        // 探索中のルームのAIの枠(#300)も、開いている間は動かない。
+        let mut state =
+            LobbyState::new_on_loopback("me".to_string()).expect("ループバックで開けるはず");
+        let mut selection = None;
+        let mut settings = Settings::default();
+
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::OpenSettings],
+        );
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::IncreaseRoomAiCount, InputAction::Confirm],
+        );
+        assert_eq!(state.room_ai_count(), 0, "AIの枠は増えない");
+        assert!(selection.is_some(), "ロビー側の操作では閉じない");
+
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::Quit],
+        );
+        feed_lobby_frame(
+            &mut state,
+            &mut selection,
+            &mut settings,
+            &[InputAction::IncreaseRoomAiCount],
+        );
+        assert_eq!(state.room_ai_count(), 1, "閉じた後は元どおり増える");
     }
 }
