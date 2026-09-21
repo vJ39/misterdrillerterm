@@ -159,6 +159,7 @@ pub fn connect_and_join_room(
         &GameMessage::JoinRoom {
             name: my_name.to_string(),
             mesh_port,
+            protocol_version: PROTOCOL_VERSION,
         },
     )?;
     Ok(room_stream)
@@ -465,8 +466,12 @@ mod tests {
 
             // このゲストの`JoinRoom`を受け取ってからインデックスを確定させる。
             let (mut stream, peer_addr) = room_listener.accept().unwrap();
+            // このヘルパーはメッシュ形成の確認が目的で、版の判定は対象外(lobby.rsの
+            // `read_join_room`が本番の受信箇所)のため`protocol_version`は無視する。
             let (join_name, mesh_port) = match net::read_message(&mut stream).unwrap() {
-                GameMessage::JoinRoom { name, mesh_port } => (name, mesh_port),
+                GameMessage::JoinRoom {
+                    name, mesh_port, ..
+                } => (name, mesh_port),
                 other => panic!("JoinRoomを待っていたが{other:?}を受信した"),
             };
             guest_names.push(join_name);

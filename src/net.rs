@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::game::InputAction;
 use crate::settings::Settings;
 
-/// TCP接続後のメッセージの版(#317)。`Hello`で相手と交換する。
+/// TCP接続後のメッセージの版(#317)。`Hello`・`JoinRoom`(#325)で相手と交換する。
 ///
 /// `GameMessage`・`BattleConfig`の構造を変える変更をするときは、必ずこの値を1つ上げる。
 /// 違う版どうしが繋がると、同じバイト列を別の構造として読むため、デシリアライズが
@@ -54,6 +54,10 @@ pub enum GameMessage {
     JoinRoom {
         name: String,
         mesh_port: u16,
+        /// 送信側の`PROTOCOL_VERSION`(#325)。`Hello`と同じ判定をルーム参加の時点でも
+        /// 行うことで、`StartConfig`のデコード失敗という分かりにくいエラーになる前に
+        /// 版の不一致を検知できる。
+        protocol_version: u32,
     },
     /// 主催者→各参加者(ルーム参加接続で送信)。`members[0]`は常に主催者(#275)。
     ///
@@ -772,6 +776,7 @@ mod tests {
         assert_round_trips(&GameMessage::JoinRoom {
             name: "ホリ・ススム".to_string(),
             mesh_port: 39395,
+            protocol_version: PROTOCOL_VERSION,
         });
         assert_round_trips(&GameMessage::RoomRoster {
             members: vec![

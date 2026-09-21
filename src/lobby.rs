@@ -907,12 +907,22 @@ fn bind_battle_listener() -> io::Result<TcpListener> {
 }
 
 /// 受理したルーム参加接続から`JoinRoom`を1回読み、迎え入れたゲストとして組み立てる。
+///
+/// 版の判定もここで行う(#325)。以前は`JoinRoom`に版が無く、不一致でも
+/// `StartConfig`のデコード失敗という原因の分かりにくいエラーになっていた。
 fn read_join_room(mut room_stream: TcpStream, peer_addr: SocketAddr) -> io::Result<HostedGuest> {
     // listenerが非ブロッキングのため、環境によっては受理したストリームもそれを
     // 引き継ぐ。以降はブロッキング前提なので明示的に戻す。
     room_stream.set_nonblocking(false)?;
     let (name, mesh_port) = match net::read_message(&mut room_stream)? {
-        GameMessage::JoinRoom { name, mesh_port } => (name, mesh_port),
+        GameMessage::JoinRoom {
+            name,
+            mesh_port,
+            protocol_version,
+        } => {
+            net::check_protocol_version(protocol_version)?;
+            (name, mesh_port)
+        }
         other => return Err(net::unexpected_message("JoinRoom", &other)),
     };
     Ok(HostedGuest {
@@ -2429,5 +2439,35 @@ mod tests {
                 humans[index]
             );
         }
+    }
+
+    #[test]
+    fn a_host_rejects_a_join_room_with_a_different_protocol_version() {
+        // #325: `JoinRoom`にも版を持たせたので、ルーム参加の時点で不一致を検知できる。
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let guest = thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            net::write_message(
+                &mut stream,
+                &GameMessage::JoinRoom {
+                    name: "guest".to_string(),
+                    mesh_port: 0,
+                    protocol_version: net::PROTOCOL_VERSION + 1,
+                },
+            )
+            .unwrap();
+        });
+
+        let (stream, peer_addr) = listener.accept().unwrap();
+        // `HostedGuest`は`Debug`を実装していないため`unwrap_err()`は使えない。
+        let err = match read_join_room(stream, peer_addr) {
+            Ok(_) => panic!("版が異なるJoinRoomを受理してしまった"),
+            Err(err) => err,
+        };
+        guest.join().unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
