@@ -2162,7 +2162,7 @@ fn draw_off_screen_ghost_marker(
 
 /// 参加者index(自分を除いた0始まり)に対応するゴーストの番号グリフ(#301)。相手パネル(#290)の
 /// 見出しと同じ番号を使い、盤面のゴーストとパネルの行を対応づけられるようにする。
-/// 対戦人数の上限は4人なので、自分以外は必ず1桁に収まる。
+/// 対戦人数の上限は8人なので、自分以外は必ず1桁に収まる。
 fn ghost_marker_glyph(index: usize) -> char {
     char::from_digit(index as u32 + 1, 10).unwrap_or('?')
 }
@@ -4876,10 +4876,10 @@ mod tests {
     #[test]
     fn the_battle_screen_shows_the_result_overlay_once_the_outcome_is_decided() {
         // 決着後は結果と抜け方が盤面の上に重なって見える(#256)。順位は1位から最下位まで
-        // どれでも同じように出す(対戦人数の上限は4人=ROOM_MAX_PLAYERS)。
+        // どれでも同じように出す(対戦人数の上限は8人=ROOM_MAX_PLAYERS)。
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
         let (others, names) = single_opponent("opponent");
-        for rank in 1..=4u8 {
+        for rank in 1..=8u8 {
             let text = rendered_screen_text(|frame| {
                 draw_battle(
                     frame,
@@ -4925,7 +4925,7 @@ mod tests {
 
     #[test]
     fn the_battle_opponent_panel_lists_every_other_player() {
-        // N人対戦では自分以外の全員(上限4人=ROOM_MAX_PLAYERSなので最大3人)の名前・深度・
+        // N人対戦では自分以外の全員(上限8人=ROOM_MAX_PLAYERSなので最大7人)の名前・深度・
         // ライフがパネルに並ぶ(#290)。以前は先頭の1人しか出ていなかった。
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
         let names: Vec<String> = ["alpha", "bravo", "charlie"]
@@ -4966,10 +4966,42 @@ mod tests {
 
     #[test]
     fn the_battle_opponent_panel_grows_with_the_number_of_players() {
-        // パネルの高さは人数ぶん(1人1行、#305)+上下ボーダー2行。
+        // パネルの高さは人数ぶん(1人1行、#305)+上下ボーダー2行。定員8人なら自分以外の
+        // 7人ぶんで9行になる(#311)。
         assert_eq!(battle_opponent_panel_h(1), 3);
         assert_eq!(battle_opponent_panel_h(2), 4);
         assert_eq!(battle_opponent_panel_h(3), 5);
+        assert_eq!(battle_opponent_panel_h(7), 9);
+    }
+
+    #[test]
+    fn the_battle_opponent_panel_lists_all_seven_opponents_of_a_full_room() {
+        // #311: 定員8人での対戦だと相手は7人。全員ぶんの行が並び、番号・色も7人ぶん
+        // 足りているはず(ゴーストの色は`battle_ghost_fg`、番号は`ghost_marker_glyph`)。
+        let game = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let names: Vec<String> = (1..=7).map(|number| format!("rival-{number}")).collect();
+        let others: Vec<Game> = (0..names.len())
+            .map(|index| {
+                let mut other = Game::new_with_width(2, FIELD_WIDTH, 100);
+                other.player.row = 9 + index * 10;
+                other
+            })
+            .collect();
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &game, &others, &names, true, true, None)
+        });
+
+        for (index, name) in names.iter().enumerate() {
+            assert!(
+                screen_shows(&text, name),
+                "{name}の行がパネルに出ていない:\n{text}"
+            );
+            assert!(
+                screen_shows(&text, &ghost_marker_glyph(index).to_string()),
+                "{name}の番号がパネルに出ていない:\n{text}"
+            );
+        }
     }
 
     #[test]
@@ -5132,10 +5164,12 @@ mod tests {
 
     #[test]
     fn ghost_marker_glyphs_are_numbered_from_one() {
-        // パネルの見出し(#290)と盤面のゴースト(#301)で同じ番号を使う。
-        assert_eq!(ghost_marker_glyph(0), '1');
-        assert_eq!(ghost_marker_glyph(1), '2');
-        assert_eq!(ghost_marker_glyph(2), '3');
+        // パネルの見出し(#290)と盤面のゴースト(#301)で同じ番号を使う。定員8人ぶん
+        // (自分以外の7人)まで1桁の番号で足りる(#311)。
+        for index in 0..7 {
+            let expected = char::from_digit(index as u32 + 1, 10).unwrap();
+            assert_eq!(ghost_marker_glyph(index), expected);
+        }
     }
 
     // --- 自分がGameOverになった後の待機表示(#302) ---

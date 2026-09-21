@@ -2159,6 +2159,90 @@ mod tests {
     }
 
     #[test]
+    fn eight_participants_in_a_full_mesh_exchange_inputs() {
+        // #311: 定員いっぱい(ロビーの`ROOM_MAX_PLAYERS`)の8人でも、C(8,2)=28本の接続で
+        // 全員の操作が全員へ届く。接続本数はヘルパー側で1人あたり7本を確認している。
+        assert_full_mesh_inputs_reach_everyone(8, 9205);
+    }
+
+    #[test]
+    fn a_full_mesh_of_eight_ranks_everyone_and_decides_the_outcome() {
+        // #311: 8人でも順位・決着が全員の手元で出る。1人だけゴールし残りは脱落する形に
+        // して、ゴール到達が最上位という優先順位(#289)が人数を増やしても変わらないことと、
+        // 自己申告の`Result`が28本の接続越しに全員へ行き渡ることを見る。
+        const N: usize = 8;
+        const GOAL_REACHER: usize = 0;
+
+        let mut states = connected_mesh(N, 9206);
+        let links: usize = states
+            .iter()
+            .map(|state| {
+                state
+                    .peers
+                    .as_ref()
+                    .expect("メッシュなので接続を持つはず")
+                    .iter()
+                    .flatten()
+                    .count()
+            })
+            .sum();
+        assert_eq!(
+            links / 2,
+            N * (N - 1) / 2,
+            "フルメッシュはC(8,2)=28本のはず"
+        );
+
+        for (p, state) in states.iter_mut().enumerate() {
+            if p == GOAL_REACHER {
+                place_just_above_goal(&mut state.games[0]);
+            } else {
+                // 残り1機・酸素わずかにして、数フレームで脱落させる。
+                state.games[0].player.lives = 1;
+                state.games[0].player.oxygen = 1.0;
+            }
+        }
+        pump_all_until_outcome(&mut states);
+
+        for (h, state) in states.iter().enumerate() {
+            let goal_index = games_index_of(N, h, GOAL_REACHER);
+            assert_eq!(
+                state.games[goal_index].status,
+                GameStatus::Cleared,
+                "参加者{h}の視点で、ゴールした参加者がCleared扱いになっていない"
+            );
+            assert_eq!(
+                state.ranks[goal_index],
+                Some(1),
+                "参加者{h}の視点で、ゴールした参加者が1位になっていない"
+            );
+            for p in 0..N {
+                if p == GOAL_REACHER {
+                    continue;
+                }
+                let index = games_index_of(N, h, p);
+                assert_eq!(
+                    state.games[index].status,
+                    GameStatus::GameOver,
+                    "参加者{h}の視点で、脱落した参加者{p}の結果が届いていない"
+                );
+                // 脱落者どうしの上下はスコア・到達深度で決まり、視点ごとに持っている値が
+                // 違うため、ここでは「ゴールした参加者より下」までを見る。
+                let rank = state.ranks[index].expect("全員の結果が出れば順位も出るはず");
+                assert!(
+                    rank >= 2,
+                    "参加者{h}の視点で、脱落した参加者{p}がゴールした参加者と同順位以上になっている"
+                );
+            }
+            let my_rank = state.ranks[0].expect("自分の順位も出るはず");
+            assert_eq!(
+                state.outcome,
+                Some(BattleOutcome::Ranked(my_rank)),
+                "参加者{h}: 自分の順位がそのまま決着になるはず"
+            );
+        }
+    }
+
+    #[test]
     fn a_participant_leaving_with_bye_is_ranked_last_while_the_others_keep_playing() {
         // 4人のうち1人がByeを送って抜けても、残り3人だけで対戦が進む。#289では全員の結果が
         // 揃うまで順位が出ないため、抜けた人が最下位になるのは残り3人がゴールした後。
@@ -2979,5 +3063,77 @@ mod tests {
             same_board_and_player(&states[0].games[guest_on_host], &untouched),
             "AIの操作がホストの手元にあるゲストの盤面へ紛れ込んでいる"
         );
+    }
+
+    #[test]
+    fn a_room_filled_to_capacity_with_humans_and_ai_ranks_everyone() {
+        // #311: 定員いっぱいの8人を人間4人+AI4人で埋めても決着する。人間どうしの接続は
+        // 4人ぶん(1人あたり3本)しか無く、AIの枠はホストが代理送信する`Result`だけで
+        // 決着させる必要がある(#300)ため、人数を増やすとここが詰まりやすい。
+        const HUMANS: usize = 4;
+        const AIS: usize = 4;
+        const TOTAL: usize = HUMANS + AIS;
+        const SEED: u64 = 30011;
+
+        let mut states = connected_mesh_with_ai(HUMANS, AIS, SEED);
+        assert_eq!(states.len(), HUMANS, "`BattleState`を持つのは人間だけ");
+        for (h, state) in states.iter().enumerate() {
+            assert_eq!(
+                state.games.len(),
+                TOTAL,
+                "参加者{h}: AIぶんも含めた8人の盤面を持つはず"
+            );
+            for p in 0..TOTAL {
+                assert_eq!(
+                    state.player_names[games_index_of(TOTAL, h, p)],
+                    room_member_name(HUMANS, p),
+                    "参加者{h}の視点で、room内インデックス{p}の表示名がずれている"
+                );
+            }
+        }
+
+        // ホストがゴールし、他の人間もAIも脱落する形にする。AIの枠が決着したかどうかは
+        // ホストしか知らないため、AIの手並みに左右されないよう結果を直接作る
+        // (`the_host_proxies_the_ai_result_exactly_once`と同じ理由)。ゲストの手元にある
+        // AIの盤面はまだプレイ中で、ホストからの代理`Result`で倒れるはず。
+        place_just_above_goal(&mut states[0].games[0]);
+        for ai_room_index in HUMANS..TOTAL {
+            let index = games_index_of(TOTAL, 0, ai_room_index);
+            states[0].games[index].status = GameStatus::GameOver;
+        }
+        for state in states[1..].iter_mut() {
+            // 残り1機・酸素わずかにして、数フレームで脱落させる。
+            state.games[0].player.lives = 1;
+            state.games[0].player.oxygen = 1.0;
+        }
+        pump_all_until_outcome(&mut states);
+
+        for (h, state) in states.iter().enumerate() {
+            let host_index = games_index_of(TOTAL, h, 0);
+            assert_eq!(
+                state.games[host_index].status,
+                GameStatus::Cleared,
+                "参加者{h}の視点で、ゴールしたホストがCleared扱いになっていない"
+            );
+            for ai_room_index in HUMANS..TOTAL {
+                let index = games_index_of(TOTAL, h, ai_room_index);
+                assert_eq!(
+                    state.games[index].status,
+                    GameStatus::GameOver,
+                    "参加者{h}の視点で、AI({ai_room_index})の結果が届いていない"
+                );
+            }
+            assert_eq!(
+                state.ranks[host_index],
+                Some(1),
+                "参加者{h}の視点で、ゴールしたホストが1位になっていない"
+            );
+            let my_rank = state.ranks[0].expect("全員の結果が出れば自分の順位も出るはず");
+            assert_eq!(
+                state.outcome,
+                Some(BattleOutcome::Ranked(my_rank)),
+                "参加者{h}: 自分の順位がそのまま決着になるはず"
+            );
+        }
     }
 }

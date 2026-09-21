@@ -224,12 +224,17 @@ pub const PLAYER_FG: Color = Color::Rgb(255, 170, 40);
 pub const CRUSH_FLASH_FG: Color = Color::Rgb(255, 60, 60);
 
 /// 対戦で自分の盤面に重ねる相手ゴーストの前景色(#301)。自分のスプライト(`PLAYER_FG`)と
-/// 紛れないよう暖色を避け、参加者ごとに使い分ける。対戦人数の上限は4人なので、
-/// 自分以外の3人ぶん用意する。
-const BATTLE_GHOST_FG: [Color; 3] = [
+/// 紛れないよう暖色を避け、参加者ごとに使い分ける。対戦人数の上限は8人なので、
+/// 自分以外の7人ぶん用意する(#311で3人ぶんから増やした)。並びは、番号が続く相手同士が
+/// 似た色にならないよう色味を交互にしてある。
+const BATTLE_GHOST_FG: [Color; 7] = [
     Color::Rgb(110, 200, 255),
     Color::Rgb(190, 150, 255),
     Color::Rgb(140, 230, 160),
+    Color::Rgb(235, 130, 215),
+    Color::Rgb(100, 225, 230),
+    Color::Rgb(120, 150, 245),
+    Color::Rgb(165, 205, 205),
 ];
 
 /// 参加者index(自分を除いた0始まり)に対応する相手ゴーストの前景色(#301)。
@@ -283,6 +288,64 @@ pub fn oxygen_bar_color(ratio: f32) -> Color {
         Color::Rgb(230, 190, 30) // 黄
     } else {
         Color::Rgb(220, 50, 50) // 赤
+    }
+}
+
+#[cfg(test)]
+mod battle_ghost_tests {
+    use super::*;
+
+    /// 色を1つずつ取り出すときに使う。`Color::Rgb`以外は使っていないので、それ以外が
+    /// 来たらテストを失敗させる。
+    fn rgb_of(color: Color) -> (u8, u8, u8) {
+        match color {
+            Color::Rgb(r, g, b) => (r, g, b),
+            other => panic!("ゴーストの色はRgbで指定するはず(実際: {other:?})"),
+        }
+    }
+
+    #[test]
+    fn there_is_one_color_for_every_opponent_of_a_full_room() {
+        // #311: 定員8人ぶん(自分を除く7人)を色分けできるはず。定員は`lobby`側の
+        // `ROOM_MAX_PLAYERS`で持っているため、ここでは人数を直接書いて突き合わせる。
+        assert_eq!(BATTLE_GHOST_FG.len(), 7);
+    }
+
+    #[test]
+    fn every_opponent_of_a_full_room_gets_a_distinct_color() {
+        // 同じ色が2人に割り当たると、どちらのゴーストか見分けられなくなる。
+        let mut seen: Vec<(u8, u8, u8)> = (0..BATTLE_GHOST_FG.len())
+            .map(|index| rgb_of(battle_ghost_fg(index)))
+            .collect();
+        let count = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), count, "7人ぶん全て違う色のはず");
+    }
+
+    #[test]
+    fn the_ghost_colors_stay_away_from_the_players_own_warm_color() {
+        // 自分のスプライト(橙)・潰れた演出(赤)と紛れないよう、どの色も青成分を残す。
+        for index in 0..BATTLE_GHOST_FG.len() {
+            let color = battle_ghost_fg(index);
+            let (_, _, b) = rgb_of(color);
+            assert!(
+                b >= 150,
+                "{index}番目の色は青成分が足りず暖色寄りに見えるはず(実際: {color:?})"
+            );
+            assert_ne!(color, PLAYER_FG);
+            assert_ne!(color, CRUSH_FLASH_FG);
+        }
+    }
+
+    #[test]
+    fn an_index_beyond_the_supported_count_wraps_around() {
+        // 想定人数を超えたindexが来ても落ちない(#301の巡回)。
+        assert_eq!(battle_ghost_fg(BATTLE_GHOST_FG.len()), battle_ghost_fg(0));
+        assert_eq!(
+            battle_ghost_fg(BATTLE_GHOST_FG.len() + 2),
+            battle_ghost_fg(2)
+        );
     }
 }
 

@@ -84,7 +84,7 @@ impl Discovery {
     /// `MDT_DISCOVERY_PEER_PORT`(未設定なら同じ値)へ送信する(#267。既存の
     /// 同一マシン動作確認手順との後方互換)。
     ///
-    /// 指定が無い通常の起動では、`DISCOVERY_PORT`から連続する範囲(既定4つ)の中で
+    /// 指定が無い通常の起動では、`DISCOVERY_PORT`から連続する範囲(既定8つ)の中で
     /// 空いている最初のポートにbindし、範囲内の全ポートへHELLO/BYEをブロードキャスト
     /// する(#278。同一ホストで複数プロセスを起動しても、環境変数無しで自動的に
     /// 発見し合える)。非ブロッキング+ブロードキャスト送信可能にしてから最初のHELLOを
@@ -617,8 +617,11 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // 同一ホストで複数プロセスを起動しても自動的に発見し合える(#278)。
-    // 固定ポート(39393-39396)は環境依存で他のテストと競合しうるため、動的に
+    // 固定ポート(39393-39400)は環境依存で他のテストと競合しうるため、動的に
     // 確保した空きポートを範囲の起点として使う。
+    //
+    // 以下のテスト名にある人数は`DISCOVERY_PORT_RANGE_COUNT`(=8、#311で4から拡張)に
+    // 合わせてある。定数を変えたときは名前も合わせて直す。
     // -----------------------------------------------------------------------
 
     /// ループバックの空きポートを1つ確保し、その番号だけを返す(すぐ手放す)。
@@ -640,11 +643,11 @@ mod tests {
     }
 
     #[test]
-    fn four_processes_on_the_same_host_bind_to_distinct_ports_in_the_range() {
-        // 範囲(4つ)ぶんの`Discovery`を起動すると、1つ目から順に空いている最初の
+    fn eight_processes_on_the_same_host_bind_to_distinct_ports_in_the_range() {
+        // 範囲ぶんの`Discovery`を起動すると、1つ目から順に空いている最初の
         // ポートを確保していくため、全員が異なるポートになる。
         let _guard = port_range_test_lock();
-        const COUNT: u16 = 4;
+        const COUNT: u16 = DISCOVERY_PORT_RANGE_COUNT;
         let base = free_loopback_port();
 
         let discoveries: Vec<Discovery> = (0..COUNT)
@@ -669,9 +672,9 @@ mod tests {
     }
 
     #[test]
-    fn a_fifth_process_fails_to_start_once_the_range_is_exhausted() {
+    fn a_ninth_process_fails_to_start_once_the_range_is_exhausted() {
         let _guard = port_range_test_lock();
-        const COUNT: u16 = 4;
+        const COUNT: u16 = DISCOVERY_PORT_RANGE_COUNT;
         let base = free_loopback_port();
         let _discoveries: Vec<Discovery> = (0..COUNT)
             .map(|i| {
@@ -680,21 +683,22 @@ mod tests {
             })
             .collect();
 
-        let fifth = Discovery::start_in_range_on_loopback("p4".to_string(), 39399, base, COUNT);
+        let over_capacity =
+            Discovery::start_in_range_on_loopback(format!("p{COUNT}"), 39394 + COUNT, base, COUNT);
 
         assert!(
-            fifth.is_err(),
+            over_capacity.is_err(),
             "範囲内の全ポートが使用中なら、それ以上は起動できないはず"
         );
     }
 
     #[test]
-    fn four_processes_on_the_same_host_discover_each_other_through_the_shared_port_range() {
+    fn eight_processes_on_the_same_host_discover_each_other_through_the_shared_port_range() {
         // 環境変数オーバーライド無しでも、範囲内の全ポートへ送るHELLOによって
-        // 4プロセスが自動的に互いを発見できる(実際のユーザー報告: 手動でポートを
-        // 指定しないと2台目以降がロビーに入れなかった問題の再現・解消確認)。
+        // 範囲ぶんのプロセスが自動的に互いを発見できる(実際のユーザー報告: 手動で
+        // ポートを指定しないと2台目以降がロビーに入れなかった問題の再現・解消確認)。
         let _guard = port_range_test_lock();
-        const COUNT: u16 = 4;
+        const COUNT: u16 = DISCOVERY_PORT_RANGE_COUNT;
         let base = free_loopback_port();
 
         let mut discoveries: Vec<Discovery> = (0..COUNT)

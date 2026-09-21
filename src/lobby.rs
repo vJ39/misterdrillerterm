@@ -41,11 +41,11 @@ const TCP_PORT_SEARCH_COUNT: u16 = 16;
 /// 接続に失敗したときの通知文。主催者側・ゲスト側の双方で使う。
 const CONNECT_FAILED_MESSAGE: &str = "接続できませんでした";
 
-/// ルーム1つに集まれる最大人数(主催者自身を含む。対戦人数の上限は4人)。
-const ROOM_MAX_PLAYERS: usize = 4;
+/// ルーム1つに集まれる最大人数(主催者自身を含む。対戦人数の上限は8人。#311で4から拡張)。
+const ROOM_MAX_PLAYERS: usize = 8;
 
 /// AI対戦で選べるAIの人数の範囲(#296)。自分を足した合計が`ROOM_MAX_PLAYERS`を
-/// 超えないようにするため、上限は「最大人数-1」(=3人。合計2〜4人)。
+/// 超えないようにするため、上限は「最大人数-1」(=7人。合計2〜8人)。
 const AI_OPPONENT_COUNT_RANGE: std::ops::RangeInclusive<usize> = 1..=(ROOM_MAX_PLAYERS - 1);
 
 /// 主催者が既に迎え入れたゲスト1人ぶん(設計書2節)。
@@ -135,7 +135,7 @@ pub enum LobbyPhase {
         result_rx: mpsc::Receiver<io::Result<room::RoomStartResult>>,
         host_peer: DiscoveredPeer,
     },
-    /// AIと対戦する人数を選んでいる(#296)。`ai_count`は1〜3(合計2〜4人)。
+    /// AIと対戦する人数を選んでいる(#296)。`ai_count`は1〜7(合計2〜8人)。
     /// 通信は一切使わないため、既に迎え入れたゲスト(`guests`)があっても無視する
     /// (対戦の種類が違うため両立しない)。
     SelectingAiOpponentCount { ai_count: usize },
@@ -317,7 +317,7 @@ impl LobbyState {
             // 参加リクエストが届いた。ゲストが既にいても受け付ける(N人対戦なので、
             // 満員(`ROOM_MAX_PLAYERS`)になるまでは追加で迎え入れられる。#293)。
             // 満員かどうかは自分+ゲスト+AIの合計で見る(#310。AIを数えていなかったため、
-            // ゲスト1人+AI2人で埋まっているのにもう1人受理して5人になっていた)。
+            // AIで枠が埋まっているのにもう1人受理して定員を超えていた)。
             (LobbyPhase::Discovering { guests, .. }, PacketType::Invite) => {
                 let from = self.peer_of(packet)?;
                 if guests.len() + 1 + self.room_ai_count >= ROOM_MAX_PLAYERS {
@@ -1230,26 +1230,27 @@ mod tests {
 
     #[test]
     fn inviting_a_candidate_does_nothing_once_the_room_is_already_full() {
-        // #283: ルームがすでに上限人数(自分+ゲスト3人=4人)に達していれば、候補に
-        // Confirmしても新たなリクエストは送らない(誤操作で5人目を誘えてしまうのを防ぐ)。
+        // #283: ルームがすでに上限人数(自分+ゲスト)に達していれば、候補にConfirmしても
+        // 新たなリクエストは送らない(誤操作で定員を超えて誘うのを防ぐ)。
+        // 候補のアドレスをループバックにしてあるのは、上限判定で止まらなかった場合に
+        // 送信自体が成功してしまい、判定漏れを見逃さないようにするため。
         let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
         lobby.add_peer(DiscoveredPeer::for_test(
             "candidate",
-            std::net::IpAddr::from(Ipv4Addr::new(192, 168, 0, 9)),
+            std::net::IpAddr::from(Ipv4Addr::LOCALHOST),
             39399,
         ));
+        let full_guests = ROOM_MAX_PLAYERS - 1;
         lobby.set_phase(LobbyPhase::Discovering {
-            guests: vec![
-                HostedGuest::for_test("g1"),
-                HostedGuest::for_test("g2"),
-                HostedGuest::for_test("g3"),
-            ],
+            guests: (0..full_guests)
+                .map(|i| HostedGuest::for_test(&format!("g{i}")))
+                .collect(),
         });
 
         lobby.update(&[InputAction::Confirm], test_config());
 
         assert!(
-            matches!(lobby.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 3),
+            matches!(lobby.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == full_guests),
             "上限に達している間はConfirmしても応答待ちへ移らないはず"
         );
     }
@@ -1273,32 +1274,35 @@ mod tests {
 
     #[test]
     fn the_ai_opponent_count_stays_within_the_supported_range() {
-        // #296: 合計人数がROOM_MAX_PLAYERS(4人)を超えないよう、AIは1〜3人に収める。
+        // #296: 合計人数が`ROOM_MAX_PLAYERS`を超えないよう、AIは`AI_OPPONENT_COUNT_RANGE`に
+        // 収める。定員を変えてもテストが追従するよう、範囲の両端を定数から取る。
+        let min_ai = *AI_OPPONENT_COUNT_RANGE.start();
+        let max_ai = *AI_OPPONENT_COUNT_RANGE.end();
         let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
-        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 1 });
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: min_ai });
 
-        // 上限を超えて増やそうとしても3で止まる。
-        for _ in 0..5 {
+        // 上限を超えて増やそうとしても上限で止まる。
+        for _ in 0..ROOM_MAX_PLAYERS + 2 {
             lobby.update(&[InputAction::FaceUp], test_config());
         }
         assert!(
             matches!(
                 lobby.phase(),
-                LobbyPhase::SelectingAiOpponentCount { ai_count: 3 }
+                LobbyPhase::SelectingAiOpponentCount { ai_count } if *ai_count == max_ai
             ),
-            "AIの人数は3人で止まるはず"
+            "AIの人数は{max_ai}人で止まるはず"
         );
 
-        // 下限も同じく1で止まる(0人=1人対戦にはならない)。
-        for _ in 0..5 {
+        // 下限も同じく止まる(0人=1人対戦にはならない)。
+        for _ in 0..ROOM_MAX_PLAYERS + 2 {
             lobby.update(&[InputAction::FaceDown], test_config());
         }
         assert!(
             matches!(
                 lobby.phase(),
-                LobbyPhase::SelectingAiOpponentCount { ai_count: 1 }
+                LobbyPhase::SelectingAiOpponentCount { ai_count } if *ai_count == min_ai
             ),
-            "AIの人数は1人で止まるはず"
+            "AIの人数は{min_ai}人で止まるはず"
         );
     }
 
@@ -1528,12 +1532,11 @@ mod tests {
         // 達している間は自動で断る(無視すると相手がタイムアウトまで待たされる)。
         let (mut host, mut other) = facing_lobbies();
         discover_each_other(&mut host, &mut other);
+        let full_guests = ROOM_MAX_PLAYERS - 1;
         host.set_phase(LobbyPhase::Discovering {
-            guests: vec![
-                HostedGuest::for_test("g1"),
-                HostedGuest::for_test("g2"),
-                HostedGuest::for_test("g3"),
-            ],
+            guests: (0..full_guests)
+                .map(|i| HostedGuest::for_test(&format!("g{i}")))
+                .collect(),
         });
 
         invite_by_name(&mut other, "host");
@@ -1547,7 +1550,7 @@ mod tests {
         }
 
         assert!(
-            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 3),
+            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == full_guests),
             "満員のホストは確認画面へ移らず、集めたルームを保ったままのはず"
         );
         assert!(
@@ -1722,7 +1725,7 @@ mod tests {
 
     #[test]
     fn a_room_of_four_players_starts_a_battle_for_everyone() {
-        // #276: 4人(#273-275のフルメッシュ上限)まで同じ手順で集められる。
+        // #276: 4人でも同じ手順で集められる(定員いっぱいの8人は別テスト)。
         let names = run_room_of(&["host", "guest-1", "guest-2", "guest-3"]);
 
         assert_eq!(names[0], vec!["host", "guest-1", "guest-2", "guest-3"]);
@@ -1851,12 +1854,12 @@ mod tests {
         let (guest_a, rest) = rest.split_first_mut().unwrap();
         let guest_b = &mut rest[0];
 
-        // 既に2人迎えている(自分含め3人)。ROOM_MAX_PLAYERS=4なので、あと1人だけ入れる。
+        // 残り1枠になるまで迎え入れておく(自分+既存ゲストで`ROOM_MAX_PLAYERS - 1`人)。
+        let already_joined = ROOM_MAX_PLAYERS - 2;
         host.set_phase(LobbyPhase::Discovering {
-            guests: vec![
-                HostedGuest::for_test("already-1"),
-                HostedGuest::for_test("already-2"),
-            ],
+            guests: (0..already_joined)
+                .map(|i| HostedGuest::for_test(&format!("already-{i}")))
+                .collect(),
         });
 
         invite_by_name(guest_a, "host");
@@ -1882,8 +1885,8 @@ mod tests {
 
         assert_eq!(
             host.hosted_guests().len(),
-            3,
-            "満員(自分含め4人)を超えて迎え入れてはいないはず"
+            already_joined + 1,
+            "満員(自分含め`ROOM_MAX_PLAYERS`人)を超えて迎え入れてはいないはず"
         );
         let (accepted, declined) = if matches!(guest_a.phase(), LobbyPhase::Notice { .. }) {
             (guest_b, guest_a)
@@ -1917,7 +1920,7 @@ mod tests {
         assert_eq!(lobby.room_ai_count(), 1);
 
         lobby.update(&[InputAction::IncreaseRoomAiCount], test_config());
-        assert_eq!(lobby.room_ai_count(), 2, "自分+ゲスト1人+AI2人=4人まで");
+        assert_eq!(lobby.room_ai_count(), 2, "押した回数ぶん1人ずつ増えるはず");
 
         lobby.update(&[InputAction::DecreaseRoomAiCount], test_config());
         assert_eq!(lobby.room_ai_count(), 1);
@@ -1929,7 +1932,7 @@ mod tests {
 
     #[test]
     fn the_ai_count_stops_so_that_the_room_stays_within_its_capacity() {
-        // 自分+ゲスト+AIが`ROOM_MAX_PLAYERS`(4人)に収まる人数で止まる。
+        // 自分+ゲスト+AIが`ROOM_MAX_PLAYERS`に収まる人数で止まる。
         for guest_count in 0..ROOM_MAX_PLAYERS {
             let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
             let guests = (0..guest_count)
@@ -1974,9 +1977,8 @@ mod tests {
         // 受理して一度フェーズを離れるたびに0へ戻り、ホストが追加したはずのAIが
         // 対戦に混ざらなかった。
         //
-        // AIは1人だけにする。2人目のゲストが入って自分+ゲスト2人+AI1人=4人になり、
-        // ちょうど`ROOM_MAX_PLAYERS`に収まる(#310で満員判定がAIも数えるようになり、
-        // AI2人では2人目のゲストが入れなくなった)。
+        // AIは1人だけにする(#310で満員判定がAIも数えるようになったため、2人目の
+        // ゲストが入る余地を残しておく)。
         let mut lobbies = facing_lobbies_of(&["host", "guest1", "guest2"]);
         discover_all(&mut lobbies);
         let mut guest2 = lobbies.pop().unwrap();
@@ -2008,7 +2010,7 @@ mod tests {
     #[test]
     fn a_join_request_is_declined_once_the_ai_slots_leave_no_space() {
         // #310: 満員判定がゲストの人数だけを見ていたため、AIで埋まったルームでも参加
-        // リクエストを受理し、`ROOM_MAX_PLAYERS`(4人)を超えていた。AIをN人混ぜたら
+        // リクエストを受理し、`ROOM_MAX_PLAYERS`を超えていた。AIをN人混ぜたら
         // 迎え入れられるゲストは`ROOM_MAX_PLAYERS - 1 - N`人まで。
         for ai_count in 1..ROOM_MAX_PLAYERS {
             let guest_count = ROOM_MAX_PLAYERS - 1 - ai_count;
@@ -2054,9 +2056,9 @@ mod tests {
 
     #[test]
     fn a_second_guest_cannot_join_once_the_ai_slots_fill_the_room() {
-        // #310の再現手順。ゲスト1人を迎えてからAIを2人足すと自分+ゲスト1人+AI2人=4人で
-        // 満員。ここへ届いた2人目の参加リクエストは断られるはず(以前は受理してしまい、
-        // 5人のまま対戦を開始できなくなっていた)。
+        // #310の再現手順。ゲスト1人を迎えてから残り枠ぶんのAIを足すと満員。ここへ届いた
+        // 2人目の参加リクエストは断られるはず(以前は受理してしまい、定員超過のまま
+        // 対戦を開始できなくなっていた)。
         let mut lobbies = facing_lobbies_of(&["host", "guest1", "guest2"]);
         discover_all(&mut lobbies);
         let mut guest2 = lobbies.pop().unwrap();
@@ -2064,23 +2066,21 @@ mod tests {
         let mut host = lobbies.pop().unwrap();
 
         request_and_join(&mut host, &mut guest1, "guest1");
+        let ai_slots = ROOM_MAX_PLAYERS - 2;
         host.update(
-            &[
-                InputAction::IncreaseRoomAiCount,
-                InputAction::IncreaseRoomAiCount,
-            ],
+            &vec![InputAction::IncreaseRoomAiCount; ai_slots],
             test_config(),
         );
         assert_eq!(
             host.room_ai_count(),
-            2,
-            "前提: AIを2人ぶん追加できているはず"
+            ai_slots,
+            "前提: AIを{ai_slots}人ぶん追加できているはず"
         );
 
         invite_by_name(&mut guest2, "host");
         for _ in 0..MAX_PUMPS {
-            // 確認画面へ移ってしまった場合は許可まで進め、5人目が入れることを取り
-            // こぼさないようにする。
+            // 確認画面へ移ってしまった場合は許可まで進め、定員を超えて入れてしまうのを
+            // 取りこぼさないようにする。
             let actions: &[InputAction] =
                 if matches!(host.phase(), LobbyPhase::IncomingInvite { .. }) {
                     &[InputAction::Confirm]
@@ -2101,7 +2101,11 @@ mod tests {
             1,
             "AIで枠が埋まっているので2人目のゲストは迎え入れないはず"
         );
-        assert_eq!(host.room_ai_count(), 2, "断った後もAIの枠は保たれるはず");
+        assert_eq!(
+            host.room_ai_count(),
+            ai_slots,
+            "断った後もAIの枠は保たれるはず"
+        );
         assert!(
             matches!(guest2.phase(), LobbyPhase::Notice { message, .. } if message == "相手に断られました"),
             "2人目には断られた通知が出るはず"
@@ -2114,26 +2118,24 @@ mod tests {
 
     #[test]
     fn a_queued_join_request_is_declined_once_the_guest_and_the_ai_fill_the_room() {
-        // #310: 順番待ちを取り出すときの満員判定にもAIを数える。AIを2人混ぜた状態で
-        // 2人から申し込まれたら、1人目を許可した時点で自分+ゲスト1人+AI2人=4人に
-        // なるため、2人目は断られるはず。
+        // #310: 順番待ちを取り出すときの満員判定にもAIを数える。残り1枠になるまでAIを
+        // 混ぜた状態で2人から申し込まれたら、1人目を許可した時点で満員になるため、
+        // 2人目は断られるはず。
         let mut lobbies = facing_lobbies_of(&["host", "guest-a", "guest-b"]);
         discover_all(&mut lobbies);
         let (host, rest) = lobbies.split_first_mut().unwrap();
         let (guest_a, rest) = rest.split_first_mut().unwrap();
         let guest_b = &mut rest[0];
 
+        let ai_slots = ROOM_MAX_PLAYERS - 2;
         host.update(
-            &[
-                InputAction::IncreaseRoomAiCount,
-                InputAction::IncreaseRoomAiCount,
-            ],
+            &vec![InputAction::IncreaseRoomAiCount; ai_slots],
             test_config(),
         );
         assert_eq!(
             host.room_ai_count(),
-            2,
-            "前提: AIを2人ぶん追加できているはず"
+            ai_slots,
+            "前提: AIを{ai_slots}人ぶん追加できているはず"
         );
 
         invite_by_name(guest_a, "host");
@@ -2160,9 +2162,13 @@ mod tests {
         assert_eq!(
             host.hosted_guests().len(),
             1,
-            "AI2人ぶんの枠があるので迎え入れられるゲストは1人だけのはず"
+            "AI{ai_slots}人ぶんの枠があるので迎え入れられるゲストは1人だけのはず"
         );
-        assert_eq!(host.room_ai_count(), 2, "断った後もAIの枠は保たれるはず");
+        assert_eq!(
+            host.room_ai_count(),
+            ai_slots,
+            "断った後もAIの枠は保たれるはず"
+        );
         let (accepted, declined) = if matches!(guest_a.phase(), LobbyPhase::Notice { .. }) {
             (guest_b, guest_a)
         } else {
@@ -2180,12 +2186,15 @@ mod tests {
 
     #[test]
     fn inviting_a_candidate_does_nothing_once_the_ai_slots_fill_the_room() {
-        // #310: 自分から誘うときの上限判定もAIを数える。ゲスト2人+AI1人で満員なので、
+        // #310: 自分から誘うときの上限判定もAIを数える。残り1枠をAIで埋めると満員なので、
         // 候補にConfirmしても参加リクエストは飛ばない。
         let (mut host, mut other) = facing_lobbies();
         discover_each_other(&mut host, &mut other);
+        let guest_count = ROOM_MAX_PLAYERS - 2;
         host.set_phase(LobbyPhase::Discovering {
-            guests: vec![HostedGuest::for_test("g1"), HostedGuest::for_test("g2")],
+            guests: (0..guest_count)
+                .map(|i| HostedGuest::for_test(&format!("g{i}")))
+                .collect(),
         });
         host.update(&[InputAction::IncreaseRoomAiCount], test_config());
         assert_eq!(
@@ -2202,7 +2211,7 @@ mod tests {
         }
 
         assert!(
-            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == 2),
+            matches!(host.phase(), LobbyPhase::Discovering { guests, .. } if guests.len() == guest_count),
             "満員の間はConfirmしても応答待ちへ移らないはず"
         );
         assert!(
@@ -2237,7 +2246,7 @@ mod tests {
 
     #[test]
     fn a_room_can_be_filled_up_with_more_than_one_ai() {
-        // ホスト+ゲスト1人+AI2人で`ROOM_MAX_PLAYERS`(4人)ぴったり。
+        // ホスト+ゲスト1人+AI2人。AIは複数でも並びが崩れない。
         let names = run_room_of_with_ai(&["host", "guest"], 2);
 
         assert_eq!(
@@ -2258,5 +2267,60 @@ mod tests {
                 room::ai_member_name(2)
             ]
         );
+    }
+
+    #[test]
+    fn a_room_of_the_maximum_number_of_players_starts_a_battle_for_everyone() {
+        // #311: 定員(`ROOM_MAX_PLAYERS`)いっぱいまで人間だけで集めても、同じ手順で
+        // 全員が対戦へ入れる。並びはどこから見てもindex 0が自分・残りはroom内
+        // インデックス順。
+        let names: Vec<String> = std::iter::once("host".to_string())
+            .chain((1..ROOM_MAX_PLAYERS).map(|index| format!("guest-{index}")))
+            .collect();
+        let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
+
+        let seen = run_room_of(&name_refs);
+
+        assert_eq!(seen.len(), ROOM_MAX_PLAYERS, "全員が対戦を始めるはず");
+        for (index, seen_by_one) in seen.iter().enumerate() {
+            let mut expected = vec![names[index].clone()];
+            expected.extend(
+                names
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(_, name)| name.clone()),
+            );
+            assert_eq!(seen_by_one, &expected, "{}から見た並び", names[index]);
+        }
+    }
+
+    #[test]
+    fn a_room_filled_to_capacity_with_guests_and_ai_starts_for_everyone() {
+        // #311: 人間とAIを混ぜても定員ぴったりまで埋められる。AIはrosterの末尾に
+        // 並び、ゲストからも同じ名前・同じ順で見える(代理送信のroom内インデックスが
+        // 全員で一致している必要があるため)。
+        let humans = ["host", "guest-1", "guest-2", "guest-3"];
+        let ai_count = ROOM_MAX_PLAYERS - humans.len();
+        let ai_names: Vec<String> = (1..=ai_count).map(room::ai_member_name).collect();
+
+        let seen = run_room_of_with_ai(&humans, ai_count);
+
+        assert_eq!(seen.len(), humans.len(), "人間全員が対戦を始めるはず");
+        for (index, seen_by_one) in seen.iter().enumerate() {
+            assert_eq!(
+                seen_by_one.len(),
+                ROOM_MAX_PLAYERS,
+                "{}から見たrosterは定員ぶんあるはず",
+                humans[index]
+            );
+            assert_eq!(seen_by_one[0], humans[index], "index 0は自分のはず");
+            assert_eq!(
+                &seen_by_one[humans.len()..],
+                ai_names.as_slice(),
+                "{}から見てもAIは末尾に同じ順で並ぶはず",
+                humans[index]
+            );
+        }
     }
 }

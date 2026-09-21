@@ -501,7 +501,11 @@ pub const HELLO_BROADCAST_INTERVAL_MS: u64 = 1000;
 /// (`MDT_DISCOVERY_PORT`)が無い場合、`DISCOVERY_PORT`からこの数だけ連続する
 /// ポートを探索範囲として使う(空いている最初のポートにbindし、範囲内の全ポート
 /// へHELLO/BYEをブロードキャストする)。
-pub const DISCOVERY_PORT_RANGE_COUNT: u16 = 4;
+///
+/// 対戦の定員(`ROOM_MAX_PLAYERS`)と同じ8にしてあるのは、1台のマシンで定員ぶんの
+/// プロセスを起動して動作確認できるようにするため(#311)。別のマシンとの対戦には
+/// 関係しない。
+pub const DISCOVERY_PORT_RANGE_COUNT: u16 = 8;
 
 /// 探索パケットの固定長(バイト)。受信バッファの大きさとしても使うため、
 /// 探索側(`discovery.rs`)から参照できるようにしている。
