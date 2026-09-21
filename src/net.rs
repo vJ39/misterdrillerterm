@@ -22,6 +22,19 @@ use uuid::Uuid;
 use crate::game::InputAction;
 use crate::settings::Settings;
 
+/// TCP接続後のメッセージの版(#317)。`Hello`で相手と交換する。
+///
+/// `GameMessage`・`BattleConfig`の構造を変える変更をするときは、必ずこの値を1つ上げる。
+/// 違う版どうしが繋がると、同じバイト列を別の構造として読むため、デシリアライズが
+/// 失敗するか、運が悪いと成功した上で中身が食い違う。どちらも原因の分かりにくい
+/// 不具合になるので、対戦が始まる前にここで弾く。
+///
+/// `Hello`へ項目を足すときは`protocol_version`より後ろへ足す。デコードは余った
+/// バイトを読み飛ばすため、古い版でも名前と版までは読めて不一致を報告できる。
+///
+/// UDP探索のパケットには別の版(`DISCOVERY_PROTOCOL_VERSION`)がある。
+pub(crate) const PROTOCOL_VERSION: u32 = 1;
+
 /// TCP接続後にやり取りするメッセージ(spec.md 12.2)。
 ///
 /// `Hello`〜`SeedAgree`が開始前のハンドシェイク用、`Input`以降が対戦中用。
@@ -31,6 +44,9 @@ use crate::settings::Settings;
 pub enum GameMessage {
     Hello {
         name: String,
+        /// 送信側の`PROTOCOL_VERSION`(#317)。受信側は自分の値と比べ、違えば
+        /// 対戦を始めずに切る。
+        protocol_version: u32,
     },
     /// 参加者→主催者(ルーム参加接続で送信)。N人対戦のルームへ参加を申し込む(#275)。
     /// `mesh_port`は自分のメッシュ接続用listenerのポートで、主催者はこれに接続元のIPを
@@ -373,13 +389,21 @@ pub fn run_host_handshake(
     // クライアントが先に送る`Hello`を受けてから自分の`Hello`を返す(双方が同時に
     // 受信待ちへ入って止まらないよう、送受信の順序をホストとクライアントで逆にする)。
     let opponent_name = match read_message(stream)? {
-        GameMessage::Hello { name } => name,
+        GameMessage::Hello {
+            name,
+            protocol_version,
+        } => {
+            // 設定・シードを送る前に版を確かめる(#317)。
+            check_protocol_version(protocol_version)?;
+            name
+        }
         other => return Err(unexpected_message("Hello", &other)),
     };
     write_message(
         stream,
         &GameMessage::Hello {
             name: my_name.to_string(),
+            protocol_version: PROTOCOL_VERSION,
         },
     )?;
 
@@ -416,10 +440,19 @@ pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result
         stream,
         &GameMessage::Hello {
             name: my_name.to_string(),
+            protocol_version: PROTOCOL_VERSION,
         },
     )?;
     let opponent_name = match read_message(stream)? {
-        GameMessage::Hello { name } => name,
+        GameMessage::Hello {
+            name,
+            protocol_version,
+        } => {
+            // ホストの設定・シードを読む前に版を確かめる(#317)。違う版の値を
+            // そのまま読むと、解釈のずれた設定で対戦を始めてしまう。
+            check_protocol_version(protocol_version)?;
+            name
+        }
         other => return Err(unexpected_message("Hello", &other)),
     };
 
@@ -448,6 +481,22 @@ pub(crate) fn unexpected_message(expected: &str, actual: &GameMessage) -> io::Er
         io::ErrorKind::InvalidData,
         format!("{expected}を待っていたが{actual:?}を受信した"),
     )
+}
+
+/// 受け取った`Hello`の版が自分と同じかを確かめる(#317)。違えば`InvalidData`で返し、
+/// 呼び出し元は対戦を始めずに接続を切る。
+///
+/// メッシュ接続の`Hello`(#275)でも同じ判定をするため`pub(crate)`にしている。
+pub(crate) fn check_protocol_version(peer_version: u32) -> io::Result<()> {
+    if peer_version == PROTOCOL_VERSION {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "プロトコルバージョンが異なります(自分{PROTOCOL_VERSION}・相手{peer_version})。同じ版の実行ファイルどうしで対戦してください"
+        ),
+    ))
 }
 
 /// 通信スレッドがメインループへ届けるイベント(#254)。
@@ -523,7 +572,8 @@ pub(crate) const DISCOVERY_PACKET_LEN: usize = 60;
 /// プロトコル識別子(spec.md 12.1のmagic)。
 const DISCOVERY_MAGIC: [u8; 4] = *b"MDT1";
 /// 探索プロトコルの版。旧版の実装は存在しないため現在は1固定。
-const PROTOCOL_VERSION: u8 = 1;
+/// TCP接続後のメッセージの版(`PROTOCOL_VERSION`)とは別物なので名前で区別する(#317)。
+const DISCOVERY_PROTOCOL_VERSION: u8 = 1;
 /// 表示名フィールドの長さ(バイト)。超える場合は切り詰め、余りは0でパディングする。
 /// 名前入力UI(#270)が入力中にこの上限で打ち止めにするため、モジュール外からも参照する。
 pub(crate) const PLAYER_NAME_LEN: usize = 16;
@@ -592,7 +642,7 @@ impl DiscoveryPacket {
         let mut bytes = [0u8; DISCOVERY_PACKET_LEN];
         bytes[0..4].copy_from_slice(&DISCOVERY_MAGIC);
         bytes[4] = self.packet_type.to_byte();
-        bytes[5] = PROTOCOL_VERSION;
+        bytes[5] = DISCOVERY_PROTOCOL_VERSION;
         bytes[6..22].copy_from_slice(self.sender_id.as_bytes());
         bytes[22..38].copy_from_slice(self.target_id.as_bytes());
         // 表示名は16バイトに収め、余りは0のまま(パディング)にする。
@@ -717,6 +767,7 @@ mod tests {
     fn every_message_kind_round_trips_through_the_framing() {
         assert_round_trips(&GameMessage::Hello {
             name: "ホリ・ススム".to_string(),
+            protocol_version: PROTOCOL_VERSION,
         });
         assert_round_trips(&GameMessage::JoinRoom {
             name: "ホリ・ススム".to_string(),
@@ -811,6 +862,7 @@ mod tests {
         // 1件ずつ取り出せること。
         let first = GameMessage::Hello {
             name: "a".to_string(),
+            protocol_version: PROTOCOL_VERSION,
         };
         let second = GameMessage::SeedAgree {
             seed: 7,
@@ -851,9 +903,11 @@ mod tests {
     #[test]
     fn a_payload_at_the_size_limit_is_still_read_back() {
         // 上限ちょうどのメッセージは通ること。名前の長さでペイロードを上限へ合わせる
-        // (内訳は判別子1バイト+文字列長のvarint 5バイト+名前本体)。
+        // (内訳は判別子1バイト+文字列長のvarint 5バイト+版のvarint 1バイト+名前本体。
+        // 版が251以上になると版のvarintが伸びるため、その時はこの引き算も直す)。
         let msg = GameMessage::Hello {
-            name: "x".repeat(MAX_MESSAGE_PAYLOAD_BYTES - 6),
+            name: "x".repeat(MAX_MESSAGE_PAYLOAD_BYTES - 7),
+            protocol_version: PROTOCOL_VERSION,
         };
 
         let mut buffer = Vec::new();
@@ -1023,6 +1077,7 @@ mod tests {
                 &mut stream,
                 &GameMessage::Hello {
                     name: "host".to_string(),
+                    protocol_version: PROTOCOL_VERSION,
                 },
             )
             .unwrap();
@@ -1040,6 +1095,72 @@ mod tests {
         let err = run_client_handshake(&mut stream, "client").unwrap_err();
         fake_host.join().unwrap();
 
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn the_host_rejects_a_hello_with_a_different_protocol_version() {
+        // #317: 版が違う相手には設定・シードを送らずに切る。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let host = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            run_host_handshake(&mut stream, "host", test_config())
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        write_message(
+            &mut stream,
+            &GameMessage::Hello {
+                name: "client".to_string(),
+                protocol_version: PROTOCOL_VERSION + 1,
+            },
+        )
+        .unwrap();
+
+        let err = host.join().unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // 設定を受け取る前に切れていること(版の判定がハンドシェイクの最初にある証拠)。
+        assert!(
+            read_message(&mut stream).is_err(),
+            "版が違う相手にはStartConfigを送らないはず"
+        );
+    }
+
+    #[test]
+    fn the_client_rejects_a_hello_with_a_different_protocol_version() {
+        // #317: ホストの版が違う場合も、設定を読む前に断る。
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // ホストの振りをして、版だけ違う`Hello`を返す。
+        let fake_host = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_message(&mut stream).unwrap();
+            write_message(
+                &mut stream,
+                &GameMessage::Hello {
+                    name: "host".to_string(),
+                    protocol_version: PROTOCOL_VERSION + 1,
+                },
+            )
+            .unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).unwrap();
+        let err = run_client_handshake(&mut stream, "client").unwrap_err();
+        fake_host.join().unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn the_same_protocol_version_passes_the_check() {
+        // 同じ版どうしなら通り、違えば`InvalidData`になること(判定そのものの確認)。
+        assert!(check_protocol_version(PROTOCOL_VERSION).is_ok());
+
+        let err = check_protocol_version(PROTOCOL_VERSION + 1).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 

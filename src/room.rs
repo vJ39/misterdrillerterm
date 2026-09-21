@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use rand::RngExt;
 
-use crate::net::{self, BattleConfig, GameMessage, RoomMember, TCP_CONNECT_TIMEOUT_MS};
+use crate::net::{
+    self, BattleConfig, GameMessage, PROTOCOL_VERSION, RoomMember, TCP_CONNECT_TIMEOUT_MS,
+};
 
 /// 参加者側がルーム参加を終えた結果(自分以外とのメッシュ接続。room内インデックス順,
 /// 自分以外の名前を同じ順で並べたもの, 自分のroom内インデックス, ハンドシェイク結果)。
@@ -266,6 +268,7 @@ fn establish_full_mesh(
             &mut stream,
             &GameMessage::Hello {
                 name: my_name.to_string(),
+                protocol_version: PROTOCOL_VERSION,
             },
         )?;
         let peer_name = read_hello(&mut stream)?;
@@ -305,6 +308,7 @@ fn establish_full_mesh(
             &mut stream,
             &GameMessage::Hello {
                 name: my_name.to_string(),
+                protocol_version: PROTOCOL_VERSION,
             },
         )?;
 
@@ -357,9 +361,18 @@ pub fn ai_member_name(number: usize) -> String {
 }
 
 /// メッシュ接続の`Hello`を1件受け取り、相手の名前を返す。
+///
+/// 版が違う相手はここで弾く(#317)。メッシュ確立は対戦が始まる直前の工程なので、
+/// この関門を通った相手だけが対戦に入る。
 fn read_hello(stream: &mut TcpStream) -> io::Result<String> {
     match net::read_message(stream)? {
-        GameMessage::Hello { name } => Ok(name),
+        GameMessage::Hello {
+            name,
+            protocol_version,
+        } => {
+            net::check_protocol_version(protocol_version)?;
+            Ok(name)
+        }
         other => Err(net::unexpected_message("Hello", &other)),
     }
 }
@@ -538,6 +551,7 @@ mod tests {
                     stream,
                     &GameMessage::Hello {
                         name: format!("index{my_index}"),
+                        protocol_version: PROTOCOL_VERSION,
                     },
                 )
                 .unwrap();
@@ -875,7 +889,14 @@ mod tests {
     fn spawn_mesh_client(addr: SocketAddr, name: String) -> thread::JoinHandle<TcpStream> {
         thread::spawn(move || {
             let mut stream = TcpStream::connect(addr).unwrap();
-            net::write_message(&mut stream, &GameMessage::Hello { name }).unwrap();
+            net::write_message(
+                &mut stream,
+                &GameMessage::Hello {
+                    name,
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            )
+            .unwrap();
             read_hello(&mut stream).unwrap();
             stream
         })
@@ -887,7 +908,14 @@ mod tests {
         thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             read_hello(&mut stream).unwrap();
-            net::write_message(&mut stream, &GameMessage::Hello { name }).unwrap();
+            net::write_message(
+                &mut stream,
+                &GameMessage::Hello {
+                    name,
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            )
+            .unwrap();
             stream
         })
     }
@@ -987,5 +1015,91 @@ mod tests {
                 "参加者{my_index}はAIを人間の後ろに並べた名前一覧を受け取るはず"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // プロトコルの版の照合(#317)。メッシュ確立は対戦が始まる直前の工程なので、
+    // 版の違う相手はここで弾き切る必要がある。
+    // -----------------------------------------------------------------------
+
+    /// 版だけ違う`Hello`を送るクライアント役の振り。相手は返信せずに切るため、
+    /// 読み取りの結果は問わない。
+    fn spawn_mismatched_mesh_client(addr: SocketAddr, name: String) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let mut stream = TcpStream::connect(addr).unwrap();
+            net::write_message(
+                &mut stream,
+                &GameMessage::Hello {
+                    name,
+                    protocol_version: PROTOCOL_VERSION + 1,
+                },
+            )
+            .unwrap();
+            let _ = net::read_message(&mut stream);
+        })
+    }
+
+    /// 版だけ違う`Hello`を返すサーバ役の振り。相手が読む前に切っている場合もあるため、
+    /// 書き込みの結果は問わない。
+    fn spawn_mismatched_mesh_server(listener: TcpListener, name: String) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            net::read_message(&mut stream).unwrap();
+            let _ = net::write_message(
+                &mut stream,
+                &GameMessage::Hello {
+                    name,
+                    protocol_version: PROTOCOL_VERSION + 1,
+                },
+            );
+        })
+    }
+
+    #[test]
+    fn a_full_mesh_rejects_an_incoming_peer_with_a_different_protocol_version() {
+        // 主催者の視点。繋いできた相手の版が違えば、メッシュを揃える前に失敗する。
+        let my_listener = loopback_listener();
+        let my_addr = my_listener.local_addr().unwrap();
+        let guest_listener = loopback_listener();
+        let members = vec![
+            RoomMember {
+                name: "host".to_string(),
+                mesh_addr: Some(my_addr),
+            },
+            RoomMember {
+                name: "guest".to_string(),
+                mesh_addr: Some(guest_listener.local_addr().unwrap()),
+            },
+        ];
+        let guest = spawn_mismatched_mesh_client(my_addr, "guest".to_string());
+
+        let err = establish_full_mesh(&members, 0, "host", &my_listener).unwrap_err();
+        guest.join().unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_full_mesh_rejects_a_dialed_peer_with_a_different_protocol_version() {
+        // 参加者の視点。自分から繋いだ相手の版が違う場合も同じく失敗する。
+        let my_listener = loopback_listener();
+        let host_listener = loopback_listener();
+        let host_addr = host_listener.local_addr().unwrap();
+        let members = vec![
+            RoomMember {
+                name: "host".to_string(),
+                mesh_addr: Some(host_addr),
+            },
+            RoomMember {
+                name: "me".to_string(),
+                mesh_addr: Some(my_listener.local_addr().unwrap()),
+            },
+        ];
+        let host = spawn_mismatched_mesh_server(host_listener, "host".to_string());
+
+        let err = establish_full_mesh(&members, 1, "me", &my_listener).unwrap_err();
+        host.join().unwrap();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
