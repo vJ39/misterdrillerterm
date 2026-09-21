@@ -73,11 +73,13 @@ pub enum GameMessage {
     },
     /// 生存確認のみ(spec.md 12.4)。一定時間これも`Input`も届かなければ切断とみなす。
     Heartbeat,
-    /// 妨害岩(#247/#297)。自分が消したブロック数を、そのまま相手へ送る。受け取った側は
-    /// 自分がまだPlayingのときだけ適用する(spec.md 12.8)。
+    /// 妨害(#247/#297/#304)。自分が消したブロック数を、岩ぶん・ボムぶんへ振り分けた形で
+    /// 相手へ送る。受け取った側は自分がまだPlayingのときだけ適用する(spec.md 12.8)。
+    /// 種類ごとに別勘定で相殺するため2つの量を持つが、メッセージは1通にまとめる。
     Attack {
-        amount: u32,
-        /// `Input`と同じ意味。`Some`はホストがAI(#300)の妨害岩を代理送信する場合のみ。
+        rock_amount: u32,
+        bomb_amount: u32,
+        /// `Input`と同じ意味。`Some`はホストがAI(#300)の妨害を代理送信する場合のみ。
         proxy_for: Option<usize>,
     },
     Result {
@@ -167,6 +169,9 @@ pub struct BattleConfig {
     pub bomb_fuse_ms: u32,
     pub attack_blocks_per_rock: u32,
     pub attack_rocks_per_wave_max: u32,
+    pub attack_blocks_per_bomb: u32,
+    pub attack_bombs_per_wave_max: u32,
+    pub attack_bomb_ratio_percent: u32,
     pub block_fall_tick_ms: u64,
     pub player_fall_tick_ms: u64,
     pub shake_duration_ms: u64,
@@ -196,6 +201,9 @@ impl BattleConfig {
             bomb_fuse_ms: settings.bomb_fuse_ms,
             attack_blocks_per_rock: settings.attack_blocks_per_rock,
             attack_rocks_per_wave_max: settings.attack_rocks_per_wave_max,
+            attack_blocks_per_bomb: settings.attack_blocks_per_bomb,
+            attack_bombs_per_wave_max: settings.attack_bombs_per_wave_max,
+            attack_bomb_ratio_percent: settings.attack_bomb_ratio_percent,
             block_fall_tick_ms: settings.block_fall_tick_ms,
             player_fall_tick_ms: settings.player_fall_tick_ms,
             shake_duration_ms: settings.shake_duration_ms,
@@ -579,6 +587,9 @@ mod tests {
             bomb_fuse_ms: 2500,
             attack_blocks_per_rock: 6,
             attack_rocks_per_wave_max: 2,
+            attack_blocks_per_bomb: 18,
+            attack_bombs_per_wave_max: 3,
+            attack_bomb_ratio_percent: 25,
             block_fall_tick_ms: 200,
             player_fall_tick_ms: 100,
             shake_duration_ms: 300,
@@ -639,7 +650,8 @@ mod tests {
         });
         assert_round_trips(&GameMessage::Heartbeat);
         assert_round_trips(&GameMessage::Attack {
-            amount: 3,
+            rock_amount: 3,
+            bomb_amount: 1,
             proxy_for: None,
         });
         assert_round_trips(&GameMessage::Result {
@@ -653,7 +665,8 @@ mod tests {
             proxy_for: Some(3),
         });
         assert_round_trips(&GameMessage::Attack {
-            amount: 5,
+            rock_amount: 5,
+            bomb_amount: 0,
             proxy_for: Some(2),
         });
         assert_round_trips(&GameMessage::Result {
@@ -890,6 +903,9 @@ mod tests {
             bomb_fuse_ms: 2500,
             attack_blocks_per_rock: 6,
             attack_rocks_per_wave_max: 2,
+            attack_blocks_per_bomb: 18,
+            attack_bombs_per_wave_max: 3,
+            attack_bomb_ratio_percent: 25,
             block_fall_tick_ms: 200,
             player_fall_tick_ms: 100,
             shake_duration_ms: 300,
@@ -919,6 +935,9 @@ mod tests {
                 bomb_fuse_ms: 2500,
                 attack_blocks_per_rock: 6,
                 attack_rocks_per_wave_max: 2,
+                attack_blocks_per_bomb: 18,
+                attack_bombs_per_wave_max: 3,
+                attack_bomb_ratio_percent: 25,
                 block_fall_tick_ms: 200,
                 player_fall_tick_ms: 100,
                 shake_duration_ms: 300,

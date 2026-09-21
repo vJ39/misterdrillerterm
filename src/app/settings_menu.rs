@@ -4,7 +4,10 @@
 //! ここに共通化してまとめる。盤面への反映・`Settings::save`は呼び出し側の責務。
 
 use crate::constants::{
+    ATTACK_BLOCKS_PER_BOMB_MAX, ATTACK_BLOCKS_PER_BOMB_MIN, ATTACK_BLOCKS_PER_BOMB_STEP,
     ATTACK_BLOCKS_PER_ROCK_MAX, ATTACK_BLOCKS_PER_ROCK_MIN, ATTACK_BLOCKS_PER_ROCK_STEP,
+    ATTACK_BOMB_RATIO_PERCENT_MAX, ATTACK_BOMB_RATIO_PERCENT_MIN, ATTACK_BOMB_RATIO_PERCENT_STEP,
+    ATTACK_BOMBS_PER_WAVE_MAX_MAX, ATTACK_BOMBS_PER_WAVE_MAX_MIN, ATTACK_BOMBS_PER_WAVE_MAX_STEP,
     ATTACK_ROCKS_PER_WAVE_MAX_MAX, ATTACK_ROCKS_PER_WAVE_MAX_MIN, ATTACK_ROCKS_PER_WAVE_MAX_STEP,
     BOMB_FUSE_MS_MAX, BOMB_FUSE_MS_MIN, BOMB_FUSE_MS_STEP, BOMB_SPAWN_RATE_PERCENT_MAX,
     BOMB_SPAWN_RATE_PERCENT_MIN, BOMB_SPAWN_RATE_PERCENT_STEP, CHAIN_VANISH_INTERVAL_MS_MAX,
@@ -181,6 +184,53 @@ pub fn adjust_attack_rocks_per_wave_max(current: u32, increase: bool) -> u32 {
         current
             .saturating_sub(ATTACK_ROCKS_PER_WAVE_MAX_STEP)
             .max(ATTACK_ROCKS_PER_WAVE_MAX_MIN)
+    }
+}
+
+/// ボム1個に必要な攻撃力(#304)を1ステップぶん増減する。
+/// `ATTACK_BLOCKS_PER_BOMB_MIN`〜`MAX`の範囲、`ATTACK_BLOCKS_PER_BOMB_STEP`刻みで調整する。
+pub fn adjust_attack_blocks_per_bomb(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(ATTACK_BLOCKS_PER_BOMB_STEP)
+            .min(ATTACK_BLOCKS_PER_BOMB_MAX)
+    } else {
+        current
+            .saturating_sub(ATTACK_BLOCKS_PER_BOMB_STEP)
+            .max(ATTACK_BLOCKS_PER_BOMB_MIN)
+    }
+}
+
+/// 1ウェーブで降るボムの個数上限(#304)を1ステップぶん増減する。
+/// `ATTACK_BOMBS_PER_WAVE_MAX_MIN`〜`MAX`の範囲、`ATTACK_BOMBS_PER_WAVE_MAX_STEP`刻み。
+pub fn adjust_attack_bombs_per_wave_max(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(ATTACK_BOMBS_PER_WAVE_MAX_STEP)
+            .min(ATTACK_BOMBS_PER_WAVE_MAX_MAX)
+    } else {
+        current
+            .saturating_sub(ATTACK_BOMBS_PER_WAVE_MAX_STEP)
+            .max(ATTACK_BOMBS_PER_WAVE_MAX_MIN)
+    }
+}
+
+/// 攻撃力のボム化比率(%、#304)を1ステップぶん増減する。
+/// `ATTACK_BOMB_RATIO_PERCENT_MIN`(0=岩だけ)〜`MAX`(100=ボムだけ)の範囲、
+/// `ATTACK_BOMB_RATIO_PERCENT_STEP`刻みで調整する。
+pub fn adjust_attack_bomb_ratio_percent(current: u32, increase: bool) -> u32 {
+    if increase {
+        current
+            .saturating_add(ATTACK_BOMB_RATIO_PERCENT_STEP)
+            .min(ATTACK_BOMB_RATIO_PERCENT_MAX)
+    } else {
+        // 現在ATTACK_BOMB_RATIO_PERCENT_MIN=0のためu32のsaturating_sub結果への
+        // .max()は無意味と判定されるが(clippy::unnecessary_min_or_max)、下限を
+        // 明示するための記述として意図的に残す(将来0以外に変える場合の安全策)。
+        #[allow(clippy::unnecessary_min_or_max)]
+        current
+            .saturating_sub(ATTACK_BOMB_RATIO_PERCENT_STEP)
+            .max(ATTACK_BOMB_RATIO_PERCENT_MIN)
     }
 }
 
@@ -401,6 +451,79 @@ mod tests {
         assert_eq!(
             adjust_attack_rocks_per_wave_max(up, false),
             ATTACK_ROCKS_PER_WAVE_MAX_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_blocks_per_bomb_saturates_at_both_ends_when_current_is_corrupted() {
+        // #304。岩と同じく、破損した値でも範囲内へ収める。
+        assert_eq!(
+            adjust_attack_blocks_per_bomb(u32::MAX, true),
+            ATTACK_BLOCKS_PER_BOMB_MAX
+        );
+        assert_eq!(
+            adjust_attack_blocks_per_bomb(0, false),
+            ATTACK_BLOCKS_PER_BOMB_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_blocks_per_bomb_moves_by_one_step_inside_the_range() {
+        let up = adjust_attack_blocks_per_bomb(ATTACK_BLOCKS_PER_BOMB_MIN, true);
+        assert_eq!(up, ATTACK_BLOCKS_PER_BOMB_MIN + ATTACK_BLOCKS_PER_BOMB_STEP);
+        assert_eq!(
+            adjust_attack_blocks_per_bomb(up, false),
+            ATTACK_BLOCKS_PER_BOMB_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_bombs_per_wave_max_saturates_at_both_ends_when_current_is_corrupted() {
+        assert_eq!(
+            adjust_attack_bombs_per_wave_max(u32::MAX, true),
+            ATTACK_BOMBS_PER_WAVE_MAX_MAX
+        );
+        assert_eq!(
+            adjust_attack_bombs_per_wave_max(0, false),
+            ATTACK_BOMBS_PER_WAVE_MAX_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_bombs_per_wave_max_moves_by_one_step_inside_the_range() {
+        let up = adjust_attack_bombs_per_wave_max(ATTACK_BOMBS_PER_WAVE_MAX_MIN, true);
+        assert_eq!(
+            up,
+            ATTACK_BOMBS_PER_WAVE_MAX_MIN + ATTACK_BOMBS_PER_WAVE_MAX_STEP
+        );
+        assert_eq!(
+            adjust_attack_bombs_per_wave_max(up, false),
+            ATTACK_BOMBS_PER_WAVE_MAX_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_bomb_ratio_percent_saturates_at_both_ends_when_current_is_corrupted() {
+        assert_eq!(
+            adjust_attack_bomb_ratio_percent(u32::MAX, true),
+            ATTACK_BOMB_RATIO_PERCENT_MAX
+        );
+        assert_eq!(
+            adjust_attack_bomb_ratio_percent(0, false),
+            ATTACK_BOMB_RATIO_PERCENT_MIN
+        );
+    }
+
+    #[test]
+    fn adjust_attack_bomb_ratio_percent_moves_by_one_step_inside_the_range() {
+        let up = adjust_attack_bomb_ratio_percent(ATTACK_BOMB_RATIO_PERCENT_MIN, true);
+        assert_eq!(
+            up,
+            ATTACK_BOMB_RATIO_PERCENT_MIN + ATTACK_BOMB_RATIO_PERCENT_STEP
+        );
+        assert_eq!(
+            adjust_attack_bomb_ratio_percent(up, false),
+            ATTACK_BOMB_RATIO_PERCENT_MIN
         );
     }
 

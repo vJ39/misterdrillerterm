@@ -507,8 +507,9 @@ impl BattleState {
         }
     }
 
-    /// 妨害岩(#247/#297。spec.md 12.8)を交換する。各自が消したブロック数を、割らずに
-    /// 他の参加者へそのまま届ける(N人時の配分ルールはユーザー確認済み)。
+    /// 妨害(#247/#297/#304。spec.md 12.8)を交換する。各自が消したブロック数を、割らずに
+    /// 他の参加者へそのまま届ける(N人時の配分ルールはユーザー確認済み)。取り出すときに
+    /// 岩ぶん・ボムぶんへ振り分け、両方を1通の`Attack`で運ぶ。
     ///
     /// 通信ありの場合は自分が消したぶんを`Attack`で全peerへ送る。受け取った側が自分の
     /// 状態を見て適用するため、送る側は相手の状態を気にしない。自分が持っている他の
@@ -519,42 +520,47 @@ impl BattleState {
     /// ルール(0より大きいときだけ)で代理送信する。
     fn exchange_attack_power(&mut self) {
         if self.peers.is_some() {
-            let amount = self.games[0].take_pending_attack_power();
-            let mut proxy_attacks: Vec<(usize, u32)> = Vec::new();
+            let (rock_amount, bomb_amount) = self.games[0].take_pending_attack_power_split();
+            let mut proxy_attacks: Vec<(usize, u32, u32)> = Vec::new();
             for i in 1..self.games.len() {
-                let pending = self.games[i].take_pending_attack_power();
+                let (rock, bomb) = self.games[i].take_pending_attack_power_split();
                 let is_my_ai = self.ai_pilots.get(i - 1).is_some_and(Option::is_some);
-                if is_my_ai && pending > 0 {
-                    proxy_attacks.push((i, pending));
+                if is_my_ai && rock + bomb > 0 {
+                    proxy_attacks.push((i, rock, bomb));
                 }
             }
-            if amount > 0 {
+            if rock_amount + bomb_amount > 0 {
                 self.broadcast(&GameMessage::Attack {
-                    amount,
+                    rock_amount,
+                    bomb_amount,
                     proxy_for: None,
                 });
             }
-            for (games_index, amount) in proxy_attacks {
+            for (games_index, rock_amount, bomb_amount) in proxy_attacks {
                 let proxy_for = Some(self.room_index_for_games_index(games_index));
-                self.broadcast(&GameMessage::Attack { amount, proxy_for });
+                self.broadcast(&GameMessage::Attack {
+                    rock_amount,
+                    bomb_amount,
+                    proxy_for,
+                });
             }
             return;
         }
 
         // ローカル専用(#252/#273のテスト・#296のAI対戦)。相手の状態を直接見られるため、
         // 送信側で生存中(Playing)の参加者だけに渡す。
-        let pending: Vec<u32> = self
+        let pending: Vec<(u32, u32)> = self
             .games
             .iter_mut()
-            .map(Game::take_pending_attack_power)
+            .map(Game::take_pending_attack_power_split)
             .collect();
-        for (i, &power) in pending.iter().enumerate() {
-            if power == 0 {
+        for (i, &(rock, bomb)) in pending.iter().enumerate() {
+            if rock + bomb == 0 {
                 continue;
             }
             for (j, game) in self.games.iter_mut().enumerate() {
                 if i != j && game.status == GameStatus::Playing {
-                    game.receive_incoming_attack(power);
+                    game.receive_incoming_attack(rock, bomb);
                 }
             }
         }
@@ -645,8 +651,10 @@ impl BattleState {
         // (送信元peerのgames上のindex, 代理対象のroom内インデックス, 適用する操作)。
         // 届いた順に並ぶ。`games`上のindexへの変換は`peers`の借用を解いた後に行う(#300)。
         let mut remote_inputs: Vec<(usize, Option<usize>, InputAction)> = Vec::new();
-        // 全peerから届いた妨害岩の合計(#247/#297)。誰から来たかは区別しない。
-        let mut incoming_attack: u32 = 0;
+        // 全peerから届いた妨害の合計(#247/#297)。誰から来たかは区別しない。岩とボムは
+        // 別勘定で相殺するため、合計も種類ごとに分けて持つ(#304)。
+        let mut incoming_rock_attack: u32 = 0;
+        let mut incoming_bomb_attack: u32 = 0;
         // (送信元peerのgames上のindex, 代理対象のroom内インデックス, ゴール到達したか)。
         let mut remote_results: Vec<(usize, Option<usize>, bool)> = Vec::new();
 
@@ -668,11 +676,16 @@ impl BattleState {
                     NetworkEvent::Message(GameMessage::Heartbeat) => {
                         peer.last_remote_activity = Instant::now();
                     }
-                    // 妨害岩は受け取った側が自分の盤面へ積むため、誰の代理送信
+                    // 妨害は受け取った側が自分の盤面へ積むため、誰の代理送信
                     // (`proxy_for`)かで適用先は変わらない(#300)。
-                    NetworkEvent::Message(GameMessage::Attack { amount, .. }) => {
+                    NetworkEvent::Message(GameMessage::Attack {
+                        rock_amount,
+                        bomb_amount,
+                        ..
+                    }) => {
                         peer.last_remote_activity = Instant::now();
-                        incoming_attack = incoming_attack.saturating_add(amount);
+                        incoming_rock_attack = incoming_rock_attack.saturating_add(rock_amount);
+                        incoming_bomb_attack = incoming_bomb_attack.saturating_add(bomb_amount);
                     }
                     NetworkEvent::Message(GameMessage::Result {
                         reached_goal,
@@ -703,10 +716,12 @@ impl BattleState {
             self.games[index].apply_input(action);
         }
 
-        // 妨害岩は、送った側ではなく受け取った側が自分の状態を見て適用する(spec.md 12.8)。
+        // 妨害は、送った側ではなく受け取った側が自分の状態を見て適用する(spec.md 12.8)。
         // 既にゴール・ゲームオーバーしている自分には積まない。
-        if incoming_attack > 0 && self.games[0].status == GameStatus::Playing {
-            self.games[0].receive_incoming_attack(incoming_attack);
+        if incoming_rock_attack + incoming_bomb_attack > 0
+            && self.games[0].status == GameStatus::Playing
+        {
+            self.games[0].receive_incoming_attack(incoming_rock_attack, incoming_bomb_attack);
         }
 
         // 相手が自己申告した結果は、自分が持つその参加者のコピーより優先する(12.4)。
@@ -847,6 +862,9 @@ pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
     game.set_chain_vanish_interval_ms(config.chain_vanish_interval_ms);
     game.set_attack_blocks_per_rock(config.attack_blocks_per_rock);
     game.set_attack_rocks_per_wave_max(config.attack_rocks_per_wave_max);
+    game.set_attack_blocks_per_bomb(config.attack_blocks_per_bomb);
+    game.set_attack_bombs_per_wave_max(config.attack_bombs_per_wave_max);
+    game.set_attack_bomb_ratio_percent(config.attack_bomb_ratio_percent);
     // 妨害岩(#247)は対戦専用のルールで、通常プレイでは常に無効(#297で対戦へ接続)。
     game.set_attack_rules_enabled(true);
     // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
@@ -934,9 +952,12 @@ mod tests {
     }
 
     /// 相手から受け取った妨害が盤面に届いているか。岩として予告キューへ積まれた場合と、
-    /// 岩1個ぶんに足りず攻撃力のまま控えられた場合の両方を拾う。
+    /// 岩1個ぶんに足りず攻撃力のまま控えられた場合の両方を拾う。ボムぶん(#304)は自然発生
+    /// ボムと区別が付かないため、盤面のボムではなく受信待ちプールだけを見る。
     fn has_incoming_attack(game: &Game) -> bool {
-        !game.incoming_rocks().is_empty() || game.incoming_attack_power() > 0
+        !game.incoming_rocks().is_empty()
+            || game.incoming_attack_power() > 0
+            || game.incoming_bomb_power() > 0
     }
 
     /// `predicate`が満たされるまで(または上限`max_frames`まで)1フレームずつ進める。#289で
@@ -1653,7 +1674,8 @@ mod tests {
             net::write_message(
                 &mut peer,
                 &GameMessage::Attack {
-                    amount: 8,
+                    rock_amount: 8,
+                    bomb_amount: 0,
                     proxy_for: None,
                 },
             )
@@ -1982,6 +2004,8 @@ mod tests {
             peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         }
         arm_rock_below(&mut host.games[0]);
+        // 振り分け(#304)は乱数で決まるため、ここでは岩だけに固定して送信量そのものを見る。
+        host.games[0].set_attack_bomb_ratio_percent(0);
 
         host.advance(Duration::ZERO, Some(InputAction::FaceDown));
         host.advance(Duration::ZERO, Some(InputAction::Drill));
@@ -1993,7 +2017,8 @@ mod tests {
                     GameMessage::Attack { .. }
                 )),
                 GameMessage::Attack {
-                    amount: 1,
+                    rock_amount: 1,
+                    bomb_amount: 0,
                     proxy_for: None,
                 },
                 "peer{index}: 壊した1ブロックぶんがそのまま届くはず"
@@ -2598,9 +2623,10 @@ mod tests {
 
     #[test]
     fn a_proxied_attack_is_piled_on_my_own_board_like_any_other_attack() {
-        // #300: 妨害岩は「受け取った側が自分の盤面へ積む」ルール(spec.md 12.8)なので、
+        // #300: 妨害は「受け取った側が自分の盤面へ積む」ルール(spec.md 12.8)なので、
         // 誰の代理送信かで積む先は変わらない。`proxy_for`が付いていても、自分が
-        // プレイ中なら自分の盤面へ届く。
+        // プレイ中なら自分の盤面へ届く。ここではボムぶん(#304)が通信を越えて届くことも
+        // あわせて見る。
         const HUMANS: usize = 2;
         const AIS: usize = 1;
         let (mut guest, mut peers) = battle_with_ai_slots(HUMANS, AIS, 1, 30004);
@@ -2612,7 +2638,8 @@ mod tests {
         net::write_message(
             &mut peers[0],
             &GameMessage::Attack {
-                amount: 8,
+                rock_amount: 0,
+                bomb_amount: 8,
                 proxy_for: Some(HUMANS),
             },
         )
@@ -2628,7 +2655,7 @@ mod tests {
 
         assert!(
             has_incoming_attack(&guest.games[0]),
-            "AIが出した妨害岩も自分の盤面へ積まれるはず"
+            "AIが出した妨害も自分の盤面へ積まれるはず"
         );
     }
 

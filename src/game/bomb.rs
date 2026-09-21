@@ -363,7 +363,8 @@ impl Game {
     /// 候補から除外する(ボム同士を重ねないため)。プレイヤーが現在いるマスも候補から
     /// 除外する(#241。含めてしまうとEntering/Rollingの再検証で毎回上へ逃げる不自然な
     /// 演出になるため、そもそも狙わせない)。
-    fn spawn_bomb_at_random_empty_cell(&mut self) {
+    /// 妨害ボム(#304)の投下も同じ経路を使うため`pub(super)`にする。
+    pub(super) fn spawn_bomb_at_random_empty_cell(&mut self) {
         let start_row = self.player.row.saturating_sub(STAR_VISIBLE_RANGE_ROWS);
         let end_row = (self.player.row + STAR_VISIBLE_RANGE_ROWS)
             .min(self.board.depth_rows().saturating_sub(1));

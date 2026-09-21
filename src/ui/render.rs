@@ -48,11 +48,17 @@ const MIN_TERMINAL_H: u16 = 16;
 /// 可視論理行数の基本値(9.2)。
 const FIELD_VISIBLE_ROWS: usize = 14;
 
-/// 設定画面・ヘルプ画面のオーバーレイ枠の高さ(`centered_rect`のパーセント指定)。
+/// ヘルプ画面のオーバーレイ枠の高さ(`centered_rect`のパーセント指定)。
 /// 内容行数が増えて枠に収まらなくなったら上げる(収まっているかは
-/// `settings_screen_box_is_tall_enough_...` / `help_screen_box_is_tall_enough_...`で確認する)。
-const SETTINGS_OVERLAY_PERCENT_Y: u16 = 97;
+/// `help_screen_box_is_tall_enough_...`で確認する)。
 const HELP_OVERLAY_PERCENT_Y: u16 = 95;
+
+/// 設定画面のオーバーレイ枠の大きさ。横幅はゲームフレームに対する割合、高さは行数で指定する。
+/// #304で項目が29個になり、フレーム(32行)に対する割合では内容が収まらなくなったため、
+/// 高さだけは端末の高さを使う固定行数に切り替えた(収まっているかは
+/// `settings_screen_box_is_tall_enough_...`で確認する)。
+const SETTINGS_BOX_PERCENT_X: u16 = 60;
+const SETTINGS_BOX_H: u16 = 34;
 
 /// 対戦ロビー画面(#256)の枠の高さ(`centered_rect`のパーセント指定)。候補リストが
 /// 伸びても収まるよう、ヘルプ画面と同程度に取る。
@@ -217,6 +223,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+/// 設定画面の枠(9.10)。横幅は他のオーバーレイと揃えてゲームフレームの割合で取り、
+/// 高さは項目数ぶんの固定行数を端末の高さまで使って確保する(#304)。
+fn settings_box_rect(area: Rect, frame_rect: Rect) -> Rect {
+    let height = SETTINGS_BOX_H.min(area.height);
+    Rect {
+        y: area.y + (area.height - height) / 2,
+        height,
+        ..centered_rect(SETTINGS_BOX_PERCENT_X, 100, frame_rect)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -874,7 +891,7 @@ pub fn draw_help(frame: &mut Frame, jukebox: Option<&HelpJukeboxState>, standalo
         line("R: 自分より上のブロックを全削除   K: 画面内のX/ダイヤを全てスターに"),
         line("B: ボムを画面内のランダムな位置に設置"),
         line(&format!(
-            "O: 相手から攻撃力{DEBUG_INCOMING_ATTACK_POWER}を受け取る(自分の溜め分と相殺し、残りが岩として降る)"
+            "O: 相手から攻撃力{DEBUG_INCOMING_ATTACK_POWER}を受け取る(自分の溜め分と相殺し、残りが降る)"
         )),
         line("T: オートプレイ ON/OFF   G: 無敵(ミス無効) ON/OFF(Tとは独立)"),
         line("[ / ]: ブロック落下速度 遅く/速く"),
@@ -1070,6 +1087,12 @@ pub enum SettingsChoice {
     AttackBlocksPerRock,
     /// 対戦の妨害ルール(#247)で、1回に降らせる岩の個数上限。
     AttackRocksPerWaveMax,
+    /// 対戦の妨害ルール(#304)で、ボム1個を降らせるのに必要な攻撃力。
+    AttackBlocksPerBomb,
+    /// 対戦の妨害ルール(#304)で、1回に降らせるボムの個数上限。
+    AttackBombsPerWaveMax,
+    /// 対戦の妨害ルール(#304)で、攻撃力のうちボムとして送る割合(%、0=岩のみ)。
+    AttackBombRatioPercent,
     /// 調査用のブロック状態遷移ログ(SQLite)を記録するかどうか。
     DebugLogEnabled,
     /// 4連結以上の自動消滅が連鎖するときのインターバル(ms、0=即座に連鎖)。
@@ -1104,7 +1127,10 @@ impl SettingsChoice {
             SettingsChoice::BombRate => SettingsChoice::BombFuse,
             SettingsChoice::BombFuse => SettingsChoice::AttackBlocksPerRock,
             SettingsChoice::AttackBlocksPerRock => SettingsChoice::AttackRocksPerWaveMax,
-            SettingsChoice::AttackRocksPerWaveMax => SettingsChoice::DebugLogEnabled,
+            SettingsChoice::AttackRocksPerWaveMax => SettingsChoice::AttackBlocksPerBomb,
+            SettingsChoice::AttackBlocksPerBomb => SettingsChoice::AttackBombsPerWaveMax,
+            SettingsChoice::AttackBombsPerWaveMax => SettingsChoice::AttackBombRatioPercent,
+            SettingsChoice::AttackBombRatioPercent => SettingsChoice::DebugLogEnabled,
             SettingsChoice::DebugLogEnabled => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::RewindStockMax,
             SettingsChoice::RewindStockMax => SettingsChoice::Music,
@@ -1117,7 +1143,10 @@ impl SettingsChoice {
             SettingsChoice::Music => SettingsChoice::RewindStockMax,
             SettingsChoice::RewindStockMax => SettingsChoice::ChainVanishInterval,
             SettingsChoice::ChainVanishInterval => SettingsChoice::DebugLogEnabled,
-            SettingsChoice::DebugLogEnabled => SettingsChoice::AttackRocksPerWaveMax,
+            SettingsChoice::DebugLogEnabled => SettingsChoice::AttackBombRatioPercent,
+            SettingsChoice::AttackBombRatioPercent => SettingsChoice::AttackBombsPerWaveMax,
+            SettingsChoice::AttackBombsPerWaveMax => SettingsChoice::AttackBlocksPerBomb,
+            SettingsChoice::AttackBlocksPerBomb => SettingsChoice::AttackRocksPerWaveMax,
             SettingsChoice::AttackRocksPerWaveMax => SettingsChoice::AttackBlocksPerRock,
             SettingsChoice::AttackBlocksPerRock => SettingsChoice::BombFuse,
             SettingsChoice::BombFuse => SettingsChoice::BombRate,
@@ -1174,6 +1203,9 @@ pub fn draw_settings(
     bomb_fuse_ms: u32,
     attack_blocks_per_rock: u32,
     attack_rocks_per_wave_max: u32,
+    attack_blocks_per_bomb: u32,
+    attack_bombs_per_wave_max: u32,
+    attack_bomb_ratio_percent: u32,
     debug_log_enabled: bool,
     chain_vanish_interval_ms: u64,
     rewind_stock_max: u8,
@@ -1195,7 +1227,9 @@ pub fn draw_settings(
     // #246で項目が23個になりさらに1行増えたため97%(31行)へ広げた。
     // #247で対戦の2項目が加わって26個になったが、97%より高くはできないため、
     // 見出しの下と案内の上にあった空行2行を削って収めている。
-    let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
+    // #304で対戦のボム3項目が加わって29個になり、フレーム基準の割合では足りないため、
+    // 端末の高さを使う固定行数(`SETTINGS_BOX_H`)へ切り替えた。
+    let settings_area = settings_box_rect(area, frame_rect);
     frame.render_widget(Clear, settings_area);
 
     let text_style = Style::default()
@@ -1370,6 +1404,21 @@ pub fn draw_settings(
             "対戦: 一度に降る岩の上限",
             attack_rocks_per_wave_max,
             selection == SettingsChoice::AttackRocksPerWaveMax,
+        ),
+        count_line(
+            "対戦: ボム1個に必要な攻撃力",
+            attack_blocks_per_bomb,
+            selection == SettingsChoice::AttackBlocksPerBomb,
+        ),
+        count_line(
+            "対戦: 一度に降るボムの上限",
+            attack_bombs_per_wave_max,
+            selection == SettingsChoice::AttackBombsPerWaveMax,
+        ),
+        rate_line(
+            "対戦: 攻撃力のボム化比率",
+            attack_bomb_ratio_percent,
+            selection == SettingsChoice::AttackBombRatioPercent,
         ),
         toggle_line(
             "DEBUG LOG",
@@ -3767,6 +3816,9 @@ mod tests {
             SettingsChoice::BombFuse,
             SettingsChoice::AttackBlocksPerRock,
             SettingsChoice::AttackRocksPerWaveMax,
+            SettingsChoice::AttackBlocksPerBomb,
+            SettingsChoice::AttackBombsPerWaveMax,
+            SettingsChoice::AttackBombRatioPercent,
             SettingsChoice::DebugLogEnabled,
             SettingsChoice::ChainVanishInterval,
             SettingsChoice::RewindStockMax,
@@ -3806,6 +3858,18 @@ mod tests {
         assert!(
             seen.contains(&SettingsChoice::AttackRocksPerWaveMax),
             "#247で追加した「一度に降る岩の上限」へカーソルが到達できない"
+        );
+        assert!(
+            seen.contains(&SettingsChoice::AttackBlocksPerBomb),
+            "#304で追加した「ボム1個に必要な攻撃力」へカーソルが到達できない"
+        );
+        assert!(
+            seen.contains(&SettingsChoice::AttackBombsPerWaveMax),
+            "#304で追加した「一度に降るボムの上限」へカーソルが到達できない"
+        );
+        assert!(
+            seen.contains(&SettingsChoice::AttackBombRatioPercent),
+            "#304で追加した「攻撃力のボム化比率」へカーソルが到達できない"
         );
     }
 
@@ -3982,15 +4046,15 @@ mod tests {
     #[test]
     fn settings_screen_box_is_tall_enough_for_all_content_lines() {
         // 枠の高さが実際の内容行数を収められているか回帰確認する(足りないと下部の行が
-        // クリップして見えなくなる)。見出し1+設定項目26(#224でMUSIC音量・SE音量の2項目、
+        // クリップして見えなくなる)。見出し1+設定項目29(#224でMUSIC音量・SE音量の2項目、
         // #233で巻き戻しストック上限、#243で揺れ時間(落下待ち)、#246でボム爆発までの
-        // 時間、#247で対戦の2項目を追加)+案内2行=29行、枠(上下)2行込みで31行必要。
-        // 設定を追加したらこの定数も増やすこと(#247で項目を2つ増やした際、これ以上は
-        // 枠を高くできないため見出し前後の空行2行を削って収めている)。
-        const REQUIRED_CONTENT_LINES: u16 = 29;
+        // 時間、#247で対戦の2項目、#304で対戦のボム3項目を追加)+案内2行=32行、
+        // 枠(上下)2行込みで34行必要。設定を追加したらこの定数も増やすこと(#247で項目を
+        // 2つ増やした際、見出し前後の空行2行を削って収めている)。
+        const REQUIRED_CONTENT_LINES: u16 = 32;
         let area = Rect::new(0, 0, 200, 60);
         let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
-        let settings_area = centered_rect(60, SETTINGS_OVERLAY_PERCENT_Y, frame_rect);
+        let settings_area = settings_box_rect(area, frame_rect);
         assert!(
             settings_area.height >= REQUIRED_CONTENT_LINES + 2,
             "設定画面の枠が{}行分の内容を収めるには狭すぎる(高さ={})",
@@ -4055,6 +4119,9 @@ mod tests {
                 5000,
                 10,
                 4,
+                20,
+                2,
+                20,
                 true,
                 0,
                 3,
@@ -4079,6 +4146,25 @@ mod tests {
         assert!(
             screen_shows(&text, "> 対戦: 岩1個に必要な攻撃力"),
             "選択中の項目にカーソル(>)が付いていない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn settings_screen_actually_shows_the_bomb_attack_rule_rows() {
+        // #304で追加した3項目が、値つきで画面に出ている(枠からクリップされていない)ことを
+        // 実描画で確認する。末尾に近い項目のため、枠の高さ不足はここで表に出る。
+        let text = render_settings_screen(SettingsChoice::AttackBombRatioPercent);
+        assert!(
+            screen_shows(&text, "対戦: ボム1個に必要な攻撃力: 20"),
+            "「ボム1個に必要な攻撃力」の行が画面に出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "対戦: 一度に降るボムの上限: 2"),
+            "「一度に降るボムの上限」の行が画面に出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "> 対戦: 攻撃力のボム化比率: 20%"),
+            "選択中の「攻撃力のボム化比率」の行が画面に出ていない:\n{text}"
         );
     }
 
@@ -4742,6 +4828,7 @@ mod tests {
     fn settings_screen_still_shows_its_last_line_after_the_attack_rows_were_added() {
         // #247で項目を2つ増やした結果、枠の高さに対して内容行がぴったりになった。
         // 最下段(操作案内の2行目)が切れていないことを実描画で確認する。
+        // #304でさらに3項目増え、枠の高さは`SETTINGS_BOX_H`の固定行数指定へ移した。
         let text = render_settings_screen(SettingsChoice::Music);
         assert!(
             screen_shows(&text, "Escで閉じる"),

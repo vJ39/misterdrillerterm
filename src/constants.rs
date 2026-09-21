@@ -309,8 +309,9 @@ pub const BOMB_SETTLE_MS: u32 = 600;
 pub const BOMB_SETTLE_TICK_MS: u32 = 80;
 
 // ---------------------------------------------------------------------------
-// 対戦の妨害ルール(攻撃力→岩投下。#247。spec.md 12.8)。自分が消したブロック数を
-// 攻撃力として数え、相殺を経た残りを相手の盤面へ岩(Xブロック)として降らせる。
+// 対戦の妨害ルール(攻撃力→岩・ボム投下。#247/#304。spec.md 12.8)。自分が消したブロック数を
+// 攻撃力として数え、相殺を経た残りを相手の盤面へ岩(Xブロック)とボムとして降らせる。
+// 岩とボムは別勘定で、振り分け比率・変換レート・1ウェーブの上限をそれぞれ設定で持つ。
 // 通信層(#10本体)はまだ無いため、現状はデバッグショートカット(O)からのみ発火する。
 // ---------------------------------------------------------------------------
 
@@ -332,6 +333,34 @@ pub const ATTACK_ROCKS_PER_WAVE_MAX_MIN: u32 = 1;
 pub const ATTACK_ROCKS_PER_WAVE_MAX_MAX: u32 = FIELD_WIDTH_MAX as u32;
 /// 同設定の調整刻み幅。
 pub const ATTACK_ROCKS_PER_WAVE_MAX_STEP: u32 = 1;
+
+/// ボム1個を降らせるのに必要な攻撃力の既定値(#304)。岩より重い妨害として岩の2倍にする。
+pub const ATTACK_BLOCKS_PER_BOMB_DEFAULT: u32 = 20;
+/// 同設定の下限。
+pub const ATTACK_BLOCKS_PER_BOMB_MIN: u32 = 1;
+/// 同設定の上限。
+pub const ATTACK_BLOCKS_PER_BOMB_MAX: u32 = 30;
+/// 同設定の調整刻み幅。
+pub const ATTACK_BLOCKS_PER_BOMB_STEP: u32 = 1;
+
+/// 1回(1ウェーブ)で降らせるボムの個数上限の既定値(#304)。
+pub const ATTACK_BOMBS_PER_WAVE_MAX_DEFAULT: u32 = 2;
+/// 同設定の下限。
+pub const ATTACK_BOMBS_PER_WAVE_MAX_MIN: u32 = 1;
+/// 同設定の上限。岩と同じ考え方でフィールド幅の上限に合わせる。
+pub const ATTACK_BOMBS_PER_WAVE_MAX_MAX: u32 = FIELD_WIDTH_MAX as u32;
+/// 同設定の調整刻み幅。
+pub const ATTACK_BOMBS_PER_WAVE_MAX_STEP: u32 = 1;
+
+/// 送信する攻撃力のうちボムへ振り分ける比率(%)の既定値(#304)。1ポイントごとに
+/// この確率で判定するため、実際に降る個数は毎回ばらつく。
+pub const ATTACK_BOMB_RATIO_PERCENT_DEFAULT: u32 = 20;
+/// 同設定の下限。0なら岩だけが降る(#304を入れる前と同じ挙動)。
+pub const ATTACK_BOMB_RATIO_PERCENT_MIN: u32 = 0;
+/// 同設定の上限。100ならボムだけが降る。
+pub const ATTACK_BOMB_RATIO_PERCENT_MAX: u32 = 100;
+/// 同設定の調整刻み幅。
+pub const ATTACK_BOMB_RATIO_PERCENT_STEP: u32 = 5;
 
 /// 岩が降ってくる前の予告表示時間(ms)。この間は落下経路の背景を控えめに変えるだけで、
 /// 点滅・警告音は一切出さない(ボムの`BOMB_ENTER_MS`と同じ「出現前に必ず予兆を見せる」

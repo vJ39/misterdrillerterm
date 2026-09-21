@@ -22,7 +22,11 @@ use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use crate::constants::{
+    ATTACK_BLOCKS_PER_BOMB_DEFAULT, ATTACK_BLOCKS_PER_BOMB_MAX, ATTACK_BLOCKS_PER_BOMB_MIN,
     ATTACK_BLOCKS_PER_ROCK_DEFAULT, ATTACK_BLOCKS_PER_ROCK_MAX, ATTACK_BLOCKS_PER_ROCK_MIN,
+    ATTACK_BOMB_RATIO_PERCENT_DEFAULT, ATTACK_BOMB_RATIO_PERCENT_MAX,
+    ATTACK_BOMB_RATIO_PERCENT_MIN, ATTACK_BOMBS_PER_WAVE_MAX_DEFAULT,
+    ATTACK_BOMBS_PER_WAVE_MAX_MAX, ATTACK_BOMBS_PER_WAVE_MAX_MIN,
     ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT, ATTACK_ROCKS_PER_WAVE_MAX_MAX,
     ATTACK_ROCKS_PER_WAVE_MAX_MIN, BLOCK_VANISH_FLASH_MIN_MS, BLOCK_VANISH_FLASH_MS,
     BOARD_SNAPSHOT_ROWS_ABOVE_PLAYER, BOARD_SNAPSHOT_ROWS_BELOW_PLAYER,
@@ -460,6 +464,17 @@ pub struct Game {
     attack_blocks_per_rock: u32,
     /// 設定: 1回(1ウェーブ)で降らせる岩の上限。
     attack_rocks_per_wave_max: u32,
+    /// 自分が溜めた攻撃力のうち、ボムとして送る側へ振り分かれたぶん(#304)。岩用の
+    /// `attack_power_pending`とは別勘定で、相殺も種類ごとに別々に行う。
+    bomb_power_pending: u32,
+    /// 相手から届いたが、まだボムへ変換していない攻撃力(#304)。
+    incoming_bomb_power: u32,
+    /// 設定: 攻撃力いくつでボム1個か(#304)。
+    attack_blocks_per_bomb: u32,
+    /// 設定: 1回(1ウェーブ)で降らせるボムの上限(#304)。
+    attack_bombs_per_wave_max: u32,
+    /// 設定: 送信する攻撃力のうちボムへ振り分ける比率(%)(#304)。
+    attack_bomb_ratio_percent: u32,
 }
 
 impl Game {
@@ -574,6 +589,11 @@ impl Game {
             incoming_rocks: Vec::new(),
             attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_DEFAULT,
             attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT,
+            bomb_power_pending: 0,
+            incoming_bomb_power: 0,
+            attack_blocks_per_bomb: ATTACK_BLOCKS_PER_BOMB_DEFAULT,
+            attack_bombs_per_wave_max: ATTACK_BOMBS_PER_WAVE_MAX_DEFAULT,
+            attack_bomb_ratio_percent: ATTACK_BOMB_RATIO_PERCENT_DEFAULT,
         }
     }
 
@@ -925,6 +945,8 @@ impl Game {
     /// - `rewind_stock_max`: 設定値であり巻き戻しの対象ではない
     /// - `attack_blocks_per_rock` / `attack_rocks_per_wave_max`: 同上(#247の設定値)。
     ///   攻撃力・受信待ちプール・予告中の岩は状態値なのでスナップショットごと巻き戻す
+    /// - `attack_blocks_per_bomb` / `attack_bombs_per_wave_max` / `attack_bomb_ratio_percent`:
+    ///   同上(#304の設定値)。ボム用の攻撃力・受信待ちプールは状態値なので巻き戻す
     pub fn restore_for_rewind(&mut self, snapshot: &Game) {
         let frame_counter = self.frame_counter;
         let debug_log = self.debug_log.clone();
@@ -934,6 +956,9 @@ impl Game {
         let rewind_stock_max = self.rewind_stock_max;
         let attack_blocks_per_rock = self.attack_blocks_per_rock;
         let attack_rocks_per_wave_max = self.attack_rocks_per_wave_max;
+        let attack_blocks_per_bomb = self.attack_blocks_per_bomb;
+        let attack_bombs_per_wave_max = self.attack_bombs_per_wave_max;
+        let attack_bomb_ratio_percent = self.attack_bomb_ratio_percent;
 
         *self = snapshot.clone();
 
@@ -945,6 +970,9 @@ impl Game {
         self.rewind_stock_max = rewind_stock_max;
         self.attack_blocks_per_rock = attack_blocks_per_rock;
         self.attack_rocks_per_wave_max = attack_rocks_per_wave_max;
+        self.attack_blocks_per_bomb = attack_blocks_per_bomb;
+        self.attack_bombs_per_wave_max = attack_bombs_per_wave_max;
+        self.attack_bomb_ratio_percent = attack_bomb_ratio_percent;
 
         if let Some(log) = &self.debug_log {
             log.log_rewind(self.frame_counter, self.rewind_stock);
@@ -1366,10 +1394,13 @@ impl Game {
 
         // 相手の攻撃で降ってくる岩(#247)。ボムと同じく「天に召される」演出中は止める。
         // 予告を進めて出現させたあと、空いた予告キューへ次のウェーブを積む。
+        // 妨害ボム(#304)は盤面のボム数上限で待たされることがあるため、ここでも毎フレーム
+        // 再試行する。
         if !was_dying && self.attack_rules_enabled {
             let delta_ms = delta.as_millis() as u32;
             self.tick_incoming_rocks(delta_ms, &mut events);
             self.try_start_incoming_wave();
+            self.try_start_incoming_bomb_wave();
         }
 
         // プレイヤー自身の自由落下(spec.md 1章)。ブロックの重力とは別々に速度調整できる
@@ -1697,6 +1728,9 @@ impl Game {
         self.set_rewind_stock_max(settings.rewind_stock_max);
         self.set_attack_blocks_per_rock(settings.attack_blocks_per_rock);
         self.set_attack_rocks_per_wave_max(settings.attack_rocks_per_wave_max);
+        self.set_attack_blocks_per_bomb(settings.attack_blocks_per_bomb);
+        self.set_attack_bombs_per_wave_max(settings.attack_bombs_per_wave_max);
+        self.set_attack_bomb_ratio_percent(settings.attack_bomb_ratio_percent);
         // Xブロック/AIR/スター/ダイヤの配分率設定を、安全地帯明け(行2)以降の全体へ反映する。
         self.reroll_spawn_rates_from(
             2,

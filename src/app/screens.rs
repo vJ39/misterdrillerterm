@@ -13,7 +13,8 @@ use rand::RngExt;
 
 use crate::app::audio::{handle_events, play_se};
 use crate::app::settings_menu::{
-    adjust_attack_blocks_per_rock, adjust_attack_rocks_per_wave_max, adjust_bomb_fuse_ms,
+    adjust_attack_blocks_per_bomb, adjust_attack_blocks_per_rock, adjust_attack_bomb_ratio_percent,
+    adjust_attack_bombs_per_wave_max, adjust_attack_rocks_per_wave_max, adjust_bomb_fuse_ms,
     adjust_bomb_rate_percent, adjust_chain_vanish_interval_ms, adjust_dodge_recovery_ms,
     adjust_fall_speed_ms, adjust_field_width, adjust_move_cooldown_ms, adjust_rewind_stock_max,
     adjust_shake_duration_ms, adjust_sound_volume_percent, adjust_spawn_rate_setting,
@@ -259,6 +260,9 @@ pub fn tick_playing(
                     | ui::render::SettingsChoice::BombFuse
                     | ui::render::SettingsChoice::AttackBlocksPerRock
                     | ui::render::SettingsChoice::AttackRocksPerWaveMax
+                    | ui::render::SettingsChoice::AttackBlocksPerBomb
+                    | ui::render::SettingsChoice::AttackBombsPerWaveMax
+                    | ui::render::SettingsChoice::AttackBombRatioPercent
                     | ui::render::SettingsChoice::ChainVanishInterval
                     | ui::render::SettingsChoice::RewindStockMax => {}
                 }
@@ -347,6 +351,9 @@ pub fn tick_playing(
                             | ui::render::SettingsChoice::BombFuse
                             | ui::render::SettingsChoice::AttackBlocksPerRock
                             | ui::render::SettingsChoice::AttackRocksPerWaveMax
+                            | ui::render::SettingsChoice::AttackBlocksPerBomb
+                            | ui::render::SettingsChoice::AttackBombsPerWaveMax
+                            | ui::render::SettingsChoice::AttackBombRatioPercent
                             | ui::render::SettingsChoice::ChainVanishInterval
                             | ui::render::SettingsChoice::RewindStockMax
                     ) =>
@@ -403,6 +410,27 @@ pub fn tick_playing(
                             increase,
                         );
                         game.set_attack_rocks_per_wave_max(app.settings.attack_rocks_per_wave_max);
+                    }
+                    ui::render::SettingsChoice::AttackBlocksPerBomb => {
+                        app.settings.attack_blocks_per_bomb = adjust_attack_blocks_per_bomb(
+                            app.settings.attack_blocks_per_bomb,
+                            increase,
+                        );
+                        game.set_attack_blocks_per_bomb(app.settings.attack_blocks_per_bomb);
+                    }
+                    ui::render::SettingsChoice::AttackBombsPerWaveMax => {
+                        app.settings.attack_bombs_per_wave_max = adjust_attack_bombs_per_wave_max(
+                            app.settings.attack_bombs_per_wave_max,
+                            increase,
+                        );
+                        game.set_attack_bombs_per_wave_max(app.settings.attack_bombs_per_wave_max);
+                    }
+                    ui::render::SettingsChoice::AttackBombRatioPercent => {
+                        app.settings.attack_bomb_ratio_percent = adjust_attack_bomb_ratio_percent(
+                            app.settings.attack_bomb_ratio_percent,
+                            increase,
+                        );
+                        game.set_attack_bomb_ratio_percent(app.settings.attack_bomb_ratio_percent);
                     }
                     ui::render::SettingsChoice::ChainVanishInterval => {
                         app.settings.chain_vanish_interval_ms = adjust_chain_vanish_interval_ms(
@@ -649,6 +677,9 @@ pub fn tick_playing(
                     app.settings.bomb_fuse_ms,
                     app.settings.attack_blocks_per_rock,
                     app.settings.attack_rocks_per_wave_max,
+                    app.settings.attack_blocks_per_bomb,
+                    app.settings.attack_bombs_per_wave_max,
+                    app.settings.attack_bomb_ratio_percent,
                     app.settings.debug_log_enabled,
                     app.settings.chain_vanish_interval_ms,
                     app.settings.rewind_stock_max,
@@ -916,6 +947,9 @@ pub fn tick_settings_screen(
             app.settings.bomb_fuse_ms,
             app.settings.attack_blocks_per_rock,
             app.settings.attack_rocks_per_wave_max,
+            app.settings.attack_blocks_per_bomb,
+            app.settings.attack_bombs_per_wave_max,
+            app.settings.attack_bomb_ratio_percent,
             app.settings.debug_log_enabled,
             app.settings.chain_vanish_interval_ms,
             app.settings.rewind_stock_max,
@@ -978,6 +1012,9 @@ pub fn tick_settings_screen(
                 | ui::render::SettingsChoice::BombFuse
                 | ui::render::SettingsChoice::AttackBlocksPerRock
                 | ui::render::SettingsChoice::AttackRocksPerWaveMax
+                | ui::render::SettingsChoice::AttackBlocksPerBomb
+                | ui::render::SettingsChoice::AttackBombsPerWaveMax
+                | ui::render::SettingsChoice::AttackBombRatioPercent
                 | ui::render::SettingsChoice::ChainVanishInterval
                 | ui::render::SettingsChoice::RewindStockMax => {}
             },
@@ -1066,6 +1103,9 @@ pub fn tick_settings_screen(
                         | ui::render::SettingsChoice::BombFuse
                         | ui::render::SettingsChoice::AttackBlocksPerRock
                         | ui::render::SettingsChoice::AttackRocksPerWaveMax
+                        | ui::render::SettingsChoice::AttackBlocksPerBomb
+                        | ui::render::SettingsChoice::AttackBombsPerWaveMax
+                        | ui::render::SettingsChoice::AttackBombRatioPercent
                         | ui::render::SettingsChoice::ChainVanishInterval
                         | ui::render::SettingsChoice::RewindStockMax
                 ) =>
@@ -1119,6 +1159,24 @@ pub fn tick_settings_screen(
                     ui::render::SettingsChoice::AttackRocksPerWaveMax => {
                         app.settings.attack_rocks_per_wave_max = adjust_attack_rocks_per_wave_max(
                             app.settings.attack_rocks_per_wave_max,
+                            increase,
+                        );
+                    }
+                    ui::render::SettingsChoice::AttackBlocksPerBomb => {
+                        app.settings.attack_blocks_per_bomb = adjust_attack_blocks_per_bomb(
+                            app.settings.attack_blocks_per_bomb,
+                            increase,
+                        );
+                    }
+                    ui::render::SettingsChoice::AttackBombsPerWaveMax => {
+                        app.settings.attack_bombs_per_wave_max = adjust_attack_bombs_per_wave_max(
+                            app.settings.attack_bombs_per_wave_max,
+                            increase,
+                        );
+                    }
+                    ui::render::SettingsChoice::AttackBombRatioPercent => {
+                        app.settings.attack_bomb_ratio_percent = adjust_attack_bomb_ratio_percent(
+                            app.settings.attack_bomb_ratio_percent,
                             increase,
                         );
                     }
