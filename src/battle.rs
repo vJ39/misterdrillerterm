@@ -735,14 +735,32 @@ impl BattleState {
     ///
     /// `proxy_for`が`Some`ならホストがAIの代理で送ってきたものなので、そのroom内
     /// インデックスに対応する盤面へ。`None`なら従来通り送信元(このpeer)の盤面へ。
-    /// 変換した結果が範囲外の場合は、壊れた値で別の参加者の盤面を動かさないよう
-    /// 送信元の盤面へ落とす。
+    ///
+    /// #316: 代理送信を名乗れるのは「ホストから届いた」かつ「宛先がAIの枠」の場合だけで、
+    /// どちらかを満たさない`proxy_for`は他人の盤面や結果の偽装なので送信元の盤面へ落とす。
+    /// 変換した結果が範囲外の場合も同様に落とす(壊れた値で別の参加者を動かさないため)。
+    /// LAN内の信頼できる相手との対戦が前提なので、切断はせず無害化するだけにとどめる。
     fn apply_target_index(&self, peer_games_index: usize, proxy_for: Option<usize>) -> usize {
         let Some(room_index) = proxy_for else {
             return peer_games_index;
         };
+        // AIを動かして代理送信するのはホストだけ(#300)。ホスト以外が送ってきた
+        // `proxy_for`は無視する。
+        if peer_games_index != self.games_index_for_room_index(0) {
+            return peer_games_index;
+        }
         let index = self.games_index_for_room_index(room_index);
         if index == 0 || index >= self.games.len() {
+            return peer_games_index;
+        }
+        // 代理送信の宛先はAIの枠(TCP接続を持たない参加者。#300)だけ。人間の参加者を
+        // 宛先にしたものは、その人の盤面や結果を書き換える偽装として無視する。
+        let is_ai_slot = self
+            .peers
+            .as_ref()
+            .and_then(|peers| peers.get(index - 1))
+            .is_some_and(Option::is_none);
+        if !is_ai_slot {
             return peer_games_index;
         }
         index
@@ -2942,6 +2960,143 @@ mod tests {
             guest.games[1].status,
             GameStatus::Playing,
             "送ってきたホストの盤面は決着していないはず"
+        );
+    }
+
+    #[test]
+    fn a_proxy_is_accepted_only_from_the_host_and_only_for_an_ai_slot() {
+        // #316: `proxy_for`の送信元と宛先を確かめないと、ゲストが他人の盤面や結果
+        // (#289/#323の順位に直結)を書き換えられてしまう。ホストから届いたAIの枠ぶんだけを
+        // 通し、それ以外は送信元自身へ落とす。
+        const HUMANS: usize = 3;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        const HOST_GAMES_INDEX: usize = 1;
+        const OTHER_GUEST_GAMES_INDEX: usize = 2;
+        const AI_GAMES_INDEX: usize = 3;
+        const MY_ROOM_INDEX: usize = 2;
+        const OTHER_GUEST_ROOM_INDEX: usize = 1;
+        // room内インデックス2の視点。games[1]がホスト、games[2]がもう1人のゲスト、
+        // games[3]がAIになる。
+        let (state, _peers) = battle_with_ai_slots(HUMANS, AIS, MY_ROOM_INDEX, 30012);
+        assert_eq!(
+            state.games_index_for_room_index(0),
+            HOST_GAMES_INDEX,
+            "前提: ホストはgames[1]にいるはず"
+        );
+        assert_eq!(
+            state.games_index_for_room_index(AI_ROOM_INDEX),
+            AI_GAMES_INDEX,
+            "前提: AIはgames[3]にいるはず"
+        );
+        assert_eq!(
+            state.games_index_for_room_index(OTHER_GUEST_ROOM_INDEX),
+            OTHER_GUEST_GAMES_INDEX,
+            "前提: もう1人のゲストはgames[2]にいるはず"
+        );
+
+        assert_eq!(
+            state.apply_target_index(HOST_GAMES_INDEX, Some(AI_ROOM_INDEX)),
+            AI_GAMES_INDEX,
+            "ホストからのAIの枠ぶんの代理送信は通すはず(#300)"
+        );
+        assert_eq!(
+            state.apply_target_index(OTHER_GUEST_GAMES_INDEX, Some(AI_ROOM_INDEX)),
+            OTHER_GUEST_GAMES_INDEX,
+            "ホスト以外からの代理送信は無視して送信元自身へ落とすはず(#316)"
+        );
+        assert_eq!(
+            state.apply_target_index(OTHER_GUEST_GAMES_INDEX, Some(0)),
+            OTHER_GUEST_GAMES_INDEX,
+            "ゲストがホストの代理を名乗っても無視するはず(#316)"
+        );
+        assert_eq!(
+            state.apply_target_index(HOST_GAMES_INDEX, Some(OTHER_GUEST_ROOM_INDEX)),
+            HOST_GAMES_INDEX,
+            "ホストからでも人間の参加者を宛先にした代理送信は無視するはず(#316)"
+        );
+        assert_eq!(
+            state.apply_target_index(HOST_GAMES_INDEX, Some(MY_ROOM_INDEX)),
+            HOST_GAMES_INDEX,
+            "自分を宛先にした代理送信は無視するはず"
+        );
+        assert_eq!(
+            state.apply_target_index(HOST_GAMES_INDEX, Some(HUMANS + AIS)),
+            HOST_GAMES_INDEX,
+            "参加者が居ないroom内インデックスは無視するはず"
+        );
+        assert_eq!(
+            state.apply_target_index(OTHER_GUEST_GAMES_INDEX, None),
+            OTHER_GUEST_GAMES_INDEX,
+            "代理送信でないメッセージは送信元の盤面へ届くはず"
+        );
+    }
+
+    #[test]
+    fn no_proxy_is_accepted_at_all_while_i_am_the_host() {
+        // #316: 自分がホストのときはAIを動かしているのが自分自身なので、代理送信を
+        // 名乗ってよいpeerは1人も居ない。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        const GUEST_GAMES_INDEX: usize = 1;
+        // ホスト(room内インデックス0)の視点。games[1]がゲスト、games[2]がAIになる。
+        let (state, _peers) = battle_with_ai_slots(HUMANS, AIS, 0, 30013);
+        assert_eq!(
+            state.games_index_for_room_index(AI_ROOM_INDEX),
+            2,
+            "前提: AIはgames[2]にいるはず"
+        );
+
+        assert_eq!(
+            state.apply_target_index(GUEST_GAMES_INDEX, Some(AI_ROOM_INDEX)),
+            GUEST_GAMES_INDEX,
+            "自分が動かしているAIの枠を、ゲストの申告で書き換えてはいけない(#316)"
+        );
+    }
+
+    #[test]
+    fn a_proxied_result_from_a_guest_settles_the_sender_instead_of_the_ai_slot() {
+        // #316: 偽装された`Result`が実際の受信経路でも無害化されることを確認する。
+        // これを通すと、悪意あるゲストが他の参加者をゴール扱いにできてしまう。
+        const HUMANS: usize = 3;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        // room内インデックス2の視点。games[1]がホスト、games[2]がもう1人のゲスト、
+        // games[3]がAIになる。
+        let (mut me, mut peers) = battle_with_ai_slots(HUMANS, AIS, 2, 30014);
+
+        // ホストではないゲスト(peers[1] = games[2])がAIの代理を名乗る。
+        net::write_message(
+            &mut peers[1],
+            &GameMessage::Result {
+                reached_goal: true,
+                proxy_for: Some(AI_ROOM_INDEX),
+            },
+        )
+        .unwrap();
+
+        // 受信スレッド経由の配送を待つ。切断扱い(`HEARTBEAT_TIMEOUT_MS`)より手前で
+        // 打ち切り、負荷で配送が遅れても結果の解釈が変わらないようにする。
+        let deadline = Instant::now() + Duration::from_millis(HEARTBEAT_TIMEOUT_MS * 3 / 4);
+        while Instant::now() < deadline {
+            // 盤面を進めずに受信だけ回す(配送待ちで酸素を消費させない)。
+            me.advance(Duration::ZERO, None);
+            if me.games[2].status != GameStatus::Playing {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            me.games[2].status,
+            GameStatus::Cleared,
+            "ホスト以外の代理送信は無視して、送信元自身の結果として扱うはず(#316)"
+        );
+        assert_eq!(
+            me.games[3].status,
+            GameStatus::Playing,
+            "ホスト以外が名乗ったAIの枠の結果は書き換えないはず(#316)"
         );
     }
 
