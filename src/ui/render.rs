@@ -4221,7 +4221,6 @@ mod tests {
                 crate::lobby::HostedGuest::for_test("Player-3c4d"),
                 crate::lobby::HostedGuest::for_test("Player-5e6f"),
             ],
-            ai_count: 0,
         });
 
         let text = render_network_lobby(&lobby);

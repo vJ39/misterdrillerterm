@@ -82,6 +82,13 @@ pub struct LobbyState {
     my_name: String,
     /// 候補リスト上のカーソル位置。
     selection: usize,
+    /// このルームへ混ぜるAIの人数(#300。初期0)。ホストが探索中に増減し、開始操作(Tab)の
+    /// ときに`room::start_room_as_host`へ渡す。#296のAI対戦(V)と違い通信ありのルームの
+    /// 話で、人間の参加者と混在させられる。
+    ///
+    /// フェーズではなくロビー自身が持つ(#309。`LobbyPhase::Discovering`に持たせていた
+    /// ため、参加リクエストの受理などでフェーズを一度離れるたびに0へ戻っていた)。
+    room_ai_count: usize,
     phase: LobbyPhase,
 }
 
@@ -89,14 +96,7 @@ pub struct LobbyState {
 pub enum LobbyPhase {
     /// 候補を探しながら参加リクエストを待っている通常状態。`guests`が空でなければ、
     /// 既にルームを開いていて、さらに参加リクエストを受けられる状態(#293)。
-    ///
-    /// `ai_count`はこのルームへ混ぜるAIの人数(#300。初期0)。ホストがここで増減し、
-    /// 開始操作(Tab)のときに`room::start_room_as_host`へ渡す。#296のAI対戦(V)と違い
-    /// 通信ありのルームの話で、人間の参加者と混在させられる。
-    Discovering {
-        guests: Vec<HostedGuest>,
-        ai_count: usize,
-    },
+    Discovering { guests: Vec<HostedGuest> },
     /// 自分から参加リクエストを送り、相手の応答を待っている(#293で名前は維持)。
     AwaitingInviteResponse {
         target: DiscoveredPeer,
@@ -208,6 +208,7 @@ impl LobbyState {
             mesh_listener,
             my_name,
             selection: 0,
+            room_ai_count: 0,
             phase: discovering(),
         }
     }
@@ -239,12 +240,9 @@ impl LobbyState {
         }
     }
 
-    /// このルームへ混ぜるAI(#300)の人数。持たないフェーズでは0(AIを追加しない)。
+    /// このルームへ混ぜるAI(#300)の人数。フェーズが変わっても保持する(#309)。
     pub fn room_ai_count(&self) -> usize {
-        match &self.phase {
-            LobbyPhase::Discovering { ai_count, .. } => *ai_count,
-            _ => 0,
-        }
+        self.room_ai_count
     }
 
     /// 1フレーム分進める。`actions`はこのフレームに届いた操作、`config`は自分が
@@ -583,7 +581,7 @@ impl LobbyState {
         // 開始したら募集は終わり(spec.md 12.1)。
         self.discovery.send_bye();
 
-        // AIの枠(#300)はフェーズが変わる前に読む(`take_guests`で`Discovering`を抜ける)。
+        // このルームへ混ぜるAI(#300)の人数。
         let ai_count = self.room_ai_count();
         let guests = self.take_guests();
         let mut guest_room_streams = Vec::with_capacity(guests.len());
@@ -808,18 +806,18 @@ impl LobbyState {
     /// このルームへ混ぜるAI(#300)の人数を1人増やす/減らす。
     ///
     /// 上限は「自分+ゲスト+AIが`ROOM_MAX_PLAYERS`に収まる人数」。`Discovering`以外の
-    /// フェーズでは何もしない(AIの枠を持たないため)。
+    /// フェーズでは何もしない(相手の応答待ち・接続待ちの最中に誤って動かさないため)。
     fn adjust_room_ai_count(&mut self, increase: bool) {
-        let LobbyPhase::Discovering { guests, ai_count } = &mut self.phase else {
+        let LobbyPhase::Discovering { guests } = &self.phase else {
             return;
         };
         let max = ROOM_MAX_PLAYERS.saturating_sub(1 + guests.len());
         let next = if increase {
-            *ai_count + 1
+            self.room_ai_count + 1
         } else {
-            ai_count.saturating_sub(1)
+            self.room_ai_count.saturating_sub(1)
         };
-        *ai_count = next.min(max);
+        self.room_ai_count = next.min(max);
     }
 
     fn move_selection(&mut self, forward: bool) {
@@ -851,13 +849,9 @@ fn discovering() -> LobbyPhase {
 
 /// 迎え入れ済みのゲストを持って探索フェーズへ戻る。
 ///
-/// AIの枠(#300)は`LobbyPhase::Discovering`だけが持つ値のため、他のフェーズを経由して
-/// 戻ってきたときは0(AIを追加しない)に戻る。
+/// AIの枠(#300)はロビー自身が持つため、ここを何度通っても設定した人数のまま(#309)。
 fn discovering_with(guests: Vec<HostedGuest>) -> LobbyPhase {
-    LobbyPhase::Discovering {
-        guests,
-        ai_count: 0,
-    }
+    LobbyPhase::Discovering { guests }
 }
 
 /// 短い通知フェーズを作る。`guests`は通知を抜けた後、探索フェーズへそのまま
@@ -1162,8 +1156,8 @@ mod tests {
             "迎え入れた順はリクエストを送った順のはず"
         );
 
-        // AIの枠(#300)は全員が加わった後に増やす(ゲストを迎える途中で`Discovering`を
-        // 抜けるため、その間に増やしても0へ戻る)。
+        // AIの枠(#300)は全員が加わった後に増やす(ゲストが揃ってから増やすので、
+        // 残り枠の上限判定も最終的な人数で効く)。
         for _ in 0..ai_count {
             host.update(&[InputAction::IncreaseRoomAiCount], test_config());
         }
@@ -1238,7 +1232,6 @@ mod tests {
                 HostedGuest::for_test("g2"),
                 HostedGuest::for_test("g3"),
             ],
-            ai_count: 0,
         });
 
         lobby.update(&[InputAction::Confirm], test_config());
@@ -1442,7 +1435,6 @@ mod tests {
                 HostedGuest::for_test("g2"),
                 HostedGuest::for_test("g3"),
             ],
-            ai_count: 0,
         });
 
         invite_by_name(&mut other, "host");
@@ -1473,7 +1465,6 @@ mod tests {
         discover_each_other(&mut host, &mut other);
         host.set_phase(LobbyPhase::Discovering {
             guests: vec![HostedGuest::for_test("joined")],
-            ai_count: 0,
         });
 
         invite_by_name(&mut other, "host");
@@ -1767,7 +1758,6 @@ mod tests {
                 HostedGuest::for_test("already-1"),
                 HostedGuest::for_test("already-2"),
             ],
-            ai_count: 0,
         });
 
         invite_by_name(guest_a, "host");
@@ -1821,7 +1811,6 @@ mod tests {
         let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
         lobby.set_phase(LobbyPhase::Discovering {
             guests: vec![HostedGuest::for_test("g1")],
-            ai_count: 0,
         });
         assert_eq!(lobby.room_ai_count(), 0, "初期値はAIなし");
 
@@ -1847,10 +1836,7 @@ mod tests {
             let guests = (0..guest_count)
                 .map(|index| HostedGuest::for_test(&format!("g{index}")))
                 .collect();
-            lobby.set_phase(LobbyPhase::Discovering {
-                guests,
-                ai_count: 0,
-            });
+            lobby.set_phase(LobbyPhase::Discovering { guests });
 
             for _ in 0..ROOM_MAX_PLAYERS + 1 {
                 lobby.update(&[InputAction::IncreaseRoomAiCount], test_config());
@@ -1866,7 +1852,8 @@ mod tests {
 
     #[test]
     fn the_ai_count_keys_do_nothing_outside_the_room() {
-        // AIの枠を持つのは`Discovering`だけ。#296の人数選択(V)の値を巻き込まないこと。
+        // AIの枠を増減できるのは`Discovering`の間だけ。#296の人数選択(V)の値を
+        // 巻き込まないこと。
         let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
         lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 1 });
 
@@ -1880,6 +1867,45 @@ mod tests {
             "#296の人数選択は動かないはず"
         );
         assert_eq!(lobby.room_ai_count(), 0, "ルームのAIの枠も0のままのはず");
+    }
+
+    #[test]
+    fn the_room_ai_count_survives_accepting_another_guest_after_it_was_set() {
+        // #309: 以前はAIの枠を`Discovering`だけが持っていたため、参加リクエストを
+        // 受理して一度フェーズを離れるたびに0へ戻り、ホストが追加したはずのAIが
+        // 対戦に混ざらなかった。
+        let mut lobbies = facing_lobbies_of(&["host", "guest1", "guest2"]);
+        discover_all(&mut lobbies);
+        let mut guest2 = lobbies.pop().unwrap();
+        let mut guest1 = lobbies.pop().unwrap();
+        let mut host = lobbies.pop().unwrap();
+
+        request_and_join(&mut host, &mut guest1, "guest1");
+        host.update(
+            &[
+                InputAction::IncreaseRoomAiCount,
+                InputAction::IncreaseRoomAiCount,
+            ],
+            test_config(),
+        );
+        assert_eq!(
+            host.room_ai_count(),
+            2,
+            "前提: AIを2人ぶん追加できているはず"
+        );
+
+        request_and_join(&mut host, &mut guest2, "guest2");
+
+        assert_eq!(
+            host.hosted_guests().len(),
+            2,
+            "前提: 2人目のゲストも迎え入れているはず"
+        );
+        assert_eq!(
+            host.room_ai_count(),
+            2,
+            "2人目のゲストを迎えた後もAIの枠は保たれるはず"
+        );
     }
 
     #[test]
