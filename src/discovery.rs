@@ -317,7 +317,7 @@ fn peer_addr(peer: &DiscoveredPeer) -> SocketAddr {
 impl Discovery {
     /// テスト用。固定ポート(39393)は同一プロセスで1つしか確保できず、ブロードキャストは
     /// 環境依存で届き方が変わるため、ループバックの空きポートで開始する
-    /// (設計書8節「テストでは宛先を直接指定する」)。
+    /// (テストでは宛先を直接指定する)。
     pub(crate) fn start_on_loopback(my_name: String, my_tcp_port: u16) -> io::Result<Self> {
         let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
         Self::start_with(loopback, vec![loopback], my_name, my_tcp_port)

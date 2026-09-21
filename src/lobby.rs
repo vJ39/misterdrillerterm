@@ -48,9 +48,9 @@ const ROOM_MAX_PLAYERS: usize = 8;
 /// 超えないようにするため、上限は「最大人数-1」(=7人。合計2〜8人)。
 const AI_OPPONENT_COUNT_RANGE: std::ops::RangeInclusive<usize> = 1..=(ROOM_MAX_PLAYERS - 1);
 
-/// 主催者が既に迎え入れたゲスト1人ぶん(設計書2節)。
+/// 主催者が既に迎え入れたゲスト1人ぶん。
 ///
-/// 設計書では非公開structだが、公開enum`LobbyPhase`のフィールドに出てくるため
+/// 本来は非公開にしたいstructだが、公開enum`LobbyPhase`のフィールドに出てくるため
 /// `private_interfaces`(`-D warnings`で失敗する)を避けて公開にし、中身は非公開の
 /// まま表示用の`name()`だけ見せる。
 pub struct HostedGuest {
@@ -75,7 +75,7 @@ pub struct LobbyState {
     /// HELLOで広告し続ける(招待を受けた時点で改めてbindすると、広告済みのポートが
     /// 空いている保証が無い)。非ブロッキングに設定済み。
     listener: TcpListener,
-    /// メッシュ接続用のTCP listener(設計書4節)。ルーム参加の接続とメッシュの接続を
+    /// メッシュ接続用のTCP listener。ルーム参加の接続とメッシュの接続を
     /// 同じポートで受けると区別できないため、別ポートで待ち受ける。
     mesh_listener: TcpListener,
     /// 自分の表示名。HELLOの広告にも、ルーム参加の`JoinRoom`にも使う。
@@ -190,7 +190,7 @@ impl LobbyState {
         listener.set_nonblocking(true)?;
         let tcp_port = listener.local_addr()?.port();
         // メッシュ用は`bind_battle_listener`をもう一度呼ぶだけでよい(1本目のポートは
-        // 使用中になっているため、自然に別の空きポートが取れる。設計書4節)。
+        // 使用中になっているため、自然に別の空きポートが取れる)。
         let mesh_listener = bind_battle_listener()?;
         let discovery = Discovery::start(my_name.clone(), tcp_port)?;
         Ok(Self::new_with(discovery, listener, mesh_listener, my_name))
@@ -393,7 +393,7 @@ impl LobbyState {
                 InputAction::FaceUp => self.move_selection(false),
                 InputAction::FaceDown => self.move_selection(true),
                 InputAction::Confirm => self.invite_selected(),
-                // Tab=ルーム開始。ゲストが1人以上いるときだけ意味を持つ(設計書3節)。
+                // Tab=ルーム開始。ゲストが1人以上いるときだけ意味を持つ。
                 InputAction::StartRoom => {
                     if has_guests {
                         return Some(self.start_room(config));
@@ -543,7 +543,7 @@ impl LobbyState {
 
     /// ホストとして、ACCEPTを返したゲストのルーム参加接続を受け入れる(非ブロッキング
     /// のため毎フレーム1回試す)。`JoinRoom`の読み取りだけは短時間のブロッキングで
-    /// 済ませる(設計書4節)。
+    /// 済ませる。
     fn accept_guest(&mut self, started: Instant) {
         match self.listener.accept() {
             Ok((stream, peer_addr)) => match read_join_room(stream, peer_addr) {
@@ -577,8 +577,7 @@ impl LobbyState {
     }
 
     /// 集まったゲストで対戦を開始する(ホスト)。`room::start_room_as_host`はメッシュ
-    /// 確立まで進むためブロッキングだが、対戦成立までの一度きりの処理として扱う
-    /// (設計書4節)。
+    /// 確立まで進むためブロッキングだが、対戦成立までの一度きりの処理として扱う。
     fn start_room(&mut self, config: BattleConfig) -> LobbyOutcome {
         // 開始したら募集は終わり(spec.md 12.1)。
         self.discovery.send_bye();
@@ -609,7 +608,7 @@ impl LobbyState {
                 // AIはrosterのゲストの後ろに並ぶ(#300)。参加者名もその並びに合わせる。
                 let mut other_names = guest_names;
                 other_names.extend((1..=ai_count).map(room::ai_member_name));
-                // ホストのroom内インデックスは常に0(設計書4節)。
+                // ホストのroom内インデックスは常に0。
                 self.battle_from_room(streams, other_names, 0, handshake)
             }
             Err(_) => {
@@ -639,7 +638,7 @@ impl LobbyState {
 
     /// ゲストとしてホストへ接続し、`JoinRoom`を送る。接続は`connect_timeout`自体が
     /// 待ち時間を持つため1回で決着させ、その後の「ホストが開始するのを待つ」区間は
-    /// いつ終わるか分からないため別スレッドへ載せる(設計書5節)。
+    /// いつ終わるか分からないため別スレッドへ載せる。
     fn connect_to_host(&mut self, addr: SocketAddr, host_peer: DiscoveredPeer) -> LobbyOutcome {
         // メッシュ用listenerは待ち受けスレッドへ渡すため複製する(自分は以降使わないが、
         // ロビーの持ち物として開いたままにしておく)。

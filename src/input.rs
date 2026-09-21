@@ -35,7 +35,7 @@ fn action_from_key_code(code: KeyCode) -> InputAction {
         // 進んではいけない」)。
         KeyCode::Enter => InputAction::Confirm,
         // N人対戦のルーム開始(#276)。Enterは「選択中の候補へ招待」のままにして、
-        // 誤操作で開始してしまわないよう別のキーに分ける(設計書3節)。
+        // 誤操作で開始してしまわないよう別のキーに分ける。
         KeyCode::Tab => InputAction::StartRoom,
         // AI対戦モードの開始(#296)。V=vs AI。
         KeyCode::Char('v') | KeyCode::Char('V') => InputAction::StartAiBattle,

@@ -817,8 +817,8 @@ pub fn tick_battle(
     Ok(None)
 }
 
-/// 決着後の結果表示から抜ける操作か(#256。設計書6節「Confirm(EnterまたはSpace)
-/// またはQuitキー」)。Spaceは通常プレイでは一時停止だが、対戦には一時停止が無いため
+/// 決着後の結果表示から抜ける操作か(#256)。Confirm(EnterまたはSpace)またはQuitキーで
+/// 抜けられる。Spaceは通常プレイでは一時停止だが、対戦には一時停止が無いため
 /// ここでは確定の意味で受け付ける。
 fn leaves_battle_result(action: InputAction) -> bool {
     matches!(
