@@ -4517,7 +4517,10 @@ mod tests {
                 "{name}の深度({depth_m}m)がパネルに出ていない:\n{text}"
             );
             assert!(
-                screen_shows(&text, &format!("\u{2665}\u{d7}{}", others[index].player.lives)),
+                screen_shows(
+                    &text,
+                    &format!("\u{2665}\u{d7}{}", others[index].player.lives)
+                ),
                 "{name}のライフがパネルに出ていない:\n{text}"
             );
         }

@@ -888,6 +888,16 @@ pub fn new_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
     game
 }
 
+/// `BattleConfig`とseedから、AIの盤面用のGameを1つ生成する(#312)。人間用と同じ手順を
+/// 通し、20項目だけAI専用値へ入れ替える。AIに勝てないときのハンディキャップとして、
+/// AIの落下速度や妨害の受け方を人間と別に設定できるようにするためのもの。
+///
+/// 同じseedでも人間用とAI用で盤面の中身は変わる(配分率が違えば地形が変わる)が、
+/// AIの盤面については参加者全員がこの関数を同じ引数で呼ぶため、手元のコピー同士は一致する。
+pub fn new_ai_game_from_battle_config(seed: u64, config: &BattleConfig) -> Game {
+    new_game_from_battle_config(seed, &config.with_ai_values())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,6 +1244,57 @@ mod tests {
             new_game_from_battle_config(1, &denser_rocks).board.rows,
             "配分率の設定が盤面へ反映されているはず"
         );
+    }
+
+    #[test]
+    fn new_ai_game_from_battle_config_applies_the_ai_only_values() {
+        // #312: AIの盤面だけ落下速度等を別にできることの確認。同じconfigから人間用と
+        // AI用を作り、それぞれが自分のほうの値を持つこと(取り違えていないこと)を見る。
+        // 落下間隔はGameへ渡す時点で25〜600msへ丸められるため、値も範囲内から選ぶ。
+        let config = BattleConfig {
+            block_fall_tick_ms: 200,
+            player_fall_tick_ms: 100,
+            shake_duration_ms: 300,
+            ai_block_fall_tick_ms: 500,
+            ai_player_fall_tick_ms: 450,
+            ai_shake_duration_ms: 900,
+            ..test_battle_config()
+        };
+
+        let human = new_game_from_battle_config(1, &config);
+        let ai = new_ai_game_from_battle_config(1, &config);
+
+        assert_eq!(human.block_fall_tick_ms(), 200);
+        assert_eq!(human.player_fall_tick_ms(), 100);
+        assert_eq!(human.shake_duration_ms(), 300);
+        assert_eq!(ai.block_fall_tick_ms(), 500);
+        assert_eq!(ai.player_fall_tick_ms(), 450);
+        assert_eq!(ai.shake_duration_ms(), 900);
+    }
+
+    #[test]
+    fn new_ai_game_from_battle_config_uses_the_ai_spawn_rates_but_the_shared_field_and_goal() {
+        // #312: 配分率もAI専用値が使われる(=盤面が人間用と変わる)一方、盤面幅・ゴール
+        // 深度・反応速度系は全員共通のまま。妨害ルールの有効化も人間用と同じ手順を通る。
+        let config = BattleConfig {
+            field_width: 10,
+            move_cooldown_ms: 40,
+            rock_spawn_rate_percent: 100,
+            ai_rock_spawn_rate_percent: 300,
+            ..test_battle_config()
+        };
+
+        let human = new_game_from_battle_config(1, &config);
+        let ai = new_ai_game_from_battle_config(1, &config);
+
+        assert_ne!(
+            human.board.rows, ai.board.rows,
+            "AI専用の配分率が盤面へ反映されているはず"
+        );
+        assert_eq!(ai.board.rows[0].len(), 10);
+        assert_eq!(ai.depth_goal_m(), TEST_GOAL_M);
+        assert_eq!(ai.move_cooldown_ms(), 40);
+        assert!(ai.attack_rules_enabled());
     }
 
     // -----------------------------------------------------------------------

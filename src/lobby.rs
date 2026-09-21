@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use rand::RngExt;
 
-use crate::battle::{BattleState, new_game_from_battle_config};
+use crate::battle::{BattleState, new_ai_game_from_battle_config, new_game_from_battle_config};
 use crate::discovery::{DiscoveredPeer, Discovery};
 use crate::game::InputAction;
 use crate::net::{
@@ -619,14 +619,14 @@ impl LobbyState {
         }
     }
 
-    /// AI対戦を開始する(#296)。通信は一切使わない。人間とAI全員を同じシード・
-    /// 同じ設定で作る(spec.md 12.2と同じ考え方=盤面の地形とアイテム配置を揃える
-    /// ため)。
+    /// AI対戦を開始する(#296)。通信は一切使わない。人間とAI全員を同じシードで作る
+    /// (spec.md 12.2と同じ考え方)。AIの盤面だけはAI専用設定(#312)から作るため、
+    /// 落下速度や配分率を人間と別にしていれば地形も人間とは変わる。
     fn start_ai_battle(&mut self, ai_count: usize, config: BattleConfig) -> LobbyOutcome {
         let seed: u64 = rand::rng().random();
         let human_game = new_game_from_battle_config(seed, &config);
         let ai_games = (0..ai_count)
-            .map(|_| new_game_from_battle_config(seed, &config))
+            .map(|_| new_ai_game_from_battle_config(seed, &config))
             .collect();
         let state = BattleState::new_local_vs_ai(human_game, ai_games, self.my_name.clone());
         LobbyOutcome::Battle(Box::new(state))
@@ -700,8 +700,17 @@ impl LobbyState {
         handshake: net::HandshakeResult,
     ) -> LobbyOutcome {
         let player_count = other_names.len() + 1;
-        let games = (0..player_count)
-            .map(|_| new_game_from_battle_config(handshake.seed, &handshake.config))
+        let games: Vec<_> = (0..player_count)
+            .map(|i| {
+                // 自分(games[0])は常に人間。それ以外はstreams[i-1]がNoneならAIの枠
+                // (#300の判定と同じ)で、AI専用設定(#312)から盤面を作る。ホストも
+                // ゲストも同じ判定をするので、AIの盤面コピーは全員で一致する。
+                if i > 0 && streams[i - 1].is_none() {
+                    new_ai_game_from_battle_config(handshake.seed, &handshake.config)
+                } else {
+                    new_game_from_battle_config(handshake.seed, &handshake.config)
+                }
+            })
             .collect();
         let mut player_names = Vec::with_capacity(player_count);
         player_names.push(self.my_name.clone());
@@ -1307,6 +1316,93 @@ mod tests {
         assert_eq!(state.games.len(), 3, "自分+AI2人ぶんの盤面があるはず");
         assert_eq!(state.player_names.len(), 3);
         assert_eq!(state.player_names[0], "me");
+    }
+
+    #[test]
+    fn the_ai_battle_builds_the_ai_boards_from_the_ai_only_settings() {
+        // #312: AI対戦(通信なし)で、AIの盤面だけAI専用設定から作る。落下間隔はGameへ
+        // 渡す時点で25〜600msへ丸められるため、値も範囲内から選ぶ。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 2 });
+        let config = BattleConfig {
+            block_fall_tick_ms: 200,
+            ai_block_fall_tick_ms: 500,
+            ..test_config()
+        };
+
+        let outcome = lobby.update(&[InputAction::Confirm], config);
+
+        let LobbyOutcome::Battle(state) = outcome else {
+            panic!("AI対戦が始まるはず");
+        };
+        assert_eq!(state.games.len(), 3);
+        assert_eq!(
+            state.games[0].block_fall_tick_ms(),
+            200,
+            "自分は人間用の設定"
+        );
+        assert_eq!(state.games[1].block_fall_tick_ms(), 500, "AIはAI専用設定");
+        assert_eq!(state.games[2].block_fall_tick_ms(), 500, "AIはAI専用設定");
+    }
+
+    #[test]
+    fn a_room_with_an_ai_builds_only_the_ai_board_from_the_ai_only_settings() {
+        // #312: 人間+AI混在のルーム(#300)で、AIの枠(streamsがNone)だけAI専用設定から
+        // 盤面を作り、自分と人間のゲストは従来通り人間用の設定で作る。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        let config = BattleConfig {
+            block_fall_tick_ms: 200,
+            ai_block_fall_tick_ms: 500,
+            rock_spawn_rate_percent: 100,
+            ai_rock_spawn_rate_percent: 300,
+            ..test_config()
+        };
+        // 人間のゲスト1人ぶんは接続を持たせ、AIの枠はNoneにする。
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let guest_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let handshake = net::HandshakeResult {
+            opponent_name: String::new(),
+            config,
+            seed: 4242,
+            start_at_unix_ms: 0,
+        };
+
+        let outcome = lobby.battle_from_room(
+            vec![Some(guest_stream), None],
+            vec!["guest".to_string(), room::ai_member_name(1)],
+            0,
+            handshake,
+        );
+
+        let LobbyOutcome::Battle(state) = outcome else {
+            panic!("対戦が始まるはず");
+        };
+        assert_eq!(state.games.len(), 3);
+        assert_eq!(
+            state.games[0].block_fall_tick_ms(),
+            200,
+            "自分は人間用の設定"
+        );
+        assert_eq!(
+            state.games[1].block_fall_tick_ms(),
+            200,
+            "人間のゲストも人間用の設定"
+        );
+        assert_eq!(
+            state.games[2].block_fall_tick_ms(),
+            500,
+            "AIの枠だけAI専用設定"
+        );
+        assert_eq!(
+            state.games[1].board.rows,
+            new_game_from_battle_config(4242, &config).board.rows,
+            "人間のゲストの盤面は従来通りの生成結果と一致するはず"
+        );
+        assert_eq!(
+            state.games[2].board.rows,
+            new_ai_game_from_battle_config(4242, &config).board.rows,
+            "AIの盤面はAI専用設定から作った生成結果と一致するはず"
+        );
     }
 
     #[test]

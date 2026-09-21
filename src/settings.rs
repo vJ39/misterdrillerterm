@@ -116,6 +116,51 @@ pub struct Settings {
     /// `REWIND_STOCK_MAX_SETTING_MIN`(0=機能OFF)〜`REWIND_STOCK_MAX_SETTING_MAX`の
     /// 範囲で設定画面から調整する。
     pub rewind_stock_max: u8,
+
+    // 以下はAI専用のミラー値(TERM独自拡張。#312)。対戦でAIの盤面を作るときにだけ使い、
+    // 人間の盤面には影響しない。AIに勝てないときのハンディキャップとして人間用と別の値を
+    // 持たせるためのもので、取り得る範囲・刻みは人間用と同じ定数を使い回す。既定値も
+    // 人間用と同じにしてあり、何も触らなければ従来通り人間と同条件になる。
+    /// AI専用のブロック落下間隔(ms)。
+    pub ai_block_fall_tick_ms: u64,
+    /// AI専用のキャラ落下間隔(ms)。
+    pub ai_player_fall_tick_ms: u64,
+    /// AI専用の揺れ時間(落下開始までの時間, ms)。
+    pub ai_shake_duration_ms: u64,
+    /// AI専用のXブロック(岩)の出現率(%)。
+    pub ai_rock_spawn_rate_percent: u32,
+    /// AI専用のAIR(酸素カプセル)の出現率(%)。
+    pub ai_air_spawn_rate_percent: u32,
+    /// AI専用のスターブロックの出現率(%)。
+    pub ai_star_spawn_rate_percent: u32,
+    /// AI専用のダイヤブロックの出現率(%)。
+    pub ai_diamond_spawn_rate_percent: u32,
+    /// AI専用のアイテムブロック(ClearAbove)の出現率(%)。
+    pub ai_item_clear_above_rate_percent: u32,
+    /// AI専用のアイテムブロック(UnifyColors)の出現率(%)。
+    pub ai_item_unify_colors_rate_percent: u32,
+    /// AI専用のアイテムブロック(StarifyScreen)の出現率(%)。
+    pub ai_item_starify_screen_rate_percent: u32,
+    /// AI専用の色ブロックの色数(1〜4)。
+    pub ai_color_count: u8,
+    /// AI専用の色ブロックの結合しやすさ(%)。
+    pub ai_color_cluster_rate_percent: u32,
+    /// AI専用のボム出現頻度(%)。
+    pub ai_bomb_spawn_rate_percent: u32,
+    /// AI専用のボム設置から爆発までの時間(ms)。
+    pub ai_bomb_fuse_ms: u32,
+    /// AI専用の「岩1個を降らせるのに必要な攻撃力」。
+    pub ai_attack_blocks_per_rock: u32,
+    /// AI専用の「1ウェーブに降らせる岩の個数上限」。
+    pub ai_attack_rocks_per_wave_max: u32,
+    /// AI専用の「ボム1個を降らせるのに必要な攻撃力」。
+    pub ai_attack_blocks_per_bomb: u32,
+    /// AI専用の「1ウェーブに降らせるボムの個数上限」。
+    pub ai_attack_bombs_per_wave_max: u32,
+    /// AI専用の「送る攻撃力のうちボムへ振り分ける比率(%)」。
+    pub ai_attack_bomb_ratio_percent: u32,
+    /// AI専用の自動消滅の連鎖インターバル(ms)。
+    pub ai_chain_vanish_interval_ms: u64,
 }
 
 impl Default for Settings {
@@ -151,6 +196,26 @@ impl Default for Settings {
             chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
             last_course_depth_m: COURSE_NORMAL_DEPTH_M,
             rewind_stock_max: REWIND_STOCK_MAX_DEFAULT,
+            ai_block_fall_tick_ms: FALL_TICK_MS,
+            ai_player_fall_tick_ms: FALL_TICK_MS,
+            ai_shake_duration_ms: SHAKE_DURATION_MS,
+            ai_rock_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_air_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_star_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_diamond_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_item_clear_above_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_item_unify_colors_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_item_starify_screen_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_color_count: COLOR_COUNT_DEFAULT,
+            ai_color_cluster_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_bomb_spawn_rate_percent: SPAWN_RATE_PERCENT_DEFAULT,
+            ai_bomb_fuse_ms: BOMB_FUSE_MS,
+            ai_attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_DEFAULT,
+            ai_attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT,
+            ai_attack_blocks_per_bomb: ATTACK_BLOCKS_PER_BOMB_DEFAULT,
+            ai_attack_bombs_per_wave_max: ATTACK_BOMBS_PER_WAVE_MAX_DEFAULT,
+            ai_attack_bomb_ratio_percent: ATTACK_BOMB_RATIO_PERCENT_DEFAULT,
+            ai_chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_DEFAULT,
         }
     }
 }
@@ -274,6 +339,73 @@ impl Settings {
                 })
                 .map(|v| v as u8)
                 .unwrap_or(default.rewind_stock_max),
+            // AI専用値(#312)。既存の設定ファイルにはこれらのキーが無いので、
+            // 1項目ずつ人間用と同じ既定値へフォールバックする。
+            ai_block_fall_tick_ms: parse_u64_field(&text, "ai_block_fall_tick_ms")
+                .unwrap_or(default.ai_block_fall_tick_ms),
+            ai_player_fall_tick_ms: parse_u64_field(&text, "ai_player_fall_tick_ms")
+                .unwrap_or(default.ai_player_fall_tick_ms),
+            ai_shake_duration_ms: parse_u64_field(&text, "ai_shake_duration_ms")
+                .unwrap_or(default.ai_shake_duration_ms),
+            ai_rock_spawn_rate_percent: parse_u64_field(&text, "ai_rock_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_rock_spawn_rate_percent),
+            ai_air_spawn_rate_percent: parse_u64_field(&text, "ai_air_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_air_spawn_rate_percent),
+            ai_star_spawn_rate_percent: parse_u64_field(&text, "ai_star_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_star_spawn_rate_percent),
+            ai_diamond_spawn_rate_percent: parse_u64_field(&text, "ai_diamond_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_diamond_spawn_rate_percent),
+            ai_item_clear_above_rate_percent: parse_u64_field(
+                &text,
+                "ai_item_clear_above_rate_percent",
+            )
+            .map(|v| v as u32)
+            .unwrap_or(default.ai_item_clear_above_rate_percent),
+            ai_item_unify_colors_rate_percent: parse_u64_field(
+                &text,
+                "ai_item_unify_colors_rate_percent",
+            )
+            .map(|v| v as u32)
+            .unwrap_or(default.ai_item_unify_colors_rate_percent),
+            ai_item_starify_screen_rate_percent: parse_u64_field(
+                &text,
+                "ai_item_starify_screen_rate_percent",
+            )
+            .map(|v| v as u32)
+            .unwrap_or(default.ai_item_starify_screen_rate_percent),
+            ai_color_count: parse_u64_field(&text, "ai_color_count")
+                .map(|v| v as u8)
+                .unwrap_or(default.ai_color_count),
+            ai_color_cluster_rate_percent: parse_u64_field(&text, "ai_color_cluster_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_color_cluster_rate_percent),
+            ai_bomb_spawn_rate_percent: parse_u64_field(&text, "ai_bomb_spawn_rate_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_bomb_spawn_rate_percent),
+            ai_bomb_fuse_ms: parse_u64_field(&text, "ai_bomb_fuse_ms")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_bomb_fuse_ms),
+            ai_attack_blocks_per_rock: parse_u64_field(&text, "ai_attack_blocks_per_rock")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_attack_blocks_per_rock),
+            ai_attack_rocks_per_wave_max: parse_u64_field(&text, "ai_attack_rocks_per_wave_max")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_attack_rocks_per_wave_max),
+            ai_attack_blocks_per_bomb: parse_u64_field(&text, "ai_attack_blocks_per_bomb")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_attack_blocks_per_bomb),
+            ai_attack_bombs_per_wave_max: parse_u64_field(&text, "ai_attack_bombs_per_wave_max")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_attack_bombs_per_wave_max),
+            ai_attack_bomb_ratio_percent: parse_u64_field(&text, "ai_attack_bomb_ratio_percent")
+                .map(|v| v as u32)
+                .unwrap_or(default.ai_attack_bomb_ratio_percent),
+            ai_chain_vanish_interval_ms: parse_u64_field(&text, "ai_chain_vanish_interval_ms")
+                .unwrap_or(default.ai_chain_vanish_interval_ms),
         }
     }
 
@@ -295,7 +427,7 @@ impl Settings {
             return;
         }
         let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"bomb_fuse_ms\": {},\n  \"attack_blocks_per_rock\": {},\n  \"attack_rocks_per_wave_max\": {},\n  \"attack_blocks_per_bomb\": {},\n  \"attack_bombs_per_wave_max\": {},\n  \"attack_bomb_ratio_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {}\n}}\n",
+            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"bomb_fuse_ms\": {},\n  \"attack_blocks_per_rock\": {},\n  \"attack_rocks_per_wave_max\": {},\n  \"attack_blocks_per_bomb\": {},\n  \"attack_bombs_per_wave_max\": {},\n  \"attack_bomb_ratio_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {},\n  \"ai_block_fall_tick_ms\": {},\n  \"ai_player_fall_tick_ms\": {},\n  \"ai_shake_duration_ms\": {},\n  \"ai_rock_spawn_rate_percent\": {},\n  \"ai_air_spawn_rate_percent\": {},\n  \"ai_star_spawn_rate_percent\": {},\n  \"ai_diamond_spawn_rate_percent\": {},\n  \"ai_item_clear_above_rate_percent\": {},\n  \"ai_item_unify_colors_rate_percent\": {},\n  \"ai_item_starify_screen_rate_percent\": {},\n  \"ai_color_count\": {},\n  \"ai_color_cluster_rate_percent\": {},\n  \"ai_bomb_spawn_rate_percent\": {},\n  \"ai_bomb_fuse_ms\": {},\n  \"ai_attack_blocks_per_rock\": {},\n  \"ai_attack_rocks_per_wave_max\": {},\n  \"ai_attack_blocks_per_bomb\": {},\n  \"ai_attack_bombs_per_wave_max\": {},\n  \"ai_attack_bomb_ratio_percent\": {},\n  \"ai_chain_vanish_interval_ms\": {}\n}}\n",
             self.music_enabled,
             self.se_enabled,
             self.music_volume_percent,
@@ -325,7 +457,27 @@ impl Settings {
             self.debug_log_enabled,
             self.chain_vanish_interval_ms,
             self.last_course_depth_m,
-            self.rewind_stock_max
+            self.rewind_stock_max,
+            self.ai_block_fall_tick_ms,
+            self.ai_player_fall_tick_ms,
+            self.ai_shake_duration_ms,
+            self.ai_rock_spawn_rate_percent,
+            self.ai_air_spawn_rate_percent,
+            self.ai_star_spawn_rate_percent,
+            self.ai_diamond_spawn_rate_percent,
+            self.ai_item_clear_above_rate_percent,
+            self.ai_item_unify_colors_rate_percent,
+            self.ai_item_starify_screen_rate_percent,
+            self.ai_color_count,
+            self.ai_color_cluster_rate_percent,
+            self.ai_bomb_spawn_rate_percent,
+            self.ai_bomb_fuse_ms,
+            self.ai_attack_blocks_per_rock,
+            self.ai_attack_rocks_per_wave_max,
+            self.ai_attack_blocks_per_bomb,
+            self.ai_attack_bombs_per_wave_max,
+            self.ai_attack_bomb_ratio_percent,
+            self.ai_chain_vanish_interval_ms
         );
         // 一時ファイルへ書いてからrenameすることで保存をアトミックにする(TERM独自
         // 拡張。#158)。File::create+write_allをpathへ直接行うと、書き込み途中で
@@ -596,6 +748,28 @@ mod tests {
             chain_vanish_interval_ms: 150,
             last_course_depth_m: 500,
             rewind_stock_max: REWIND_STOCK_MAX_SETTING_MIN,
+            // AI専用値(#312)は対応する人間用の値とわざと別の値にしておく。JSONの
+            // 書き出し順とパース順がずれて取り違えられたらここで落ちる。
+            ai_block_fall_tick_ms: 500,
+            ai_player_fall_tick_ms: 450,
+            ai_shake_duration_ms: 800,
+            ai_rock_spawn_rate_percent: 11,
+            ai_air_spawn_rate_percent: 12,
+            ai_star_spawn_rate_percent: 13,
+            ai_diamond_spawn_rate_percent: 14,
+            ai_item_clear_above_rate_percent: 15,
+            ai_item_unify_colors_rate_percent: 16,
+            ai_item_starify_screen_rate_percent: 17,
+            ai_color_count: 3,
+            ai_color_cluster_rate_percent: 18,
+            ai_bomb_spawn_rate_percent: 19,
+            ai_bomb_fuse_ms: 7000,
+            ai_attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_MAX,
+            ai_attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_MAX,
+            ai_attack_blocks_per_bomb: ATTACK_BLOCKS_PER_BOMB_MAX,
+            ai_attack_bombs_per_wave_max: ATTACK_BOMBS_PER_WAVE_MAX_MAX,
+            ai_attack_bomb_ratio_percent: ATTACK_BOMB_RATIO_PERCENT_MAX,
+            ai_chain_vanish_interval_ms: 950,
         };
         a.save_to(&path);
         assert_eq!(Settings::load_from(&path), a);
@@ -631,9 +805,166 @@ mod tests {
             chain_vanish_interval_ms: 1000,
             last_course_depth_m: 1000,
             rewind_stock_max: REWIND_STOCK_MAX_SETTING_MAX,
+            ai_block_fall_tick_ms: 120,
+            ai_player_fall_tick_ms: 130,
+            ai_shake_duration_ms: 140,
+            ai_rock_spawn_rate_percent: 21,
+            ai_air_spawn_rate_percent: 22,
+            ai_star_spawn_rate_percent: 23,
+            ai_diamond_spawn_rate_percent: 24,
+            ai_item_clear_above_rate_percent: 25,
+            ai_item_unify_colors_rate_percent: 26,
+            ai_item_starify_screen_rate_percent: 27,
+            ai_color_count: 2,
+            ai_color_cluster_rate_percent: 28,
+            ai_bomb_spawn_rate_percent: 29,
+            ai_bomb_fuse_ms: 3000,
+            ai_attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_MIN,
+            ai_attack_rocks_per_wave_max: ATTACK_ROCKS_PER_WAVE_MAX_MIN,
+            ai_attack_blocks_per_bomb: ATTACK_BLOCKS_PER_BOMB_MIN,
+            ai_attack_bombs_per_wave_max: ATTACK_BOMBS_PER_WAVE_MAX_MIN,
+            ai_attack_bomb_ratio_percent: ATTACK_BOMB_RATIO_PERCENT_MIN,
+            ai_chain_vanish_interval_ms: 160,
         };
         b.save_to(&path);
         assert_eq!(Settings::load_from(&path), b);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// テスト専用: AI専用値(#312)20項目を、人間用のミラー元と同じ並びで数値化して返す。
+    /// 20項目を1つずつ書き並べると読めなくなるので、配列で一括比較できるようにしている。
+    fn ai_only_values(settings: &Settings) -> [u64; 20] {
+        [
+            settings.ai_block_fall_tick_ms,
+            settings.ai_player_fall_tick_ms,
+            settings.ai_shake_duration_ms,
+            settings.ai_rock_spawn_rate_percent as u64,
+            settings.ai_air_spawn_rate_percent as u64,
+            settings.ai_star_spawn_rate_percent as u64,
+            settings.ai_diamond_spawn_rate_percent as u64,
+            settings.ai_item_clear_above_rate_percent as u64,
+            settings.ai_item_unify_colors_rate_percent as u64,
+            settings.ai_item_starify_screen_rate_percent as u64,
+            settings.ai_color_count as u64,
+            settings.ai_color_cluster_rate_percent as u64,
+            settings.ai_bomb_spawn_rate_percent as u64,
+            settings.ai_bomb_fuse_ms as u64,
+            settings.ai_attack_blocks_per_rock as u64,
+            settings.ai_attack_rocks_per_wave_max as u64,
+            settings.ai_attack_blocks_per_bomb as u64,
+            settings.ai_attack_bombs_per_wave_max as u64,
+            settings.ai_attack_bomb_ratio_percent as u64,
+            settings.ai_chain_vanish_interval_ms,
+        ]
+    }
+
+    /// テスト専用: `ai_only_values`と同じ並びで人間用の値を返す。
+    fn human_mirrored_values(settings: &Settings) -> [u64; 20] {
+        [
+            settings.block_fall_tick_ms,
+            settings.player_fall_tick_ms,
+            settings.shake_duration_ms,
+            settings.rock_spawn_rate_percent as u64,
+            settings.air_spawn_rate_percent as u64,
+            settings.star_spawn_rate_percent as u64,
+            settings.diamond_spawn_rate_percent as u64,
+            settings.item_clear_above_rate_percent as u64,
+            settings.item_unify_colors_rate_percent as u64,
+            settings.item_starify_screen_rate_percent as u64,
+            settings.color_count as u64,
+            settings.color_cluster_rate_percent as u64,
+            settings.bomb_spawn_rate_percent as u64,
+            settings.bomb_fuse_ms as u64,
+            settings.attack_blocks_per_rock as u64,
+            settings.attack_rocks_per_wave_max as u64,
+            settings.attack_blocks_per_bomb as u64,
+            settings.attack_bombs_per_wave_max as u64,
+            settings.attack_bomb_ratio_percent as u64,
+            settings.chain_vanish_interval_ms,
+        ]
+    }
+
+    #[test]
+    fn default_settings_starts_the_ai_only_values_at_the_human_values() {
+        // #312: AI専用の初期値は用意せず人間用と同じ定数を使う。何も触らなければ
+        // 従来通りAIと人間が同条件で対戦する。
+        let settings = Settings::default();
+        assert_eq!(ai_only_values(&settings), human_mirrored_values(&settings));
+    }
+
+    #[test]
+    fn load_from_missing_ai_setting_keys_falls_back_to_defaults() {
+        // #312を追加する前に保存されたsettings.jsonにはai_*のキー自体が無い。
+        // 人間用の値だけが書かれたファイルを読んでも、AI専用値は既定値になる。
+        let path = temp_settings_path("ai-missing-keys");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"block_fall_tick_ms\": 77, \"color_count\": 2, \"attack_blocks_per_rock\": 33}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.block_fall_tick_ms, 77);
+        assert_eq!(loaded.color_count, 2);
+        assert_eq!(loaded.attack_blocks_per_rock, 33);
+        assert_eq!(
+            ai_only_values(&loaded),
+            ai_only_values(&Settings::default())
+        );
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_then_load_round_trips_the_ai_only_values_without_touching_the_human_ones() {
+        // #312: serdeを使わない手書きJSONなので、20項目のうち1つでも書き出しか
+        // パースを落とすと静かに既定値へ戻る。人間用と別の値を保存して、両方が
+        // 独立に復元されることを確認する。
+        let path = temp_settings_path("ai-roundtrip");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        let base = Settings::default();
+        let settings = Settings {
+            ai_block_fall_tick_ms: base.block_fall_tick_ms + 1,
+            ai_player_fall_tick_ms: base.player_fall_tick_ms + 2,
+            ai_shake_duration_ms: base.shake_duration_ms + 3,
+            ai_rock_spawn_rate_percent: base.rock_spawn_rate_percent + 4,
+            ai_air_spawn_rate_percent: base.air_spawn_rate_percent + 5,
+            ai_star_spawn_rate_percent: base.star_spawn_rate_percent + 6,
+            ai_diamond_spawn_rate_percent: base.diamond_spawn_rate_percent + 7,
+            ai_item_clear_above_rate_percent: base.item_clear_above_rate_percent + 8,
+            ai_item_unify_colors_rate_percent: base.item_unify_colors_rate_percent + 9,
+            ai_item_starify_screen_rate_percent: base.item_starify_screen_rate_percent + 10,
+            ai_color_count: base.color_count - 1,
+            ai_color_cluster_rate_percent: base.color_cluster_rate_percent + 11,
+            ai_bomb_spawn_rate_percent: base.bomb_spawn_rate_percent + 12,
+            ai_bomb_fuse_ms: base.bomb_fuse_ms + 13,
+            ai_attack_blocks_per_rock: base.attack_blocks_per_rock + 14,
+            ai_attack_rocks_per_wave_max: base.attack_rocks_per_wave_max + 15,
+            ai_attack_blocks_per_bomb: base.attack_blocks_per_bomb + 16,
+            ai_attack_bombs_per_wave_max: base.attack_bombs_per_wave_max + 17,
+            ai_attack_bomb_ratio_percent: base.attack_bomb_ratio_percent + 18,
+            ai_chain_vanish_interval_ms: base.chain_vanish_interval_ms + 19,
+            ..base
+        };
+        // 20項目すべてが人間用と別の値になっていないと、取り違えを検出できない。
+        assert_ne!(ai_only_values(&settings), human_mirrored_values(&settings));
+        for (ai, human) in ai_only_values(&settings)
+            .iter()
+            .zip(human_mirrored_values(&settings).iter())
+        {
+            assert_ne!(ai, human);
+        }
+
+        settings.save_to(&path);
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded, settings);
+        assert_eq!(human_mirrored_values(&loaded), human_mirrored_values(&base));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

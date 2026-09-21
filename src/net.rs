@@ -56,7 +56,12 @@ pub enum GameMessage {
     },
     /// ホスト(TCPサーバ役)のシミュレーション影響設定一式。クライアントは
     /// この値を対戦セッション中のみ強制適用する(自分のsettings.jsonへは保存しない)。
-    StartConfig(BattleConfig),
+    ///
+    /// 設定一式は項目数が多く(#312で20項目増えた)、このenum全体の大きさを決めてしまう。
+    /// 対戦中は`Input`等の小さなメッセージを毎フレーム扱うため、大きいのはこの1つだけに
+    /// 留めたい。ハンドシェイクで1回しか送らないので、間接参照にしても割に合う。
+    /// 直列化の結果は中身をそのまま書くだけで変わらないため、通信の互換性には影響しない。
+    StartConfig(Box<BattleConfig>),
     SeedAgree {
         seed: u64,
     },
@@ -178,6 +183,30 @@ pub struct BattleConfig {
     pub move_cooldown_ms: u64,
     pub dodge_recovery_ms: u64,
     pub chain_vanish_interval_ms: u64,
+    // 以下はAI専用のミラー値(#312)。AIを動かすのはホストだけ(#300)だが、ゲストも
+    // ゴースト表示(#301)や決着判定のためにAIの盤面コピーを手元でシミュレートするので、
+    // AI専用値もホストから配らないとゲスト側のコピーが別の地形になってしまう。
+    // 反応速度系(move_cooldown_ms/dodge_recovery_ms)はAI専用値を持たない。
+    pub ai_rock_spawn_rate_percent: u32,
+    pub ai_air_spawn_rate_percent: u32,
+    pub ai_star_spawn_rate_percent: u32,
+    pub ai_diamond_spawn_rate_percent: u32,
+    pub ai_item_clear_above_rate_percent: u32,
+    pub ai_item_unify_colors_rate_percent: u32,
+    pub ai_item_starify_screen_rate_percent: u32,
+    pub ai_color_count: u8,
+    pub ai_color_cluster_rate_percent: u32,
+    pub ai_bomb_spawn_rate_percent: u32,
+    pub ai_bomb_fuse_ms: u32,
+    pub ai_attack_blocks_per_rock: u32,
+    pub ai_attack_rocks_per_wave_max: u32,
+    pub ai_attack_blocks_per_bomb: u32,
+    pub ai_attack_bombs_per_wave_max: u32,
+    pub ai_attack_bomb_ratio_percent: u32,
+    pub ai_block_fall_tick_ms: u64,
+    pub ai_player_fall_tick_ms: u64,
+    pub ai_shake_duration_ms: u64,
+    pub ai_chain_vanish_interval_ms: u64,
 }
 
 impl BattleConfig {
@@ -210,6 +239,57 @@ impl BattleConfig {
             move_cooldown_ms: settings.move_cooldown_ms,
             dodge_recovery_ms: settings.dodge_recovery_ms,
             chain_vanish_interval_ms: settings.chain_vanish_interval_ms,
+            ai_rock_spawn_rate_percent: settings.ai_rock_spawn_rate_percent,
+            ai_air_spawn_rate_percent: settings.ai_air_spawn_rate_percent,
+            ai_star_spawn_rate_percent: settings.ai_star_spawn_rate_percent,
+            ai_diamond_spawn_rate_percent: settings.ai_diamond_spawn_rate_percent,
+            ai_item_clear_above_rate_percent: settings.ai_item_clear_above_rate_percent,
+            ai_item_unify_colors_rate_percent: settings.ai_item_unify_colors_rate_percent,
+            ai_item_starify_screen_rate_percent: settings.ai_item_starify_screen_rate_percent,
+            ai_color_count: settings.ai_color_count,
+            ai_color_cluster_rate_percent: settings.ai_color_cluster_rate_percent,
+            ai_bomb_spawn_rate_percent: settings.ai_bomb_spawn_rate_percent,
+            ai_bomb_fuse_ms: settings.ai_bomb_fuse_ms,
+            ai_attack_blocks_per_rock: settings.ai_attack_blocks_per_rock,
+            ai_attack_rocks_per_wave_max: settings.ai_attack_rocks_per_wave_max,
+            ai_attack_blocks_per_bomb: settings.ai_attack_blocks_per_bomb,
+            ai_attack_bombs_per_wave_max: settings.ai_attack_bombs_per_wave_max,
+            ai_attack_bomb_ratio_percent: settings.ai_attack_bomb_ratio_percent,
+            ai_block_fall_tick_ms: settings.ai_block_fall_tick_ms,
+            ai_player_fall_tick_ms: settings.ai_player_fall_tick_ms,
+            ai_shake_duration_ms: settings.ai_shake_duration_ms,
+            ai_chain_vanish_interval_ms: settings.ai_chain_vanish_interval_ms,
+        }
+    }
+
+    /// AI専用値(#312)を人間用の位置へ移した複製を返す。AIの盤面を作るときに使う。
+    /// Game組み立ての手順はAIでも同じなので、手順ごと複製して別経路にするのではなく
+    /// 値だけ差し替えて既存の組み立てを通し、手順が二重管理にならないようにしている。
+    pub fn with_ai_values(&self) -> Self {
+        Self {
+            rock_spawn_rate_percent: self.ai_rock_spawn_rate_percent,
+            air_spawn_rate_percent: self.ai_air_spawn_rate_percent,
+            star_spawn_rate_percent: self.ai_star_spawn_rate_percent,
+            diamond_spawn_rate_percent: self.ai_diamond_spawn_rate_percent,
+            item_clear_above_rate_percent: self.ai_item_clear_above_rate_percent,
+            item_unify_colors_rate_percent: self.ai_item_unify_colors_rate_percent,
+            item_starify_screen_rate_percent: self.ai_item_starify_screen_rate_percent,
+            color_count: self.ai_color_count,
+            color_cluster_rate_percent: self.ai_color_cluster_rate_percent,
+            bomb_spawn_rate_percent: self.ai_bomb_spawn_rate_percent,
+            bomb_fuse_ms: self.ai_bomb_fuse_ms,
+            attack_blocks_per_rock: self.ai_attack_blocks_per_rock,
+            attack_rocks_per_wave_max: self.ai_attack_rocks_per_wave_max,
+            attack_blocks_per_bomb: self.ai_attack_blocks_per_bomb,
+            attack_bombs_per_wave_max: self.ai_attack_bombs_per_wave_max,
+            attack_bomb_ratio_percent: self.ai_attack_bomb_ratio_percent,
+            block_fall_tick_ms: self.ai_block_fall_tick_ms,
+            player_fall_tick_ms: self.ai_player_fall_tick_ms,
+            shake_duration_ms: self.ai_shake_duration_ms,
+            chain_vanish_interval_ms: self.ai_chain_vanish_interval_ms,
+            // 盤面幅とゴール深度は全員同じでないと対戦が成立しない。反応速度系は
+            // AI専用値を持たないため、いずれも共通の値をそのまま残す。
+            ..*self
         }
     }
 }
@@ -286,7 +366,7 @@ pub fn run_host_handshake(
         },
     )?;
 
-    write_message(stream, &GameMessage::StartConfig(config))?;
+    write_message(stream, &GameMessage::StartConfig(Box::new(config)))?;
 
     // シードはホストがOS乱数から単独で決める(「どちらのシードを使うか」の合意
     // プロトコルを省略するための取り決め。spec.md 12.2ステップ3)。
@@ -323,7 +403,7 @@ pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result
     };
 
     let config = match read_message(stream)? {
-        GameMessage::StartConfig(config) => config,
+        GameMessage::StartConfig(config) => *config,
         other => return Err(unexpected_message("StartConfig", &other)),
     };
 
@@ -596,6 +676,27 @@ mod tests {
             move_cooldown_ms: 40,
             dodge_recovery_ms: 500,
             chain_vanish_interval_ms: 150,
+            // AI専用値(#312)も人間用とは別の値を入れ、取り違えを検出できるようにする。
+            ai_rock_spawn_rate_percent: 121,
+            ai_air_spawn_rate_percent: 81,
+            ai_star_spawn_rate_percent: 61,
+            ai_diamond_spawn_rate_percent: 41,
+            ai_item_clear_above_rate_percent: 111,
+            ai_item_unify_colors_rate_percent: 91,
+            ai_item_starify_screen_rate_percent: 71,
+            ai_color_count: 2,
+            ai_color_cluster_rate_percent: 131,
+            ai_bomb_spawn_rate_percent: 151,
+            ai_bomb_fuse_ms: 2600,
+            ai_attack_blocks_per_rock: 7,
+            ai_attack_rocks_per_wave_max: 1,
+            ai_attack_blocks_per_bomb: 19,
+            ai_attack_bombs_per_wave_max: 4,
+            ai_attack_bomb_ratio_percent: 26,
+            ai_block_fall_tick_ms: 210,
+            ai_player_fall_tick_ms: 110,
+            ai_shake_duration_ms: 310,
+            ai_chain_vanish_interval_ms: 160,
         }
     }
 
@@ -637,7 +738,7 @@ mod tests {
             ],
             your_index: 1,
         });
-        assert_round_trips(&GameMessage::StartConfig(test_config()));
+        assert_round_trips(&GameMessage::StartConfig(Box::new(test_config())));
         assert_round_trips(&GameMessage::SeedAgree {
             seed: 0xdead_beef_0123_4567,
         });
@@ -675,6 +776,18 @@ mod tests {
             proxy_for: Some(1),
         });
         assert_round_trips(&GameMessage::Bye);
+    }
+
+    #[test]
+    fn boxing_the_start_config_payload_keeps_the_encoded_bytes_unchanged() {
+        // #312で`StartConfig`の中身を間接参照へ移した。直列化の結果が中身をそのまま
+        // 書いたものと同じでなければ、この変更だけで通信の互換性が壊れる。
+        let config = test_config();
+
+        let boxed = bincode::serde::encode_to_vec(Box::new(config), bincode_config()).unwrap();
+        let direct = bincode::serde::encode_to_vec(config, bincode_config()).unwrap();
+
+        assert_eq!(boxed, direct);
     }
 
     #[test]
@@ -912,6 +1025,26 @@ mod tests {
             move_cooldown_ms: 40,
             dodge_recovery_ms: 500,
             chain_vanish_interval_ms: 150,
+            ai_rock_spawn_rate_percent: 20,
+            ai_air_spawn_rate_percent: 180,
+            ai_star_spawn_rate_percent: 160,
+            ai_diamond_spawn_rate_percent: 140,
+            ai_item_clear_above_rate_percent: 10,
+            ai_item_unify_colors_rate_percent: 190,
+            ai_item_starify_screen_rate_percent: 170,
+            ai_color_count: 1,
+            ai_color_cluster_rate_percent: 30,
+            ai_bomb_spawn_rate_percent: 50,
+            ai_bomb_fuse_ms: 3500,
+            ai_attack_blocks_per_rock: 16,
+            ai_attack_rocks_per_wave_max: 5,
+            ai_attack_blocks_per_bomb: 28,
+            ai_attack_bombs_per_wave_max: 1,
+            ai_attack_bomb_ratio_percent: 75,
+            ai_block_fall_tick_ms: 400,
+            ai_player_fall_tick_ms: 350,
+            ai_shake_duration_ms: 700,
+            ai_chain_vanish_interval_ms: 900,
             ..Default::default()
         };
 
@@ -944,8 +1077,99 @@ mod tests {
                 move_cooldown_ms: 40,
                 dodge_recovery_ms: 500,
                 chain_vanish_interval_ms: 150,
+                ai_rock_spawn_rate_percent: 20,
+                ai_air_spawn_rate_percent: 180,
+                ai_star_spawn_rate_percent: 160,
+                ai_diamond_spawn_rate_percent: 140,
+                ai_item_clear_above_rate_percent: 10,
+                ai_item_unify_colors_rate_percent: 190,
+                ai_item_starify_screen_rate_percent: 170,
+                ai_color_count: 1,
+                ai_color_cluster_rate_percent: 30,
+                ai_bomb_spawn_rate_percent: 50,
+                ai_bomb_fuse_ms: 3500,
+                ai_attack_blocks_per_rock: 16,
+                ai_attack_rocks_per_wave_max: 5,
+                ai_attack_blocks_per_bomb: 28,
+                ai_attack_bombs_per_wave_max: 1,
+                ai_attack_bomb_ratio_percent: 75,
+                ai_block_fall_tick_ms: 400,
+                ai_player_fall_tick_ms: 350,
+                ai_shake_duration_ms: 700,
+                ai_chain_vanish_interval_ms: 900,
             }
         );
+    }
+
+    #[test]
+    fn with_ai_values_replaces_only_the_twenty_mirrored_values() {
+        // #312: AI用のGameを組み立てるときに、20項目がAI専用値へ入れ替わり、
+        // 盤面幅・ゴール深度・反応速度系は共通の値のまま残ることを確認する。
+        let config = test_config();
+
+        let ai = config.with_ai_values();
+
+        assert_eq!(
+            ai.rock_spawn_rate_percent,
+            config.ai_rock_spawn_rate_percent
+        );
+        assert_eq!(ai.air_spawn_rate_percent, config.ai_air_spawn_rate_percent);
+        assert_eq!(
+            ai.star_spawn_rate_percent,
+            config.ai_star_spawn_rate_percent
+        );
+        assert_eq!(
+            ai.diamond_spawn_rate_percent,
+            config.ai_diamond_spawn_rate_percent
+        );
+        assert_eq!(
+            ai.item_clear_above_rate_percent,
+            config.ai_item_clear_above_rate_percent
+        );
+        assert_eq!(
+            ai.item_unify_colors_rate_percent,
+            config.ai_item_unify_colors_rate_percent
+        );
+        assert_eq!(
+            ai.item_starify_screen_rate_percent,
+            config.ai_item_starify_screen_rate_percent
+        );
+        assert_eq!(ai.color_count, config.ai_color_count);
+        assert_eq!(
+            ai.color_cluster_rate_percent,
+            config.ai_color_cluster_rate_percent
+        );
+        assert_eq!(
+            ai.bomb_spawn_rate_percent,
+            config.ai_bomb_spawn_rate_percent
+        );
+        assert_eq!(ai.bomb_fuse_ms, config.ai_bomb_fuse_ms);
+        assert_eq!(ai.attack_blocks_per_rock, config.ai_attack_blocks_per_rock);
+        assert_eq!(
+            ai.attack_rocks_per_wave_max,
+            config.ai_attack_rocks_per_wave_max
+        );
+        assert_eq!(ai.attack_blocks_per_bomb, config.ai_attack_blocks_per_bomb);
+        assert_eq!(
+            ai.attack_bombs_per_wave_max,
+            config.ai_attack_bombs_per_wave_max
+        );
+        assert_eq!(
+            ai.attack_bomb_ratio_percent,
+            config.ai_attack_bomb_ratio_percent
+        );
+        assert_eq!(ai.block_fall_tick_ms, config.ai_block_fall_tick_ms);
+        assert_eq!(ai.player_fall_tick_ms, config.ai_player_fall_tick_ms);
+        assert_eq!(ai.shake_duration_ms, config.ai_shake_duration_ms);
+        assert_eq!(
+            ai.chain_vanish_interval_ms,
+            config.ai_chain_vanish_interval_ms
+        );
+
+        assert_eq!(ai.depth_goal_m, config.depth_goal_m);
+        assert_eq!(ai.field_width, config.field_width);
+        assert_eq!(ai.move_cooldown_ms, config.move_cooldown_ms);
+        assert_eq!(ai.dodge_recovery_ms, config.dodge_recovery_ms);
     }
 
     /// ループバックTCPで1組の接続を作り、`(受信スレッドへ渡す側, 送りつける側)`を返す。

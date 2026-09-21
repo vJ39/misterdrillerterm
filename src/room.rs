@@ -97,7 +97,7 @@ pub fn start_room_as_host(
                 your_index: guest_index + 1,
             },
         )?;
-        net::write_message(stream, &GameMessage::StartConfig(config))?;
+        net::write_message(stream, &GameMessage::StartConfig(Box::new(config)))?;
         net::write_message(stream, &GameMessage::SeedAgree { seed })?;
         net::write_message(stream, &GameMessage::StartCountdown { start_at_unix_ms })?;
     }
@@ -191,7 +191,7 @@ pub fn await_room_start(
     members[0].mesh_addr = Some(resolve_host_mesh_addr(host_mesh_addr, host_addr));
 
     let config = match net::read_message(&mut room_stream)? {
-        GameMessage::StartConfig(config) => config,
+        GameMessage::StartConfig(config) => *config,
         other => return Err(net::unexpected_message("StartConfig", &other)),
     };
     let seed = match net::read_message(&mut room_stream)? {
