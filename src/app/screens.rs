@@ -795,6 +795,71 @@ fn first_local_action(actions: &[InputAction], is_local_ai_only: bool) -> Option
     )
 }
 
+/// 待機中の観戦対象(#271)を左右キーで進める。`other_games`のうち`GameStatus::Playing`
+/// の相手だけを候補にし、「観戦なし」を挟んで周回する。`forward`はtrueなら右方向
+/// (次の候補)、falseなら左方向(前の候補)。候補が誰もいなければ常にNoneのまま。
+fn next_spectate_target(
+    other_games: &[Game],
+    current: Option<usize>,
+    forward: bool,
+) -> Option<usize> {
+    let candidates: Vec<usize> = other_games
+        .iter()
+        .enumerate()
+        .filter(|(_, game)| game.status == GameStatus::Playing)
+        .map(|(index, _)| index)
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let current_pos = current.and_then(|i| candidates.iter().position(|&c| c == i));
+
+    match current_pos {
+        Some(pos) if forward => candidates.get(pos + 1).copied(),
+        Some(0) => None,
+        Some(pos) => candidates.get(pos - 1).copied(),
+        // 観戦なし(current=None)から入るときは、進む方向の端(候補の先頭/末尾)から入る。
+        None if current.is_none() => Some(if forward {
+            candidates[0]
+        } else {
+            *candidates
+                .last()
+                .expect("candidatesが空でないことは確認済み")
+        }),
+        // 選んでいた相手が決着してPlaying中でなくなっていた場合は観戦なしへ戻す
+        // (次にGameOverになった時点でNoneに戻すのが自然)。
+        None => None,
+    }
+}
+
+/// 待機中(#302)の左右キーを、観戦切り替え(#271)としてこのフレームの入力から取り除く。
+/// 取り除いたキーで`next_spectate_target`を呼んで観戦対象を更新し、残りの入力はそのまま
+/// `classify_battle_input`/`first_local_action`へ渡せるよう返す。待機中でなければ観戦対象は
+/// Noneへ戻し、入力もそのまま返す。
+fn apply_battle_spectate_keys(
+    is_waiting: bool,
+    other_games: &[Game],
+    spectate_index: Option<usize>,
+    actions: &[InputAction],
+) -> (Option<usize>, Vec<InputAction>) {
+    if !is_waiting {
+        return (None, actions.to_vec());
+    }
+
+    let mut index = spectate_index;
+    let mut remaining = Vec::with_capacity(actions.len());
+    for &action in actions {
+        match action {
+            InputAction::MoveRight => index = next_spectate_target(other_games, index, true),
+            InputAction::MoveLeft => index = next_spectate_target(other_games, index, false),
+            other => remaining.push(other),
+        }
+    }
+    (index, remaining)
+}
+
 /// 対戦中(`Screen::Battle`)の1フレーム(#252。spec.md 12章)。
 ///
 /// 通常プレイの`tick_playing`とは独立した関数にしている(あちらへ対戦用の分岐を混ぜると
@@ -819,6 +884,19 @@ pub fn tick_battle(
         state.notify_bye();
         return Ok(Some(battle_exit_transition(&state.player_names[0])));
     }
+
+    // #271: 自分が力尽きて待機中は左右キーの意味が無くなるため、他の参加者を観戦する
+    // 切り替えとして横取りする。横取りしたキーは以後の`classify_battle_input`/
+    // `first_local_action`には渡さない。
+    let is_waiting =
+        ui::render::battle_local_is_waiting_for_others(state.predicted_game(), state.outcome());
+    let (spectate_index, actions) = apply_battle_spectate_keys(
+        is_waiting,
+        &state.games[1..],
+        app.battle_spectate_index,
+        &actions,
+    );
+    app.battle_spectate_index = spectate_index;
 
     for &action in &actions {
         match classify_battle_input(action, is_local_ai_only) {
@@ -877,6 +955,7 @@ pub fn tick_battle(
             music_on,
             se_on,
             outcome,
+            app.battle_spectate_index,
         )
     })?;
 
@@ -1826,6 +1905,142 @@ mod tests {
             }
             _ => panic!("決着後は表示名の入力画面へ戻るはず"),
         }
+    }
+
+    // --- 待機中の観戦(#271) ---
+
+    #[test]
+    fn spectate_cycles_forward_through_playing_opponents_and_back_to_none() {
+        // 自分以外2人、両方Playing中。
+        let other_games = vec![Game::new(1), Game::new(2)];
+
+        let first = next_spectate_target(&other_games, None, true);
+        assert_eq!(first, Some(0), "観戦なしから右キーで1人目へ");
+
+        let second = next_spectate_target(&other_games, first, true);
+        assert_eq!(second, Some(1), "右キーで2人目へ");
+
+        let back_to_none = next_spectate_target(&other_games, second, true);
+        assert_eq!(back_to_none, None, "末尾を超えたら観戦なしに戻る(周回)");
+
+        let wrapped = next_spectate_target(&other_games, back_to_none, true);
+        assert_eq!(wrapped, Some(0), "観戦なしから再度右キーで1人目へ(周回)");
+    }
+
+    #[test]
+    fn spectate_cycles_backward_in_reverse_order() {
+        let other_games = vec![Game::new(1), Game::new(2)];
+
+        let last = next_spectate_target(&other_games, None, false);
+        assert_eq!(last, Some(1), "観戦なしから左キーで末尾(2人目)へ");
+
+        let prev = next_spectate_target(&other_games, last, false);
+        assert_eq!(prev, Some(0), "左キーで前(1人目)へ");
+
+        let back_to_none = next_spectate_target(&other_games, prev, false);
+        assert_eq!(back_to_none, None, "先頭より前は観戦なしに戻る(周回)");
+    }
+
+    #[test]
+    fn spectate_has_no_target_when_nobody_is_still_playing() {
+        let mut other_games = vec![Game::new(1), Game::new(2)];
+        other_games[0].status = GameStatus::GameOver;
+        other_games[1].status = GameStatus::Cleared;
+
+        assert_eq!(next_spectate_target(&other_games, None, true), None);
+        assert_eq!(next_spectate_target(&other_games, None, false), None);
+        assert_eq!(next_spectate_target(&other_games, Some(0), true), None);
+    }
+
+    #[test]
+    fn spectate_skips_opponents_who_already_finished() {
+        // 自分以外3人のうち中央(index 1)だけ決着済み。候補はindex 0と2の2人。
+        let mut other_games = vec![Game::new(1), Game::new(2), Game::new(3)];
+        other_games[1].status = GameStatus::GameOver;
+
+        let first = next_spectate_target(&other_games, None, true);
+        assert_eq!(first, Some(0), "決着済みのindex 1は候補から外れるはず");
+
+        let second = next_spectate_target(&other_games, first, true);
+        assert_eq!(second, Some(2), "次の候補はindex 1を飛ばしてindex 2");
+    }
+
+    #[test]
+    fn spectate_returns_to_none_once_the_watched_opponent_finishes() {
+        // index 1を観戦していたが、その後決着してPlaying中でなくなった。
+        let mut other_games = vec![Game::new(1), Game::new(2)];
+        let watching = next_spectate_target(&other_games, None, true);
+        let watching_second = next_spectate_target(&other_games, watching, true);
+        assert_eq!(watching_second, Some(1), "前提: index 1を観戦している");
+
+        other_games[1].status = GameStatus::GameOver;
+
+        assert_eq!(
+            next_spectate_target(&other_games, watching_second, true),
+            None,
+            "観戦中の相手が決着したら観戦なしへ戻るはず"
+        );
+        assert_eq!(
+            next_spectate_target(&other_games, watching_second, false),
+            None,
+            "方向に関わらず観戦なしへ戻るはず"
+        );
+    }
+
+    #[test]
+    fn spectate_keys_are_captured_while_waiting_for_others() {
+        // 待機中の右キーは、通常の対戦入力へは渡さず観戦切り替えとして消費する。
+        let other_games = vec![Game::new(1), Game::new(2)];
+        let (index, remaining) =
+            apply_battle_spectate_keys(true, &other_games, None, &[InputAction::MoveRight]);
+
+        assert_eq!(index, Some(0), "待機中の右キーは1人目の観戦を開始するはず");
+        assert!(
+            remaining.is_empty(),
+            "観戦切り替えに使った左右キーは残りの入力から取り除くはず"
+        );
+    }
+
+    #[test]
+    fn spectate_keys_leave_other_actions_in_the_remaining_queue() {
+        // 左右キー以外(音声トグル・掘削等)は観戦切り替えの対象外なので素通りする。
+        let other_games = vec![Game::new(1), Game::new(2)];
+        let (index, remaining) = apply_battle_spectate_keys(
+            true,
+            &other_games,
+            None,
+            &[
+                InputAction::ToggleMusic,
+                InputAction::MoveRight,
+                InputAction::Drill,
+            ],
+        );
+
+        assert_eq!(index, Some(0));
+        assert_eq!(
+            remaining,
+            vec![InputAction::ToggleMusic, InputAction::Drill],
+            "観戦切り替え専用の左右キーだけを取り除き、他の入力はそのまま残すはず"
+        );
+    }
+
+    #[test]
+    fn spectate_keys_pass_through_unchanged_when_not_waiting() {
+        // 待機中でなければ左右キーは通常の移動操作のまま(観戦切り替えとしては扱わない)。
+        let other_games = vec![Game::new(1), Game::new(2)];
+        let (index, remaining) = apply_battle_spectate_keys(
+            false,
+            &other_games,
+            Some(0),
+            &[InputAction::MoveRight, InputAction::Drill],
+        );
+
+        assert_eq!(index, None, "待機中でなくなったら観戦対象はNoneに戻すはず");
+        assert_eq!(
+            remaining,
+            vec![InputAction::MoveRight, InputAction::Drill],
+            "待機中でなければ左右キーも通常の対戦入力としてそのまま残すはず"
+        );
     }
 
     // --- ロビーのAI専用設定オーバーレイ(#312) ---

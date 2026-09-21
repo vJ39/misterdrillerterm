@@ -321,6 +321,8 @@ fn on_off_label(enabled: bool) -> &'static str {
 /// 対応する。パネルは全員ぶんを縦に積み(#290)、あわせて各参加者の現在位置を自分の盤面へ
 /// ゴーストとして重ねる(#301)。
 /// `outcome`が`Some`なら決着しているので、結果を中央に重ねる(#256)。
+/// `spectate_index`は待機中の観戦対象(#271)。
+#[allow(clippy::too_many_arguments)]
 pub fn draw_battle(
     frame: &mut Frame,
     game_local: &Game,
@@ -329,13 +331,102 @@ pub fn draw_battle(
     music_enabled: bool,
     se_enabled: bool,
     outcome: Option<BattleOutcome>,
+    spectate_index: Option<usize>,
 ) {
+    // 待機中(#302)に限り、指定indexの相手がまだPlaying中なら観戦対象として扱う(#271)。
+    // 決着前・決着後は観戦モードに入らない。観戦対象が決着した直後は`draw`が
+    // CLEAR!/GameOverダイアログを出してしまい対戦の文脈と噛み合わないため、Playing中
+    // でなくなった時点で通常の待機オーバーレイに戻す(次に左右キーを押せば
+    // `next_spectate_target`が観戦対象をNoneへ補正する)。
+    let spectating = if battle_local_is_waiting_for_others(game_local, outcome) {
+        spectate_index.and_then(|index| {
+            other_games
+                .get(index)
+                .filter(|game| game.status == GameStatus::Playing)
+                .map(|game| (index, game))
+        })
+    } else {
+        None
+    };
+
+    let game_frame = match spectating {
+        Some((index, game)) => draw_battle_spectating(
+            frame,
+            game,
+            other_games,
+            opponent_names,
+            index,
+            music_enabled,
+            se_enabled,
+        ),
+        None => draw_battle_own_board(
+            frame,
+            game_local,
+            other_games,
+            opponent_names,
+            outcome,
+            music_enabled,
+            se_enabled,
+        ),
+    };
+    let Some(game_frame) = game_frame else {
+        return;
+    };
+
+    // 決着していれば結果を中央に重ねる(#256)。観戦中かどうかに関わらず常に描画する。
+    if let Some(outcome) = outcome {
+        draw_overlay(
+            frame,
+            game_frame,
+            &battle_outcome_message(outcome),
+            &["Enter/Escキーでタイトルへ"],
+        );
+    }
+}
+
+/// 待機中(#302)に他プレイヤー/AIの盤面を観戦する(#271)。自分の盤面の代わりに
+/// 観戦対象の盤面をフルに描画し、ゴースト・相手パネル・待機オーバーレイの代わりに
+/// 観戦中の案内を出す。端末が小さすぎて`draw`が縮退表示した場合は`None`を返す。
+fn draw_battle_spectating(
+    frame: &mut Frame,
+    game: &Game,
+    other_games: &[Game],
+    opponent_names: &[String],
+    index: usize,
+    music_enabled: bool,
+    se_enabled: bool,
+) -> Option<Rect> {
+    // オートプレイは対戦では使わないため常にfalseを渡す。
+    draw(frame, game, music_enabled, se_enabled, false);
+
+    let area = frame.area();
+    if area.width < MIN_TERMINAL_W || area.height < MIN_TERMINAL_H {
+        return None;
+    }
+
+    let plan = compute_layout(area, game.board.width());
+    draw_spectate_banner(frame, plan.game_frame, opponent_names, other_games, index);
+    Some(plan.game_frame)
+}
+
+/// 観戦なし(通常時)の対戦画面。自分の盤面に相手のゴースト(#301)・相手パネル(#290)を
+/// 重ね、自分が待機中なら通常プレイのGameOverダイアログを覆い隠す(#302)。端末が
+/// 小さすぎて`draw`が縮退表示した場合は`None`を返す。
+fn draw_battle_own_board(
+    frame: &mut Frame,
+    game_local: &Game,
+    other_games: &[Game],
+    opponent_names: &[String],
+    outcome: Option<BattleOutcome>,
+    music_enabled: bool,
+    se_enabled: bool,
+) -> Option<Rect> {
     // オートプレイは対戦では使わないため常にfalseを渡す。
     draw(frame, game_local, music_enabled, se_enabled, false);
 
     let area = frame.area();
     if area.width < MIN_TERMINAL_W || area.height < MIN_TERMINAL_H {
-        return;
+        return None;
     }
 
     let plan = compute_layout(area, game_local.board.width());
@@ -373,16 +464,47 @@ pub fn draw_battle(
         );
     }
 
-    // 決着していれば結果を中央に重ねる(#256)。盤面・相手パネルはそのまま残し、
-    // 最後の状態を見ながら結果を確認できるようにする。
-    if let Some(outcome) = outcome {
-        draw_overlay(
-            frame,
-            plan.game_frame,
-            &battle_outcome_message(outcome),
-            &["Enter/Escキーでタイトルへ"],
-        );
-    }
+    Some(plan.game_frame)
+}
+
+/// 観戦中(#271)の案内を1行で示す。誰を観戦しているか・切替キーを表示する。相手パネルと
+/// 同じく画面下端へ寄せ、既存の待機オーバーレイと同じ位置感覚にする。
+fn draw_spectate_banner(
+    frame: &mut Frame,
+    game_frame: Rect,
+    opponent_names: &[String],
+    other_games: &[Game],
+    index: usize,
+) {
+    let name = opponent_names.get(index).map_or("", String::as_str);
+
+    // 表示順はnext_spectate_targetの巡回順(Playing中のみ)と揃える。観戦対象が決着して
+    // Playing中でなくなった直後の1フレームだけ候補から外れうるが、その場合も表示は欠かさず
+    // 末尾番号にする。
+    let playing_indices: Vec<usize> = other_games
+        .iter()
+        .enumerate()
+        .filter(|(_, game)| game.status == GameStatus::Playing)
+        .map(|(i, _)| i)
+        .collect();
+    let count = playing_indices.len();
+    let position = playing_indices
+        .iter()
+        .position(|&i| i == index)
+        .map_or(count, |pos| pos + 1);
+
+    let area = bottom_anchored_rect(90, 1, game_frame);
+    frame.render_widget(Clear, area);
+    let paragraph = Paragraph::new(format!(
+        "観戦中: {name} ({position}/{count})  \u{2190}\u{2192}で切替"
+    ))
+    .style(
+        Style::default()
+            .fg(colors::PANEL_TEXT)
+            .bg(colors::LETTERBOX_BG),
+    )
+    .alignment(Alignment::Center);
+    frame.render_widget(paragraph, area);
 }
 
 /// 相手パネルの高さ(行数)。自分以外の参加者を1人1行で縦に積み、上下ボーダー2行を
@@ -446,7 +568,12 @@ fn draw_battle_opponent_panel(
 
 /// 自分が力尽きた後、他の参加者の決着を待っている状態か(#302)。`draw`がGameOver
 /// ダイアログを出すのと同じ条件(「天に召される」演出を見せ切った後)で切り替える。
-fn battle_local_is_waiting_for_others(game_local: &Game, outcome: Option<BattleOutcome>) -> bool {
+/// 対戦の入力処理(`tick_battle`)でも観戦切り替え(#271)の判定に使うため
+/// `pub(crate)`にしている。
+pub(crate) fn battle_local_is_waiting_for_others(
+    game_local: &Game,
+    outcome: Option<BattleOutcome>,
+) -> bool {
     outcome.is_none()
         && game_local.status == GameStatus::GameOver
         && !game_local.crush_flash_active()
@@ -4889,6 +5016,7 @@ mod tests {
                     true,
                     true,
                     Some(BattleOutcome::Ranked(rank)),
+                    None,
                 )
             });
 
@@ -4912,7 +5040,7 @@ mod tests {
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
         let (others, names) = single_opponent("opponent");
         let text = rendered_screen_text(|frame| {
-            draw_battle(frame, &game, &others, &names, true, true, None)
+            draw_battle(frame, &game, &others, &names, true, true, None, None)
         });
 
         assert!(
@@ -4941,7 +5069,7 @@ mod tests {
         }
 
         let text = rendered_screen_text(|frame| {
-            draw_battle(frame, &game, &others, &names, true, true, None)
+            draw_battle(frame, &game, &others, &names, true, true, None, None)
         });
 
         for (index, name) in names.iter().enumerate() {
@@ -4989,7 +5117,7 @@ mod tests {
             .collect();
 
         let text = rendered_screen_text(|frame| {
-            draw_battle(frame, &game, &others, &names, true, true, None)
+            draw_battle(frame, &game, &others, &names, true, true, None, None)
         });
 
         for (index, name) in names.iter().enumerate() {
@@ -5008,8 +5136,9 @@ mod tests {
     fn the_battle_screen_draws_no_opponent_panel_without_other_players() {
         // 相手がいない(全員抜けた等)場合はパネルを出さない。
         let game = Game::new_with_width(1, FIELD_WIDTH, 100);
-        let text =
-            rendered_screen_text(|frame| draw_battle(frame, &game, &[], &[], true, true, None));
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &game, &[], &[], true, true, None, None)
+        });
         assert!(
             !screen_shows(&text, "OPPONENT:"),
             "相手がいないのにパネルが出ている:\n{text}"
@@ -5184,7 +5313,7 @@ mod tests {
         let (others, names) = single_opponent("opponent");
 
         let text = rendered_screen_text(|frame| {
-            draw_battle(frame, &local, &others, &names, true, true, None)
+            draw_battle(frame, &local, &others, &names, true, true, None, None)
         });
 
         assert!(
@@ -5225,6 +5354,7 @@ mod tests {
                 true,
                 true,
                 Some(BattleOutcome::Ranked(2)),
+                None,
             )
         });
 
@@ -5246,7 +5376,7 @@ mod tests {
         let (others, names) = single_opponent("opponent");
 
         let text = rendered_screen_text(|frame| {
-            draw_battle(frame, &local, &others, &names, true, true, None)
+            draw_battle(frame, &local, &others, &names, true, true, None, None)
         });
         assert!(
             !screen_shows(&text, "対戦終了までお待ちください"),
@@ -5268,6 +5398,160 @@ mod tests {
         assert!(
             !battle_local_is_waiting_for_others(&playing, None),
             "プレイ中は待機ではない"
+        );
+    }
+
+    // --- 待機中の観戦(#271) ---
+
+    #[test]
+    fn the_battle_screen_shows_the_spectated_opponents_board_while_waiting() {
+        // 待機中にspectate_indexを指定すると、自分の盤面の代わりに観戦対象の盤面を
+        // HUD込みでフルに描画する。スコアは相手パネルには出ない値なので、これが画面に
+        // 出ていれば観戦対象のHUDが描かれた証拠になる。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let mut opponent = Game::new_with_width(2, FIELD_WIDTH, 100);
+        opponent.player.score = 424_242;
+        let others = vec![opponent];
+        let names = vec!["opponent".to_string()];
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None, Some(0))
+        });
+
+        assert!(
+            screen_shows(&text, "424,242"),
+            "観戦対象のスコア(HUD)が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "観戦中: opponent"),
+            "誰を観戦しているかの案内が出ていない:\n{text}"
+        );
+        assert!(
+            screen_shows(&text, "\u{2190}\u{2192}"),
+            "切替キーの案内が出ていない:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "対戦終了までお待ちください"),
+            "観戦中は待機オーバーレイの代わりに観戦画面を出すはず:\n{text}"
+        );
+    }
+
+    #[test]
+    fn the_battle_screen_keeps_the_default_waiting_view_without_a_spectate_index() {
+        // spectate_indexがNoneなら、待機中でも従来通り(ゴースト・パネル・待機オーバーレイ)
+        // の見た目のまま(観戦モードには入らない)。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let (others, names) = single_opponent("opponent");
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None, None)
+        });
+
+        assert!(
+            screen_shows(&text, "対戦終了までお待ちください"),
+            "spectate_indexがNoneなら待機オーバーレイが出るはず:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "観戦中"),
+            "spectate_indexがNoneなら観戦中の案内は出ないはず:\n{text}"
+        );
+    }
+
+    #[test]
+    fn spectating_does_not_start_before_the_local_player_is_out_or_after_the_battle_ends() {
+        // 観戦モードに入るのは自分が待機中(GameOverで決着待ち)の間だけ。
+        let (others, names) = single_opponent("opponent");
+
+        // まだPlaying中(自分が生きている)。
+        let playing = Game::new_with_width(1, FIELD_WIDTH, 100);
+        let text_while_playing = rendered_screen_text(|frame| {
+            draw_battle(frame, &playing, &others, &names, true, true, None, Some(0))
+        });
+        assert!(
+            !screen_shows(&text_while_playing, "観戦中"),
+            "自分がまだPlaying中は観戦モードに入らないはず:\n{text_while_playing}"
+        );
+
+        // 対戦全体が決着済み(自分もGameOver、outcomeがSome)。
+        let mut over = Game::new_with_width(1, FIELD_WIDTH, 100);
+        over.status = GameStatus::GameOver;
+        let text_after_outcome = rendered_screen_text(|frame| {
+            draw_battle(
+                frame,
+                &over,
+                &others,
+                &names,
+                true,
+                true,
+                Some(BattleOutcome::Ranked(1)),
+                Some(0),
+            )
+        });
+        assert!(
+            !screen_shows(&text_after_outcome, "観戦中"),
+            "対戦全体が決着した後は観戦モードに入らないはず:\n{text_after_outcome}"
+        );
+    }
+
+    #[test]
+    fn spectating_falls_back_to_the_default_view_when_the_index_is_out_of_range() {
+        // 観戦対象が範囲外(例えば選んでいた相手がルームを抜けた等)ならパニックせず、
+        // 通常の待機オーバーレイに戻る。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let (others, names) = single_opponent("opponent");
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None, Some(5))
+        });
+
+        assert!(
+            screen_shows(&text, "対戦終了までお待ちください"),
+            "範囲外のindexなら通常の待機オーバーレイに戻るはず:\n{text}"
+        );
+    }
+
+    #[test]
+    fn spectating_falls_back_to_the_default_view_once_the_watched_opponent_clears() {
+        // 観戦対象がゴールした直後、`draw`のCLEAR!ダイアログが観戦画面に出るのは
+        // 対戦の文脈と噛み合わないため、通常の待機オーバーレイに戻すはず。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let (mut others, names) = single_opponent("opponent");
+        others[0].status = GameStatus::Cleared;
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None, Some(0))
+        });
+
+        assert!(
+            screen_shows(&text, "対戦終了までお待ちください"),
+            "観戦対象が決着したら通常の待機オーバーレイに戻るはず:\n{text}"
+        );
+        assert!(
+            !screen_shows(&text, "CLEAR"),
+            "観戦対象個人のCLEAR!ダイアログを観戦画面に出してはいけない:\n{text}"
+        );
+    }
+
+    #[test]
+    fn spectating_falls_back_to_the_default_view_once_the_watched_opponent_drops_out() {
+        // 観戦対象が脱落した直後も同様に、個人のGameOverダイアログではなく通常の
+        // 待機オーバーレイに戻すはず。
+        let mut local = Game::new_with_width(1, FIELD_WIDTH, 100);
+        local.status = GameStatus::GameOver;
+        let (mut others, names) = single_opponent("opponent");
+        others[0].status = GameStatus::GameOver;
+
+        let text = rendered_screen_text(|frame| {
+            draw_battle(frame, &local, &others, &names, true, true, None, Some(0))
+        });
+
+        assert!(
+            screen_shows(&text, "対戦終了までお待ちください"),
+            "観戦対象が脱落したら通常の待機オーバーレイに戻るはず:\n{text}"
         );
     }
 

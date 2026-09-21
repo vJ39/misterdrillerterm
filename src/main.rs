@@ -107,6 +107,10 @@ struct App {
     /// 対戦ロビーでオーバーレイ表示するAI専用設定画面(#312)のカーソル位置。`None`は非表示。
     /// ロビーのソケットを持ち直さずに開閉したいため、画面遷移ではなくこの状態で管理する。
     lobby_ai_settings_selection: Option<ui::render::AiSettingsChoice>,
+    /// 対戦の待機中(#302)、他の参加者を観戦している対象のインデックス(#271)。
+    /// `other_games`(自分以外の参加者、`games[1..]`相当)に対する添字。決着待ちで
+    /// なくなったらNoneに戻す。
+    battle_spectate_index: Option<usize>,
     /// ヘルプ画面(タイトルから開く独立画面)のジュークボックスのカーソル位置。
     /// 画面を離れても保持する。
     help_jukebox_selection: usize,
@@ -228,6 +232,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
         settings_selection: ui::render::SettingsChoice::Music,
         pause_overlay: PauseOverlay::None,
         lobby_ai_settings_selection: None,
+        battle_spectate_index: None,
         help_jukebox_selection: 0,
         help_jukebox_playing: None,
         autopilot: None,
@@ -484,6 +489,7 @@ mod tests {
             settings_selection: ui::render::SettingsChoice::Music,
             pause_overlay: PauseOverlay::None,
             lobby_ai_settings_selection: None,
+            battle_spectate_index: None,
             help_jukebox_selection: 0,
             help_jukebox_playing: None,
             autopilot: None,
