@@ -625,8 +625,13 @@ impl LobbyState {
     fn start_ai_battle(&mut self, ai_count: usize, config: BattleConfig) -> LobbyOutcome {
         let seed: u64 = rand::rng().random();
         let human_game = new_game_from_battle_config(seed, &config);
+        // #319: AIは枠ごとに別のシードにする(オートプレイは決定論的に動くため、同じ盤面だと
+        // AIが何人いても結果がほぼ同じになる)。人間は従来通り自分のシードで掘る。
         let ai_games = (0..ai_count)
-            .map(|_| new_ai_game_from_battle_config(seed, &config))
+            .map(|_| {
+                let ai_seed: u64 = rand::rng().random();
+                new_ai_game_from_battle_config(ai_seed, &config)
+            })
             .collect();
         let state = BattleState::new_local_vs_ai(human_game, ai_games, self.my_name.clone());
         LobbyOutcome::Battle(Box::new(state))
@@ -706,7 +711,16 @@ impl LobbyState {
                 // (#300の判定と同じ)で、AI専用設定(#312)から盤面を作る。ホストも
                 // ゲストも同じ判定をするので、AIの盤面コピーは全員で一致する。
                 if i > 0 && streams[i - 1].is_none() {
-                    new_ai_game_from_battle_config(handshake.seed, &handshake.config)
+                    // #319: AIは枠ごとに別のシードを使う。自分より前にあるAIの枠を数えれば
+                    // 「全体で何番目のAIか」が出るので、ホストが配った並びと同じ位置を引ける。
+                    let ai_index = streams[..i - 1].iter().filter(|s| s.is_none()).count();
+                    // シードの数が足りないハンドシェイクでも落ちないよう、共有シードで代替する。
+                    let ai_seed = handshake
+                        .ai_seeds
+                        .get(ai_index)
+                        .copied()
+                        .unwrap_or(handshake.seed);
+                    new_ai_game_from_battle_config(ai_seed, &handshake.config)
                 } else {
                     new_game_from_battle_config(handshake.seed, &handshake.config)
                 }
@@ -1344,6 +1358,106 @@ mod tests {
     }
 
     #[test]
+    fn the_ai_battle_gives_each_ai_its_own_board() {
+        // #319: AIが複数いるときはAIごとにシードを分ける。オートプレイは決定論的に動くため、
+        // 同じ盤面だと何人いても結果がほぼ同じになる。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        lobby.set_phase(LobbyPhase::SelectingAiOpponentCount { ai_count: 3 });
+
+        let outcome = lobby.update(&[InputAction::Confirm], test_config());
+
+        let LobbyOutcome::Battle(state) = outcome else {
+            panic!("AI対戦が始まるはず");
+        };
+        assert_eq!(state.games.len(), 4, "自分+AI3人ぶんの盤面があるはず");
+        for (index, game) in state.games.iter().enumerate().skip(2) {
+            for other in 1..index {
+                assert_ne!(
+                    game.board.rows, state.games[other].board.rows,
+                    "AI{index}とAI{other}の盤面は別のはず"
+                );
+            }
+        }
+        assert_ne!(
+            state.games[0].board.rows, state.games[1].board.rows,
+            "自分とAIの盤面も別のはず"
+        );
+    }
+
+    #[test]
+    fn a_room_with_several_ais_uses_the_seed_the_host_sent_for_each_ai_slot() {
+        // #319: 通信あり対戦では主催者がAIぶんのシードも配る。ゲストが持つAIの盤面コピーは
+        // 主催者が実際に動かしている盤面と一致していないと、ゴーストの表示や順位が食い違う。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        let config = test_config();
+        // 人間のゲスト1人ぶんは接続を持たせ、AI2人ぶんの枠はNoneにする。
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let guest_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let handshake = net::HandshakeResult {
+            opponent_name: String::new(),
+            config,
+            seed: 4242,
+            ai_seeds: vec![101, 202],
+        };
+
+        let outcome = lobby.battle_from_room(
+            vec![Some(guest_stream), None, None],
+            vec![
+                "guest".to_string(),
+                room::ai_member_name(1),
+                room::ai_member_name(2),
+            ],
+            0,
+            handshake,
+        );
+
+        let LobbyOutcome::Battle(state) = outcome else {
+            panic!("対戦が始まるはず");
+        };
+        assert_eq!(state.games.len(), 4);
+        assert_eq!(
+            state.games[2].board.rows,
+            new_ai_game_from_battle_config(101, &config).board.rows,
+            "1人目のAIはai_seeds[0]から作るはず"
+        );
+        assert_eq!(
+            state.games[3].board.rows,
+            new_ai_game_from_battle_config(202, &config).board.rows,
+            "2人目のAIはai_seeds[1]から作るはず"
+        );
+        assert_ne!(
+            state.games[2].board.rows, state.games[3].board.rows,
+            "AIどうしの盤面は別のはず"
+        );
+    }
+
+    #[test]
+    fn a_room_whose_ai_seeds_are_missing_still_starts_the_battle() {
+        // #319: シードの数が足りないハンドシェイク(壊れた主催者)でも、共有シードで代替して
+        // 対戦を始める(範囲外参照で落とさない)。
+        let mut lobby = LobbyState::new_on_loopback("me".to_string()).unwrap();
+        let config = test_config();
+        let handshake = net::HandshakeResult {
+            opponent_name: String::new(),
+            config,
+            seed: 4242,
+            ai_seeds: Vec::new(),
+        };
+
+        let outcome =
+            lobby.battle_from_room(vec![None], vec![room::ai_member_name(1)], 0, handshake);
+
+        let LobbyOutcome::Battle(state) = outcome else {
+            panic!("対戦が始まるはず");
+        };
+        assert_eq!(
+            state.games[1].board.rows,
+            new_ai_game_from_battle_config(4242, &config).board.rows,
+            "AIの盤面は共有シードから作るはず"
+        );
+    }
+
+    #[test]
     fn a_room_with_an_ai_builds_only_the_ai_board_from_the_ai_only_settings() {
         // #312: 人間+AI混在のルーム(#300)で、AIの枠(streamsがNone)だけAI専用設定から
         // 盤面を作り、自分と人間のゲストは従来通り人間用の設定で作る。
@@ -1362,6 +1476,7 @@ mod tests {
             opponent_name: String::new(),
             config,
             seed: 4242,
+            ai_seeds: vec![777],
         };
 
         let outcome = lobby.battle_from_room(
@@ -1397,8 +1512,8 @@ mod tests {
         );
         assert_eq!(
             state.games[2].board.rows,
-            new_ai_game_from_battle_config(4242, &config).board.rows,
-            "AIの盤面はAI専用設定から作った生成結果と一致するはず"
+            new_ai_game_from_battle_config(777, &config).board.rows,
+            "AIの盤面はAI用シード(#319)とAI専用設定から作った生成結果と一致するはず"
         );
     }
 

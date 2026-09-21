@@ -1,4 +1,4 @@
-//! N人対戦のルーム参加フローとフルメッシュ確立(#275。docs/multiplayer-4p-room-design.md)。
+//! N人対戦のルーム参加フローとフルメッシュ確立(#275。docs/spec.md 12.2)。
 //!
 //! #274のフルメッシュ対戦(`BattleState::from_peer_streams`)が要求する「確立済みの
 //! TCP接続N-1本」を用意するところを担う。主催者が参加者を集めて`RoomRoster`・対戦設定・
@@ -8,7 +8,7 @@
 //! ロビーUI(ルーム作成・参加者一覧の表示・開始操作)は#276の範囲のため、ここは
 //! ブロッキングI/Oで完結する関数群として置く(#276が非ブロッキングな状態機械でラップする)。
 //! ルーム参加接続のaccept自体も、参加者が増えるたびに一覧を更新表示するという操作性の
-//! ために呼び出し元の責務としている(設計書4節)。
+//! ために呼び出し元の責務としている。
 
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -33,7 +33,7 @@ pub type RoomStartResult = (
 /// 主催者側。既に`JoinRoom`を受け取った各ゲストとの接続(`guest_room_streams`。
 /// `JoinRoom`を受信した順=room内インデックス1,2,3...と対応)へ`RoomRoster`・対戦設定・
 /// シードを配布し、フルメッシュのメッシュ接続(自分以外、room内インデックス順)を
-/// 確立する(設計書4節)。
+/// 確立する。
 ///
 /// `guest_names`/`guest_mesh_addrs`は`guest_room_streams`と同じ順で、それぞれ`JoinRoom`の
 /// `name`と、「接続元のIP+`JoinRoom`の`mesh_port`」を呼び出し元が組み立てたもの。
@@ -85,10 +85,14 @@ pub fn start_room_as_host(
     // シードは主催者がOS乱数から単独で決める(2人版`run_host_handshake`と同じ取り決め。
     // spec.md 12.2ステップ3)。
     let seed: u64 = rand::rng().random();
+    // #319: AIは枠ごとに別のシードにする(同じ盤面だと決定論的なオートプレイの結果が
+    // ほぼ同じになる)。ゲストもホストが動かすAIと同じ盤面のコピーを持つ必要があるため、
+    // 主催者が生成して全員へ配る。
+    let ai_seeds: Vec<u64> = (0..ai_count).map(|_| rand::rng().random()).collect();
 
     for (guest_index, stream) in guest_room_streams.iter_mut().enumerate() {
         // `your_index`だけ送り先ごとに変える(名前が重複していても各参加者が自分を
-        // 一意に特定できるようにするため。設計書2節)。
+        // 一意に特定できるようにするため)。
         net::write_message(
             stream,
             &GameMessage::RoomRoster {
@@ -97,7 +101,13 @@ pub fn start_room_as_host(
             },
         )?;
         net::write_message(stream, &GameMessage::StartConfig(Box::new(config)))?;
-        net::write_message(stream, &GameMessage::SeedAgree { seed })?;
+        net::write_message(
+            stream,
+            &GameMessage::SeedAgree {
+                seed,
+                ai_seeds: ai_seeds.clone(),
+            },
+        )?;
     }
 
     let streams = establish_full_mesh(&members, 0, my_name, my_mesh_listener)?;
@@ -108,12 +118,13 @@ pub fn start_room_as_host(
             opponent_name: String::new(),
             config,
             seed,
+            ai_seeds,
         },
     ))
 }
 
 /// 参加者側。主催者へ接続して`JoinRoom`を送り、`RoomRoster`以降を受け取ってから
-/// フルメッシュを確立する(設計書5節)。`connect_and_join_room`と`await_room_start`を
+/// フルメッシュを確立する。`connect_and_join_room`と`await_room_start`を
 /// 順に呼ぶだけの薄い関数(#276。ロビーUIは開始を待つ区間だけ別スレッド化するため、
 /// この2関数を分けて個別に呼ぶ)。
 ///
@@ -191,8 +202,8 @@ pub fn await_room_start(
         GameMessage::StartConfig(config) => *config,
         other => return Err(net::unexpected_message("StartConfig", &other)),
     };
-    let seed = match net::read_message(&mut room_stream)? {
-        GameMessage::SeedAgree { seed } => seed,
+    let (seed, ai_seeds) = match net::read_message(&mut room_stream)? {
+        GameMessage::SeedAgree { seed, ai_seeds } => (seed, ai_seeds),
         other => return Err(net::unexpected_message("SeedAgree", &other)),
     };
 
@@ -204,7 +215,7 @@ pub fn await_room_start(
         .map(|(_, member)| member.name.clone())
         .collect();
 
-    // ルーム参加接続はここで用済み(設計書1節)。メッシュ確立まで開いたままにしておき、
+    // ルーム参加接続はここで用済み。メッシュ確立まで開いたままにしておき、
     // この関数を抜けるところで閉じる。
     drop(room_stream);
 
@@ -216,16 +227,17 @@ pub fn await_room_start(
             opponent_name: String::new(),
             config,
             seed,
+            ai_seeds,
         },
     ))
 }
 
 /// `members`(room内インデックス順、自分を含む)と自分のインデックス`my_index`から、
-/// 自分以外の全員とのメッシュ接続を確立する(設計書6節)。戻り値は`members`から自分を
+/// 自分以外の全員とのメッシュ接続を確立する(#275)。戻り値は`members`から自分を
 /// 除いた順(`BattleState::from_peer_streams`が要求する、`games[1..]`と対応する順)。
 ///
 /// 役割は「room内インデックスが小さい方がTCPサーバ役」という決定的な規則で決まるため、
-/// 全員が同じ`members`を見ていれば通信なしに一致する(設計書3節)。
+/// 全員が同じ`members`を見ていれば通信なしに一致する。
 ///
 /// #300: AI(`mesh_addr`が`None`)の枠は接続を張らず、戻り値の同じ位置に`None`を置く。
 fn establish_full_mesh(
@@ -274,7 +286,7 @@ fn establish_full_mesh(
     //
     // 自分より後ろに同名の参加者が複数いる場合、この照合では本人を区別できない
     // (まだ埋まっていない最初の一致へ入れる)。自分の特定は`your_index`で行える一方、
-    // peerの特定は名前しか手がかりが無いという設計上の制約(#275設計書3節)。
+    // peerの特定は名前しか手がかりが無いという設計上の制約(#275)。
     //
     // #300: AI(`mesh_addr`が`None`)は繋いでこないため、受け入れる本数から除く。
     let incoming_count = members
@@ -354,9 +366,9 @@ fn read_hello(stream: &mut TcpStream) -> io::Result<String> {
 
 /// 主催者の`mesh_addr`を、参加者が実際に繋がった宛先のIPで解決する。
 ///
-/// 設計書に無い追加処理。主催者は自分の`mesh_addr`を`TcpListener::local_addr()`から作るが、
-/// ロビーのlistenerは全インターフェース(0.0.0.0)にbindされるため、そのIPのままでは参加者が
-/// 主催者へ繋げない。参加者はルーム参加接続で使った宛先で主催者に到達できることが確かなので、
+/// 仕様(docs/spec.md 12.2)に書いていない実装側の補正。主催者は自分の`mesh_addr`を
+/// `TcpListener::local_addr()`から作るが、ロビーのlistenerは全インターフェース(0.0.0.0)に
+/// bindされるため、そのIPのままでは参加者が主催者へ繋げない。参加者はルーム参加接続で使った宛先で主催者に到達できることが確かなので、
 /// IPが未指定(0.0.0.0 / ::)のときだけその宛先のIPへ差し替える(具体的なIPを広告している
 /// 場合は、主催者が特定のNICで待ち受ける構成を壊さないようそのまま使う)。
 fn resolve_host_mesh_addr(roster_addr: SocketAddr, host_addr: SocketAddr) -> SocketAddr {
@@ -410,7 +422,7 @@ mod tests {
 
     /// `run_room`のAIあり版(#300)。人間`names`の後ろへAIを`ai_count`人追加する。
     ///
-    /// ルーム参加接続のacceptは呼び出し元の責務(設計書4節)なので、ここがその役を担う。
+    /// ルーム参加接続のacceptは呼び出し元の責務なので、ここがその役を担う。
     /// ゲストのroom内インデックスは主催者が`JoinRoom`を受け取った順で決まるため、
     /// 順序を確定させるためゲストは1人ずつ参加させる(`JoinRoom`送信後は`RoomRoster`待ちで
     /// ブロックするので、次のゲストを起こす前にインデックスが確定する)。
@@ -582,6 +594,40 @@ mod tests {
                 "参加者{index}は主催者の設定に従うはず"
             );
             assert_eq!(participant.handshake.seed, host.seed);
+            assert_eq!(participant.handshake.ai_seeds, host.ai_seeds);
+        }
+        assert!(
+            host.ai_seeds.is_empty(),
+            "AIがいないルームではAIぶんのシード(#319)は無いはず"
+        );
+    }
+
+    #[test]
+    fn everyone_in_the_room_gets_the_same_separate_seed_for_each_ai() {
+        // #319: AIの枠ごとに別のシードを主催者が決め、全員へ同じ並びで配る。ゲストが持つAIの
+        // 盤面コピーは主催者が動かしている盤面と一致していないと、表示や順位が食い違う。
+        const AI_COUNT: usize = 2;
+        let participants = run_room_with_ai(&numbered_names(2), AI_COUNT);
+
+        let host = &participants[0].handshake;
+        assert_eq!(
+            host.ai_seeds.len(),
+            AI_COUNT,
+            "AIの枠と同数のシードを配るはず(対戦側はこの並びをAIの順で引く)"
+        );
+        assert_ne!(
+            host.ai_seeds[0], host.ai_seeds[1],
+            "AIどうしで別のシードになるはず"
+        );
+        assert!(
+            !host.ai_seeds.contains(&host.seed),
+            "人間が共有するシードとも別になるはず"
+        );
+        for (index, participant) in participants.iter().enumerate().skip(1) {
+            assert_eq!(
+                participant.handshake.ai_seeds, host.ai_seeds,
+                "参加者{index}は主催者が配ったAIぶんのシードをそのまま受け取るはず"
+            );
         }
     }
 

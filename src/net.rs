@@ -57,7 +57,13 @@ pub enum GameMessage {
     /// 直列化の結果は中身をそのまま書くだけで変わらないため、通信の互換性には影響しない。
     StartConfig(Box<BattleConfig>),
     SeedAgree {
+        /// 人間の参加者が共有するシード。全員が同じ盤面を掘る公平な条件にするため1つだけ配る。
         seed: u64,
+        /// AI(#300)の枠ぶんのシード(roster内のAIの並び順)。#319: オートプレイは
+        /// 決定論的に動くため、AIが複数いても同じ盤面だと結果がほぼ同じになる。
+        /// ゲスト側もホストが動かしているAIと同じ盤面のコピーを持つ必要があるため、
+        /// ホストがまとめて生成して配る。
+        ai_seeds: Vec<u64>,
     },
     /// 自分の操作1つ。受け取った側は自分が持つ送信元のインスタンスへ即座に適用する。
     /// TCPが順序を保証するため、送った順=適用される順になる。
@@ -345,6 +351,9 @@ pub struct HandshakeResult {
     pub opponent_name: String,
     pub config: BattleConfig,
     pub seed: u64,
+    /// AIの枠ぶんのシード(#319)。`SeedAgree`で配られたものをそのまま持つ。
+    /// AIがいない対戦では空。
+    pub ai_seeds: Vec<u64>,
 }
 
 /// TCPサーバ役(ACCEPTした側)=ホストのハンドシェイク(spec.md 12.2シーケンス1〜3)。
@@ -379,12 +388,20 @@ pub fn run_host_handshake(
     // シードはホストがOS乱数から単独で決める(「どちらのシードを使うか」の合意
     // プロトコルを省略するための取り決め。spec.md 12.2ステップ3)。
     let seed: u64 = rand::rng().random();
-    write_message(stream, &GameMessage::SeedAgree { seed })?;
+    // 2人版にAI(#300)は混ざらないため、AIぶんのシード(#319)は常に空。
+    write_message(
+        stream,
+        &GameMessage::SeedAgree {
+            seed,
+            ai_seeds: Vec::new(),
+        },
+    )?;
 
     Ok(HandshakeResult {
         opponent_name,
         config,
         seed,
+        ai_seeds: Vec::new(),
     })
 }
 
@@ -411,8 +428,8 @@ pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result
         other => return Err(unexpected_message("StartConfig", &other)),
     };
 
-    let seed = match read_message(stream)? {
-        GameMessage::SeedAgree { seed } => seed,
+    let (seed, ai_seeds) = match read_message(stream)? {
+        GameMessage::SeedAgree { seed, ai_seeds } => (seed, ai_seeds),
         other => return Err(unexpected_message("SeedAgree", &other)),
     };
 
@@ -420,6 +437,7 @@ pub fn run_client_handshake(stream: &mut TcpStream, my_name: &str) -> io::Result
         opponent_name,
         config,
         seed,
+        ai_seeds,
     })
 }
 
@@ -726,6 +744,12 @@ mod tests {
         assert_round_trips(&GameMessage::StartConfig(Box::new(test_config())));
         assert_round_trips(&GameMessage::SeedAgree {
             seed: 0xdead_beef_0123_4567,
+            ai_seeds: Vec::new(),
+        });
+        // #319: AIぶんの個別シードを並べた形も同じフレーミングで運べること。
+        assert_round_trips(&GameMessage::SeedAgree {
+            seed: 0xdead_beef_0123_4567,
+            ai_seeds: vec![1, 0xffff_ffff_ffff_ffff],
         });
         assert_round_trips(&GameMessage::Input {
             action: NetAction::Drill,
@@ -788,7 +812,10 @@ mod tests {
         let first = GameMessage::Hello {
             name: "a".to_string(),
         };
-        let second = GameMessage::SeedAgree { seed: 7 };
+        let second = GameMessage::SeedAgree {
+            seed: 7,
+            ai_seeds: Vec::new(),
+        };
         let third = GameMessage::Bye;
 
         let mut buffer = Vec::new();
@@ -809,7 +836,14 @@ mod tests {
         assert!(read_message(&mut [].as_slice()).is_err());
 
         let mut truncated = Vec::new();
-        write_message(&mut truncated, &GameMessage::SeedAgree { seed: 1 }).unwrap();
+        write_message(
+            &mut truncated,
+            &GameMessage::SeedAgree {
+                seed: 1,
+                ai_seeds: Vec::new(),
+            },
+        )
+        .unwrap();
         truncated.pop();
         assert!(read_message(&mut truncated.as_slice()).is_err());
     }
@@ -927,6 +961,9 @@ mod tests {
         );
         assert_eq!(client.config, config, "クライアントはホストの設定に従う");
         assert_eq!(host.seed, client.seed);
+        // #319: 2人版にAIは混ざらないため、AIぶんのシードは双方とも空になる。
+        assert!(host.ai_seeds.is_empty());
+        assert_eq!(client.ai_seeds, host.ai_seeds);
     }
 
     #[test]
@@ -989,7 +1026,14 @@ mod tests {
                 },
             )
             .unwrap();
-            write_message(&mut stream, &GameMessage::SeedAgree { seed: 1 }).unwrap();
+            write_message(
+                &mut stream,
+                &GameMessage::SeedAgree {
+                    seed: 1,
+                    ai_seeds: Vec::new(),
+                },
+            )
+            .unwrap();
         });
 
         let mut stream = TcpStream::connect(addr).unwrap();
