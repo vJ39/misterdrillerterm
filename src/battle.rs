@@ -334,7 +334,7 @@ impl BattleState {
     }
 
     /// 結果(`Cleared`/`GameOver`)待ちの参加者が1人以下になった時点で、最終順位を一括で
-    /// 確定する(#289/#318)。
+    /// 確定する(#289/#318/#323)。
     ///
     /// ゴール到達者は必ず脱落者より上位。同じ到達状態(両者ともCleared、または両者とも
     /// GameOver)の中では、スコア(`player.score`)降順・同スコアなら到達深度
@@ -344,10 +344,10 @@ impl BattleState {
     ///
     /// #318: 最後の1人が残った時点でも(その1人の結果を待たず)確定する。最大8人(#311)では
     /// 先に力尽きた人数が多くなり、残り1人がゴールするまで全員が待たされるため。残った1人は
-    /// まだゴールしていない扱い(`ranking_key`のCleared判定がfalse)で、その時点のスコア・
-    /// 深度のまま順位を付ける。ただしスコア・深度まで同じなら脱落者より上位にする
-    /// (`ranking_key`の最後の要素)。`outcome`が確定すれば`advance`が盤面を進めなくなるため、
-    /// 残った1人のプレイもそこで打ち切られる。
+    /// まだゴールしていない扱い(`ranking_key`のCleared判定がfalse)なのでゴール到達者より
+    /// 下位だが、まだ脱落していないので、スコア・深度に関わらず脱落者より上位にする(#323)。
+    /// `outcome`が確定すれば`advance`が盤面を進めなくなるため、残った1人のプレイもそこで
+    /// 打ち切られる。
     fn update_ranks(&mut self) {
         if self.ranks.iter().all(Option::is_some) {
             return;
@@ -378,18 +378,19 @@ impl BattleState {
         }
     }
 
-    /// 順位比較用のキー(#289)。降順で並べると良い順位が先頭に来るタプル:
-    /// (ゴール到達したか, スコア, 到達深度, まだプレイ中か)。
+    /// 順位比較用のキー(#289/#323)。降順で並べると良い順位が先頭に来るタプル:
+    /// (ゴール到達したか, 脱落していないか, スコア, 到達深度)。
     ///
-    /// 最後の要素は#318のタイブレーク。スコアも深度も同じなら、脱落した人より
-    /// まだ生き残っている人を上位にする。
-    fn ranking_key(&self, index: usize) -> (bool, u64, usize, bool) {
+    /// 2番目の要素は#323。タプルの比較は前の要素で差が付いた時点で決まるため、脱落したか
+    /// どうかをスコア・深度より前に置く。#318ではこれを最後の要素に置いていたので、脱落者の
+    /// 方が深く潜っていてスコアも高いと、生き残っている人が下位になっていた。
+    fn ranking_key(&self, index: usize) -> (bool, bool, u64, usize) {
         let game = &self.games[index];
         (
             game.status == GameStatus::Cleared,
+            game.status != GameStatus::GameOver,
             game.player.score,
             game.player.depth_m(),
-            game.status == GameStatus::Playing,
         )
     }
 
@@ -1011,7 +1012,7 @@ mod tests {
         // 相手が先に脱落(酸素切れ→ライフ0)すると、残るのは自分1人だけなので#318ではその場で
         // 確定し、プレイ中のまま自分が1位になる。相手の脱落を待つ間に自分が死なないよう、
         // 自分の盤面は無敵にしておく。どちらも掘っていないためスコアも深度も同じで、
-        // #318のタイブレーク(生存している方が上位)がそのまま効く。
+        // 生き残っている方が上位という順位付け(#323)で決まる。
         let mut state = battle(3, 4);
         state.games[0].set_invincible(true);
         state.games[1].player.lives = 1;
@@ -1311,8 +1312,8 @@ mod tests {
             ranks_for(&[Playing, Cleared]),
             (vec![Some(2), Some(1)], Some(Ranked(2)))
         );
-        // 脱落者とまだプレイ中の相手はどちらもゴールしていないが、スコアも深度も同じなら
-        // #318のタイブレークでまだプレイ中の方が上位。
+        // 脱落者とまだプレイ中の相手はどちらもゴールしていないが、まだ脱落していない方が
+        // 上位(#323)。
         assert_eq!(
             ranks_for(&[GameOver, Playing]),
             (vec![Some(2), Some(1)], Some(Ranked(2)))
@@ -1539,9 +1540,10 @@ mod tests {
     }
 
     #[test]
-    fn the_last_player_left_is_ranked_with_the_depth_it_has_reached() {
-        // #318: 最後に残った1人はプレイ中のまま、その時点の到達深度で順位比較に入る
-        // (判定は深度しか見ないため、盤面と整合しない位置でも行を直接ずらして確かめる)。
+    fn the_last_player_left_outranks_dropouts_whatever_depth_it_has_reached() {
+        // #318で最後に残った1人はプレイ中のまま順位比較に入るが、#323からは脱落者より必ず
+        // 上位になる(判定は深度しか見ないため、盤面と整合しない位置でも行を直接ずらして
+        // 確かめる)。
         let mut deeper = battle_n(&[1, 1, 1]);
         deeper.games[1].status = GameStatus::GameOver;
         deeper.games[2].status = GameStatus::GameOver;
@@ -1567,16 +1569,17 @@ mod tests {
         shallower.update_ranks();
         assert_eq!(
             shallower.ranks,
-            vec![Some(3), Some(1), Some(1)],
-            "脱落者より浅ければ、残った1人が最下位になるはず"
+            vec![Some(1), Some(2), Some(2)],
+            "脱落者より浅くても、残った1人が上位になるはず"
         );
-        assert_eq!(shallower.outcome, Some(BattleOutcome::Ranked(3)));
+        assert_eq!(shallower.outcome, Some(BattleOutcome::Ranked(1)));
     }
 
     #[test]
-    fn a_player_still_alive_outranks_a_dropout_with_the_same_score_and_depth() {
-        // #318のタイブレーク。ゴール到達の有無・スコア・深度がすべて同じなら、脱落した側より
-        // 生き残っている側を上位にする(同じシードなので両者の盤面は最初から同じ値)。
+    fn a_player_still_alive_outranks_a_dropout() {
+        // #323: ゴール到達していない者どうしでは、脱落した側より生き残っている側を上位に
+        // する。まずはスコアも深度も同じ、脱落したかどうかだけが違う場合(同じシードなので
+        // 両者の盤面は最初から同じ値)。
         let mut mine = battle(20, 20);
         mine.games[1].status = GameStatus::GameOver;
         assert_eq!(
@@ -1600,6 +1603,44 @@ mod tests {
             theirs.ranks,
             vec![Some(2), Some(1)],
             "脱落した自分が下位になるはず"
+        );
+        assert_eq!(theirs.outcome, Some(BattleOutcome::Ranked(2)));
+    }
+
+    #[test]
+    fn a_player_still_alive_outranks_a_dropout_with_a_higher_score_and_depth() {
+        // #323の再現。実際の対戦で、相手が深度319mまで進んで脱落し、自分は深度310mでまだ
+        // プレイ中という場面で自分が2位になっていた。脱落した相手の方がスコアも深度も上
+        // だったため、#318のタイブレークは最後の要素で届かなかった。生き残っている側が
+        // 数値で負けていても上位になることを確かめる(判定はスコアと深度しか見ないため、
+        // 盤面と整合しない値でも直接書き換えて確かめる)。
+        let mut mine = battle(21, 21);
+        mine.games[1].status = GameStatus::GameOver;
+        mine.games[1].player.row += 9;
+        mine.games[1].player.score += 1000;
+        assert!(
+            mine.games[0].player.score < mine.games[1].player.score
+                && mine.games[0].player.depth_m() < mine.games[1].player.depth_m(),
+            "前提: 生き残っている自分の方がスコアも深度も低いはず"
+        );
+        mine.update_ranks();
+        assert_eq!(
+            mine.ranks,
+            vec![Some(1), Some(2)],
+            "スコアと深度で負けていても、生き残っている自分が上位になるはず"
+        );
+        assert_eq!(mine.outcome, Some(BattleOutcome::Ranked(1)));
+
+        // 自分が深く潜って脱落し、相手が浅いまま生き残った場合は自分が下位になる。
+        let mut theirs = battle(21, 21);
+        theirs.games[0].status = GameStatus::GameOver;
+        theirs.games[0].player.row += 9;
+        theirs.games[0].player.score += 1000;
+        theirs.update_ranks();
+        assert_eq!(
+            theirs.ranks,
+            vec![Some(2), Some(1)],
+            "スコアと深度で勝っていても、脱落した自分が下位になるはず"
         );
         assert_eq!(theirs.outcome, Some(BattleOutcome::Ranked(2)));
     }
