@@ -566,10 +566,10 @@ impl BattleState {
         self.settle_disconnected_peers();
         // #300: AIの枠の結果は、自分の決着とは関係なくその枠が決着した時点で送る。
         self.maybe_send_ai_results();
+        // #306: 自分の結果も同様に、全員そろう(`outcome`確定)を待たず
+        // 自分が決着した時点で送る(未決着の間は内部で何もしない)。
+        self.maybe_send_results();
         self.update_ranks();
-        if self.outcome.is_some() {
-            self.maybe_send_results();
-        }
     }
 
     /// 切断・タイムアウトを検知したpeerの順位を、まだ未確定なら確定させる(#274設計書3節)。
@@ -577,18 +577,40 @@ impl BattleState {
     /// フルメッシュの狙い(単一障害点を避ける)に合わせ、1人が抜けても全員終了にはしない。
     /// 該当peerの盤面を`GameOver`へ倒して通常の脱落と同じ経路(`update_ranks`)に乗せる
     /// ことで、切断者は最下位側から順位が埋まり、残りの参加者は対戦を続けられる。
+    ///
+    /// #308: ホストが抜けたときはAIの枠も一緒に倒す。AIを動かして操作と結果を代理送信
+    /// するのはホストだけなので、ホストが居なくなるとゲストの手元でAIの盤面が`Playing`
+    /// のまま残り、`update_ranks`の「全員の結果がそろう」条件を満たせなくなる。
     fn settle_disconnected_peers(&mut self) {
-        let peer_count = self.peers.as_ref().map_or(0, Vec::len);
-        for i in 0..peer_count {
-            // #300: AIの枠(`None`)は接続を持たないため切断し得ない。
-            let disconnected = self.peers.as_ref().expect("通信ありの経路でのみ呼ばれる")[i]
-                .as_ref()
-                .is_some_and(|peer| peer.disconnected);
-            if !disconnected || self.ranks[i + 1].is_some() {
-                continue;
+        let Some(peers) = self.peers.as_ref() else {
+            return;
+        };
+        // ホストが抜けたかどうかは自分がゲストのときだけ見る。自分がホストなら自分自身を
+        // 切断できず、AIの枠も自分が動かし続けられる(#308)。ホストは常に`games[1]`に来る
+        // ため、`peers`側の位置もroom内インデックス0から引いて求める。
+        let host_disconnected = self.my_room_index != 0
+            && peers
+                .get(self.games_index_for_room_index(0) - 1)
+                .and_then(|slot| slot.as_ref())
+                .is_some_and(|host| host.disconnected);
+        // `games`の書き換えは`peers`の借用を解いた後に行うため、倒す位置を先に集める。
+        let mut settle_indexes: Vec<usize> = Vec::new();
+        for (i, peer_slot) in peers.iter().enumerate() {
+            let settle = match peer_slot {
+                // 通常の切断・タイムアウト。
+                Some(peer) => peer.disconnected,
+                // #300のAIの枠は接続を持たないため自分では切断し得ないが、進める主体が
+                // 居なくなるためホストと一緒に倒す(#308)。
+                None => host_disconnected,
+            };
+            if settle && self.ranks[i + 1].is_none() {
+                settle_indexes.push(i + 1);
             }
+        }
+
+        for games_index in settle_indexes {
             // 実際の脱落ではないが、順位確定のためだけにこの状態を使う。
-            self.games[i + 1].status = GameStatus::GameOver;
+            self.games[games_index].status = GameStatus::GameOver;
         }
     }
 
@@ -723,6 +745,12 @@ impl BattleState {
     /// 決着直後に自分の`Result`を、未切断の各peerへ1回だけ送る(12.4。勝敗判定の根拠では
     /// なく相互確認用)。
     fn maybe_send_results(&mut self) {
+        // 自分の決着(Cleared/GameOver)が済んでいなければ送らない。全員そろう
+        // (`outcome`確定)を待つと、他の参加者が自分の結果待ちで足止めされる
+        // 時間が長くなるため、自分が決着した時点で即座に送る(#306)。
+        if self.games[0].status == GameStatus::Playing {
+            return;
+        }
         let reached_goal = self.games[0].status == GameStatus::Cleared;
         let Some(peers) = &mut self.peers else {
             return;
@@ -1700,6 +1728,37 @@ mod tests {
             assert!(
                 host.outcome.is_some(),
                 "{label}: 全員の結果がそろえば順位が確定するはず"
+            );
+        }
+    }
+
+    #[test]
+    fn reaching_game_over_sends_the_result_immediately_without_waiting_for_the_opponent() {
+        // #306: 相手がまだプレイ中でも、自分の決着(Cleared/GameOver)が付いた時点で
+        // 即座にResultを送るべき。両者が先に決着した側から送らないと、相手側の
+        // `everyone_is_done`判定がいつまでも満たされず対戦が終わらない。
+        for (label, status, expected_reached_goal) in [
+            ("脱落", GameStatus::GameOver, false),
+            ("ゴール", GameStatus::Cleared, true),
+        ] {
+            let (mut host, mut peer) = battle_with_raw_peer();
+            host.games[0].status = status;
+
+            host.advance(Duration::ZERO, None);
+
+            let message =
+                read_message_matching(&mut peer, |m| matches!(m, GameMessage::Result { .. }));
+            assert!(
+                matches!(
+                    message,
+                    GameMessage::Result { reached_goal, proxy_for: None, .. }
+                        if reached_goal == expected_reached_goal
+                ),
+                "{label}: 相手のResultを待たず、自分の決着に沿ったResultが届くはず"
+            );
+            assert_eq!(
+                host.outcome, None,
+                "{label}: 相手の結果がまだ無いので、順位自体はまだ確定しないはず"
             );
         }
     }
@@ -2712,6 +2771,62 @@ mod tests {
                 "AIの枠(games[{games_index}])が切断扱いで倒されている"
             );
         }
+    }
+
+    #[test]
+    fn losing_the_host_settles_the_ai_slots_it_was_driving() {
+        // #308: AIの枠を進めるのはホストだけなので、ホストが抜けるとゲストの手元でAIの
+        // 盤面がプレイ中のまま固まり、全員の結果がそろわず対戦が永久に終わらなくなる。
+        // ホストの切断を検知したら、その枠も一緒に倒して順位確定へ進めるはず。
+        const HUMANS: usize = 2;
+        const AIS: usize = 1;
+        const AI_ROOM_INDEX: usize = HUMANS;
+        // ゲスト(room内インデックス1)の視点。games[1]がホスト、games[2]がAIになる。
+        let (mut guest, mut peers) = battle_with_ai_slots(HUMANS, AIS, 1, 30010);
+        assert_eq!(
+            guest.games_index_for_room_index(AI_ROOM_INDEX),
+            2,
+            "前提: AIはgames[2]にいるはず"
+        );
+
+        // ホスト役はByeを送ってから接続を閉じる(受信の途絶を待たずに切断を検知させる)。
+        net::write_message(&mut peers[0], &GameMessage::Bye).unwrap();
+        drop(peers);
+
+        for _ in 0..MAX_PUMPS {
+            // 盤面を進めずに受信と切断判定だけ回す(待つ間に酸素を消費させない)。
+            guest.advance(Duration::ZERO, None);
+            if guest.games[2].status != GameStatus::Playing {
+                break;
+            }
+            pump_interval();
+        }
+
+        assert_eq!(
+            guest.games[1].status,
+            GameStatus::GameOver,
+            "抜けたホストの盤面は順位確定のためGameOverへ倒すはず"
+        );
+        assert_eq!(
+            guest.games[2].status,
+            GameStatus::GameOver,
+            "ホストが動かしていたAIの枠も一緒に倒すはず(#308)"
+        );
+
+        // 残っているのは自分だけなので、自分が決着すれば対戦も終わる。
+        place_just_above_goal(&mut guest.games[0]);
+        advance_until_outcome(&mut guest, MAX_PUMPS);
+
+        assert_eq!(
+            guest.games[0].status,
+            GameStatus::Cleared,
+            "前提: 自分はゴールしているはず"
+        );
+        assert_eq!(
+            guest.outcome,
+            Some(BattleOutcome::Ranked(1)),
+            "ホストが抜けた後も対戦は決着するはず(#308)"
+        );
     }
 
     #[test]
