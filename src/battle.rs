@@ -355,24 +355,32 @@ impl BattleState {
         }
     }
 
-    /// 全参加者が結果(`Cleared`/`GameOver`)を出しそろった時点で、最終順位を一括で
-    /// 確定する(#289)。
+    /// 結果(`Cleared`/`GameOver`)待ちの参加者が1人以下になった時点で、最終順位を一括で
+    /// 確定する(#289/#318)。
     ///
     /// ゴール到達者は必ず脱落者より上位。同じ到達状態(両者ともCleared、または両者とも
     /// GameOver)の中では、スコア(`player.score`)降順・同スコアなら到達深度
     /// (`player.depth_m()`)降順で順位を付ける。#273時点は「各自が結果を出した瞬間に
     /// 先着順で確定」だったが、スコア・深度で比較するには全員の最終結果がそろっている
-    /// 必要があるため、確定のタイミングをここに一本化した(ユーザー判断: 自分が先に
-    /// コースをクリアしても、他の参加者がまだプレイ中の間は自分の最終順位も確定しない)。
+    /// 必要があるため、確定のタイミングをここに一本化した。
+    ///
+    /// #318: 最後の1人が残った時点でも(その1人の結果を待たず)確定する。最大8人(#311)では
+    /// 先に力尽きた人数が多くなり、残り1人がゴールするまで全員が待たされるため。残った1人は
+    /// まだゴールしていない扱い(`ranking_key`のCleared判定がfalse)で、その時点のスコア・
+    /// 深度のまま順位を付ける。ただしスコア・深度まで同じなら脱落者より上位にする
+    /// (`ranking_key`の最後の要素)。`outcome`が確定すれば`advance`が盤面を進めなくなるため、
+    /// 残った1人のプレイもそこで打ち切られる。
     fn update_ranks(&mut self) {
         if self.ranks.iter().all(Option::is_some) {
             return;
         }
-        let everyone_is_done = self
+        // Pausedは対戦では起きないが、結果が出ていない以上は確定待ちの1人として数える。
+        let undecided_count = self
             .games
             .iter()
-            .all(|g| matches!(g.status, GameStatus::Cleared | GameStatus::GameOver));
-        if !everyone_is_done {
+            .filter(|g| !matches!(g.status, GameStatus::Cleared | GameStatus::GameOver))
+            .count();
+        if undecided_count > 1 {
             return;
         }
 
@@ -393,13 +401,17 @@ impl BattleState {
     }
 
     /// 順位比較用のキー(#289)。降順で並べると良い順位が先頭に来るタプル:
-    /// (ゴール到達したか, スコア, 到達深度)。
-    fn ranking_key(&self, index: usize) -> (bool, u64, usize) {
+    /// (ゴール到達したか, スコア, 到達深度, まだプレイ中か)。
+    ///
+    /// 最後の要素は#318のタイブレーク。スコアも深度も同じなら、脱落した人より
+    /// まだ生き残っている人を上位にする。
+    fn ranking_key(&self, index: usize) -> (bool, u64, usize, bool) {
         let game = &self.games[index];
         (
             game.status == GameStatus::Cleared,
             game.player.score,
             game.player.depth_m(),
+            game.status == GameStatus::Playing,
         )
     }
 
@@ -993,12 +1005,10 @@ mod tests {
 
     #[test]
     fn reaching_the_goal_first_wins() {
-        // 自分が先にゴール到達しても、#289では全員が結果を出すまで順位は確定しない。
-        // 相手が脱落しきった時点で、ゴール到達が脱落より上位という優先順位で1位になる。
+        // 2人対戦で自分が先にゴール到達すると、残るのは相手1人だけなので#318ではその場で
+        // 確定する。ゴール到達が「まだゴールしていない」より上位という優先順位で1位になる。
         let mut state = battle(1, 2);
         place_just_above_goal(&mut state.games[0]);
-        state.games[1].player.lives = 1;
-        state.games[1].player.oxygen = 1.0;
 
         advance_until(&mut state, 10, |state| {
             state.games[0].status == GameStatus::Cleared
@@ -1012,32 +1022,22 @@ mod tests {
         assert_eq!(
             state.games[1].status,
             GameStatus::Playing,
-            "前提: 相手はまだゴールも脱落もしていないはず"
+            "残った相手の状態は変えないはず"
         );
-        assert_eq!(
-            state.outcome, None,
-            "相手がプレイ中の間は自分の順位も確定しないはず(#289)"
-        );
-        assert_eq!(state.ranks, vec![None, None]);
-
-        // 酸素切れの後、「天に召される」演出(CRUSH_ASCEND_MS=3000ms)を経てGameOverに
-        // なるため、十分なフレーム数(3000msの3倍以上)を回す。
-        advance_until_outcome(&mut state, 180);
-
-        assert_eq!(state.games[1].status, GameStatus::GameOver);
         assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
         assert_eq!(
             state.ranks,
             vec![Some(1), Some(2)],
-            "ゴール到達者が脱落者より上位になるはず"
+            "ゴール到達者が残った相手より上位になるはず"
         );
     }
 
     #[test]
     fn the_opponent_dropping_out_first_wins() {
-        // 相手が先に脱落(酸素切れ→ライフ0)しても、#289では自分の結果が出るまで決着せず、
-        // 後からゴール到達した自分が1位になる。相手の脱落を待つ間に自分が死なないよう、
-        // 自分の盤面は無敵にしておく。
+        // 相手が先に脱落(酸素切れ→ライフ0)すると、残るのは自分1人だけなので#318ではその場で
+        // 確定し、プレイ中のまま自分が1位になる。相手の脱落を待つ間に自分が死なないよう、
+        // 自分の盤面は無敵にしておく。どちらも掘っていないためスコアも深度も同じで、
+        // #318のタイブレーク(生存している方が上位)がそのまま効く。
         let mut state = battle(3, 4);
         state.games[0].set_invincible(true);
         state.games[1].player.lives = 1;
@@ -1057,17 +1057,13 @@ mod tests {
         assert_eq!(
             state.games[0].status,
             GameStatus::Playing,
-            "前提: 自分はまだプレイ中のはず"
+            "残った自分の状態は変えないはず"
         );
         assert_eq!(
-            state.outcome, None,
-            "自分がプレイ中の間は決着しないはず(#289)"
+            (state.games[0].player.score, state.games[0].player.depth_m()),
+            (state.games[1].player.score, state.games[1].player.depth_m()),
+            "前提: スコアも深度も同じで、生存しているかどうかだけで決まるはず"
         );
-
-        place_just_above_goal(&mut state.games[0]);
-        advance_until_outcome(&mut state, 10);
-
-        assert_eq!(state.games[0].status, GameStatus::Cleared);
         assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
         assert_eq!(state.ranks, vec![Some(1), Some(2)]);
     }
@@ -1091,17 +1087,26 @@ mod tests {
     #[test]
     fn dropping_out_first_loses() {
         // 自分が先に脱落したら最下位(2人なら2位)。通常プレイの復活ダイアログは経由しない。
-        // #289では全員が結果を出すまで決着しないため、相手はゴールさせる。
+        // #318では自分の脱落で残りが相手1人になるため、相手がゴールする前に決着する。どちらも
+        // 掘っていないためスコアも深度も同じで、生存している相手が上位になる。
         let mut state = battle(6, 7);
         state.games[1].set_invincible(true);
-        place_just_above_goal(&mut state.games[1]);
         state.games[0].player.lives = 1;
         state.games[0].player.oxygen = 1.0;
 
         advance_until_outcome(&mut state, 180);
 
         assert_eq!(state.games[0].status, GameStatus::GameOver);
-        assert_eq!(state.games[1].status, GameStatus::Cleared);
+        assert_eq!(
+            state.games[1].status,
+            GameStatus::Playing,
+            "残った相手の状態は変えないはず"
+        );
+        assert_eq!(
+            (state.games[0].player.score, state.games[0].player.depth_m()),
+            (state.games[1].player.score, state.games[1].player.depth_m()),
+            "前提: スコアも深度も同じで、生存しているかどうかだけで決まるはず"
+        );
         assert_eq!(state.outcome, Some(BattleOutcome::Ranked(2)));
         assert_eq!(state.ranks, vec![Some(2), Some(1)]);
     }
@@ -1319,14 +1324,29 @@ mod tests {
 
         // 2人専用だった`resolve_outcome`と同じstatusの組み合わせを、順位方式での同値
         // (Win=1位・Lose=最下位・Draw=同順位)で確認する。
-        // #289: 1人でもゴール・脱落のどちらにも達していない(Playing/Paused)間は、
-        // 誰の順位も決着も出ない。
+        // 2人とも結果が出ていない(Playing/Paused)間は、誰の順位も決着も出ない。
         assert_eq!(ranks_for(&[Playing, Playing]), (vec![None, None], None));
         assert_eq!(ranks_for(&[Paused, Playing]), (vec![None, None], None));
-        assert_eq!(ranks_for(&[Cleared, Playing]), (vec![None, None], None));
-        assert_eq!(ranks_for(&[GameOver, Playing]), (vec![None, None], None));
-        assert_eq!(ranks_for(&[Playing, Cleared]), (vec![None, None], None));
-        assert_eq!(ranks_for(&[Playing, GameOver]), (vec![None, None], None));
+        // #318: 片方が結果を出した時点で残りは1人なので、その場で確定する。ゴール到達者は
+        // まだプレイ中の相手より上位。
+        assert_eq!(
+            ranks_for(&[Cleared, Playing]),
+            (vec![Some(1), Some(2)], Some(Ranked(1)))
+        );
+        assert_eq!(
+            ranks_for(&[Playing, Cleared]),
+            (vec![Some(2), Some(1)], Some(Ranked(2)))
+        );
+        // 脱落者とまだプレイ中の相手はどちらもゴールしていないが、スコアも深度も同じなら
+        // #318のタイブレークでまだプレイ中の方が上位。
+        assert_eq!(
+            ranks_for(&[GameOver, Playing]),
+            (vec![Some(2), Some(1)], Some(Ranked(2)))
+        );
+        assert_eq!(
+            ranks_for(&[Playing, GameOver]),
+            (vec![Some(1), Some(2)], Some(Ranked(1)))
+        );
         // 両者が同じ結末で、スコアも到達深度も同じなら同順位(旧Draw)。
         assert_eq!(
             ranks_for(&[Cleared, Cleared]),
@@ -1427,10 +1447,12 @@ mod tests {
 
     #[test]
     fn the_last_player_standing_is_ranked_first_after_everyone_else_drops_out() {
-        // 4人で自分以外の3人が順番に脱落しても、#289では自分が結果を出すまで誰の順位も
-        // 確定しない。最後に自分がゴールすれば1位になる。脱落者どうしの順位は脱落の
-        // 先着順ではなくスコアで決まるため、先に脱落した人ほどスコアが低い状況を作る。
+        // 4人で自分以外の3人が順番に脱落していく。2人以上残っている間は誰の順位も確定せず、
+        // 最後の1人(自分)だけになった時点で#318が全員ぶんを確定する。順位は脱落の先着順では
+        // なくスコアで決まるため、先に脱落した人ほどスコアが低い状況にし、プレイ中のまま残る
+        // 自分のスコアを一番高くしておく。
         let mut state = battle_n(&[1, 2, 3, 4]);
+        state.games[0].player.score = 40;
         state.games[1].player.score = 10;
         state.games[2].player.score = 20;
         state.games[3].player.score = 30;
@@ -1446,24 +1468,24 @@ mod tests {
 
         state.games[2].status = GameStatus::GameOver;
         state.update_ranks();
-        assert_eq!(state.ranks, vec![None; 4]);
+        assert_eq!(
+            state.ranks,
+            vec![None; 4],
+            "自分ともう1人が残っている間はまだ確定しないはず"
+        );
         assert_eq!(state.outcome, None);
 
         state.games[3].status = GameStatus::GameOver;
         state.update_ranks();
         assert_eq!(
-            state.ranks,
-            vec![None; 4],
-            "自分がプレイ中の間は、自分1人だけ残っていても確定しないはず"
+            state.games[0].status,
+            GameStatus::Playing,
+            "残った自分の状態は変えないはず"
         );
-        assert_eq!(state.outcome, None);
-
-        state.games[0].status = GameStatus::Cleared;
-        state.update_ranks();
         assert_eq!(
             state.ranks,
             vec![Some(1), Some(4), Some(3), Some(2)],
-            "ゴールした自分が1位で、脱落者はスコアの高い順に並ぶはず"
+            "最後に残った自分が1位で、脱落者はスコアの高い順に並ぶはず"
         );
         assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
     }
@@ -1497,12 +1519,144 @@ mod tests {
             ranks_for(&[Playing, Cleared, GameOver, Playing]),
             (vec![None, None, None, None], None)
         );
-        // #289: 自分だけが残った場合も、自分の結果が出るまで確定しない(旧仕様では
-        // ここで自動的に順位が付いていた)。
+        // 結果待ちが自分と相手の2人いる間は、#318でも確定しない。
         assert_eq!(
-            ranks_for(&[Playing, Cleared, GameOver, GameOver]),
+            ranks_for(&[Playing, Playing, GameOver, GameOver]),
             (vec![None, None, None, None], None)
         );
+    }
+
+    #[test]
+    fn only_one_player_left_decides_every_rank_right_away() {
+        use BattleOutcome::Ranked;
+        use GameStatus::{Cleared, GameOver, Playing};
+
+        // #318: 結果待ちが1人だけになったら、その1人の結果を待たずに全員ぶんを確定する。
+        // 残った1人はゴールしていない扱いのためゴール到達者より下位だが、脱落者より上位。
+        assert_eq!(
+            ranks_for(&[Playing, Cleared, GameOver, GameOver]),
+            (vec![Some(2), Some(1), Some(3), Some(3)], Some(Ranked(2)))
+        );
+        // 残ったのが自分以外でも同じタイミングで確定する。
+        assert_eq!(
+            ranks_for(&[Cleared, Playing, GameOver, GameOver]),
+            (vec![Some(1), Some(2), Some(3), Some(3)], Some(Ranked(1)))
+        );
+        // 8人(#311)でも同じく、最後の1人を待たない。残った1人(参加者8)は脱落した6人より
+        // 上位の2位に入る。
+        assert_eq!(
+            ranks_for(&[
+                Cleared, GameOver, GameOver, GameOver, GameOver, GameOver, GameOver, Playing
+            ]),
+            (
+                vec![
+                    Some(1),
+                    Some(3),
+                    Some(3),
+                    Some(3),
+                    Some(3),
+                    Some(3),
+                    Some(3),
+                    Some(2)
+                ],
+                Some(Ranked(1))
+            )
+        );
+    }
+
+    #[test]
+    fn the_last_player_left_is_ranked_with_the_depth_it_has_reached() {
+        // #318: 最後に残った1人はプレイ中のまま、その時点の到達深度で順位比較に入る
+        // (判定は深度しか見ないため、盤面と整合しない位置でも行を直接ずらして確かめる)。
+        let mut deeper = battle_n(&[1, 1, 1]);
+        deeper.games[1].status = GameStatus::GameOver;
+        deeper.games[2].status = GameStatus::GameOver;
+        deeper.games[0].player.row += 1;
+        deeper.update_ranks();
+        assert_eq!(
+            deeper.games[0].status,
+            GameStatus::Playing,
+            "残った1人の状態は変えないはず"
+        );
+        assert_eq!(
+            deeper.ranks,
+            vec![Some(1), Some(2), Some(2)],
+            "脱落者より深く潜っていれば、残った1人が上位になるはず"
+        );
+        assert_eq!(deeper.outcome, Some(BattleOutcome::Ranked(1)));
+
+        let mut shallower = battle_n(&[1, 1, 1]);
+        shallower.games[1].status = GameStatus::GameOver;
+        shallower.games[2].status = GameStatus::GameOver;
+        shallower.games[1].player.row += 1;
+        shallower.games[2].player.row += 1;
+        shallower.update_ranks();
+        assert_eq!(
+            shallower.ranks,
+            vec![Some(3), Some(1), Some(1)],
+            "脱落者より浅ければ、残った1人が最下位になるはず"
+        );
+        assert_eq!(shallower.outcome, Some(BattleOutcome::Ranked(3)));
+    }
+
+    #[test]
+    fn a_player_still_alive_outranks_a_dropout_with_the_same_score_and_depth() {
+        // #318のタイブレーク。ゴール到達の有無・スコア・深度がすべて同じなら、脱落した側より
+        // 生き残っている側を上位にする(同じシードなので両者の盤面は最初から同じ値)。
+        let mut mine = battle(20, 20);
+        mine.games[1].status = GameStatus::GameOver;
+        assert_eq!(
+            (mine.games[0].player.score, mine.games[0].player.depth_m()),
+            (mine.games[1].player.score, mine.games[1].player.depth_m()),
+            "前提: スコアも深度も同じはず"
+        );
+        mine.update_ranks();
+        assert_eq!(
+            mine.ranks,
+            vec![Some(1), Some(2)],
+            "生き残っている自分が上位になるはず"
+        );
+        assert_eq!(mine.outcome, Some(BattleOutcome::Ranked(1)));
+
+        // 逆に自分が脱落した側なら下位になる。
+        let mut theirs = battle(20, 20);
+        theirs.games[0].status = GameStatus::GameOver;
+        theirs.update_ranks();
+        assert_eq!(
+            theirs.ranks,
+            vec![Some(2), Some(1)],
+            "脱落した自分が下位になるはず"
+        );
+        assert_eq!(theirs.outcome, Some(BattleOutcome::Ranked(2)));
+    }
+
+    #[test]
+    fn a_one_on_one_battle_is_decided_on_the_frame_the_opponent_drops_out() {
+        // #318: 2人対戦では片方の結果が出たそのフレームで決着する(次のフレームまで
+        // 持ち越さない)。どちらも掘っていないためスコアも深度も同じで、生存している自分が
+        // 上位になる。
+        let mut state = battle(8, 9);
+        state.games[0].set_invincible(true);
+        state.games[1].player.lives = 1;
+        state.games[1].player.oxygen = 1.0;
+
+        // 酸素切れの後、「天に召される」演出(CRUSH_ASCEND_MS=3000ms)を経てGameOverに
+        // なるため、十分なフレーム数(3000msの3倍以上)を回す。
+        advance_until(&mut state, 180, |state| {
+            state.games[1].status != GameStatus::Playing
+        });
+
+        assert_eq!(
+            state.games[1].status,
+            GameStatus::GameOver,
+            "前提: 相手が脱落しているはず"
+        );
+        assert_eq!(
+            state.outcome,
+            Some(BattleOutcome::Ranked(1)),
+            "相手が脱落したフレームでそのまま決着するはず"
+        );
+        assert_eq!(state.ranks, vec![Some(1), Some(2)]);
     }
 
     #[test]
@@ -1767,24 +1921,16 @@ mod tests {
     fn a_result_from_the_opponent_settles_my_copy_of_their_board() {
         // 12.4: 盤面の完全一致を前提にしないため、相手が申告してきた結末を自分が持つ
         // 相手のコピーへ反映する。これが無いと自分の手元で相手のコピーが延々とプレイ中の
-        // まま残り、全員の結果がそろわず順位が確定しない。
+        // まま残り、結果待ちが減らず順位が確定しない。2人対戦なので、相手の結果が届けば
+        // 残りは自分1人になり#318でその場で確定する。
         for (label, reached_goal, expected_status) in [
             ("ゴール", true, GameStatus::Cleared),
             ("脱落", false, GameStatus::GameOver),
         ] {
             let (mut host, mut peer) = battle_with_raw_peer();
-            place_just_above_goal(&mut host.games[0]);
-            advance_until(&mut host, 20, |host| {
-                host.games[0].status == GameStatus::Cleared
-            });
-            assert_eq!(
-                host.games[0].status,
-                GameStatus::Cleared,
-                "{label}: 前提: 自分はゴールしているはず"
-            );
             assert_eq!(
                 host.outcome, None,
-                "{label}: 前提: 相手の結果が出るまでは決着しないはず"
+                "{label}: 前提: 相手の結果が届く前は決着しないはず"
             );
 
             net::write_message(
@@ -1810,7 +1956,7 @@ mod tests {
             );
             assert!(
                 host.outcome.is_some(),
-                "{label}: 全員の結果がそろえば順位が確定するはず"
+                "{label}: 結果待ちが自分だけになれば順位が確定するはず"
             );
         }
     }
@@ -1819,7 +1965,7 @@ mod tests {
     fn reaching_game_over_sends_the_result_immediately_without_waiting_for_the_opponent() {
         // #306: 相手がまだプレイ中でも、自分の決着(Cleared/GameOver)が付いた時点で
         // 即座にResultを送るべき。両者が先に決着した側から送らないと、相手側の
-        // `everyone_is_done`判定がいつまでも満たされず対戦が終わらない。
+        // 結果待ち判定がいつまでも減らず対戦が終わらない。
         for (label, status, expected_reached_goal) in [
             ("脱落", GameStatus::GameOver, false),
             ("ゴール", GameStatus::Cleared, true),
@@ -1840,8 +1986,13 @@ mod tests {
                 "{label}: 相手のResultを待たず、自分の決着に沿ったResultが届くはず"
             );
             assert_eq!(
-                host.outcome, None,
-                "{label}: 相手の結果がまだ無いので、順位自体はまだ確定しないはず"
+                host.games[1].status,
+                GameStatus::Playing,
+                "{label}: 前提: 相手はまだプレイ中のはず"
+            );
+            assert!(
+                host.outcome.is_some(),
+                "{label}: 2人対戦なので、自分の決着で結果待ちが相手1人になり確定するはず(#318)"
             );
         }
     }
@@ -1863,16 +2014,9 @@ mod tests {
 
         assert!(link(&host).disconnected);
         assert_eq!(host.games[1].status, GameStatus::GameOver);
-        assert_eq!(
-            host.outcome, None,
-            "#289: 自分の結果が出るまでは不戦勝も確定しないはず"
-        );
-
-        // 自分がゴールすれば全員の結果が揃い、Byeで抜けた相手より上位(1位)で決着する。
-        place_just_above_goal(&mut host.games[0]);
-        advance_until_outcome(&mut host, 20);
-
-        assert_eq!(host.games[0].status, GameStatus::Cleared);
+        // #318: 抜けた相手を脱落として畳んだ時点で残りは自分1人になるため、自分のゴールを
+        // 待たずに不戦勝(1位)で決着する。スコアも深度も同じなので、生存している側が上位。
+        assert_eq!(host.games[0].status, GameStatus::Playing);
         assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
         assert_eq!(host.ranks, vec![Some(1), Some(2)]);
     }
@@ -1915,16 +2059,9 @@ mod tests {
             "途絶の上限に達する前に切断扱いにはしないはず"
         );
         assert_eq!(host.games[1].status, GameStatus::GameOver);
-        assert_eq!(
-            host.outcome, None,
-            "#289: 切断で相手が脱落しても、自分の結果が出るまでは決着しないはず"
-        );
-
-        // 自分がゴールすれば全員の結果が揃い、切断した相手より上位(1位)で決着する。
-        place_just_above_goal(&mut host.games[0]);
-        advance_until_outcome(&mut host, 20);
-
-        assert_eq!(host.games[0].status, GameStatus::Cleared);
+        // #318: 切断した相手を脱落として畳んだ時点で残りは自分1人になるため、自分のゴールを
+        // 待たずに1位で決着する。スコアも深度も同じなので、生存している側が上位。
+        assert_eq!(host.games[0].status, GameStatus::Playing);
         assert_eq!(host.outcome, Some(BattleOutcome::Ranked(1)));
         assert_eq!(host.ranks, vec![Some(1), Some(2)]);
     }
@@ -2243,6 +2380,57 @@ mod tests {
     }
 
     #[test]
+    fn a_mesh_decides_as_soon_as_only_one_participant_is_left_playing() {
+        // #318: 3人のうち2人が脱落した時点で、残り1人の結果を待たずに全員の手元で決着する。
+        // 残った1人は`Result`を送らないが、各自が相手の盤面も動かしているため、
+        // 通信のやり取りを増やさずに同じ判断ができる。
+        const N: usize = 3;
+        const SURVIVOR: usize = 0;
+
+        let mut states = connected_mesh(N, 9207);
+        for (p, state) in states.iter_mut().enumerate() {
+            if p == SURVIVOR {
+                // 残る1人は死なないようにして、結果を出さないまま持たせる。
+                state.games[0].set_invincible(true);
+            } else {
+                // 残り1機・酸素わずかにして、数フレームで脱落させる。
+                state.games[0].player.lives = 1;
+                state.games[0].player.oxygen = 1.0;
+            }
+        }
+        pump_all_until_outcome(&mut states);
+
+        for (h, state) in states.iter().enumerate() {
+            let survivor_index = games_index_of(N, h, SURVIVOR);
+            assert_eq!(
+                state.games[survivor_index].status,
+                GameStatus::Playing,
+                "参加者{h}の視点で、残った1人はプレイ中のままのはず"
+            );
+            assert!(
+                state.ranks.iter().all(Option::is_some),
+                "参加者{h}の視点で、残った1人ぶんも含めて順位が出るはず"
+            );
+            for p in 0..N {
+                if p == SURVIVOR {
+                    continue;
+                }
+                assert_eq!(
+                    state.games[games_index_of(N, h, p)].status,
+                    GameStatus::GameOver,
+                    "参加者{h}の視点で、脱落した参加者{p}の結果が届いていない"
+                );
+            }
+            let my_rank = state.ranks[0].expect("自分の順位も出るはず");
+            assert_eq!(
+                state.outcome,
+                Some(BattleOutcome::Ranked(my_rank)),
+                "参加者{h}: 自分の順位がそのまま決着になるはず"
+            );
+        }
+    }
+
+    #[test]
     fn a_participant_leaving_with_bye_is_ranked_last_while_the_others_keep_playing() {
         // 4人のうち1人がByeを送って抜けても、残り3人だけで対戦が進む。#289では全員の結果が
         // 揃うまで順位が出ないため、抜けた人が最下位になるのは残り3人がゴールした後。
@@ -2298,7 +2486,7 @@ mod tests {
             );
         }
 
-        // 残った3人がゴールすると全員の結果が揃い、抜けた参加者が最下位で確定する。
+        // 残った3人がゴールすると結果待ちがいなくなり、抜けた参加者が最下位で確定する。
         for (h, state) in states.iter_mut().enumerate() {
             let leaver_index = games_index_of(N, h, LEAVER);
             for (index, game) in state.games.iter_mut().enumerate() {
@@ -2948,7 +3136,7 @@ mod tests {
     #[test]
     fn losing_the_host_settles_the_ai_slots_it_was_driving() {
         // #308: AIの枠を進めるのはホストだけなので、ホストが抜けるとゲストの手元でAIの
-        // 盤面がプレイ中のまま固まり、全員の結果がそろわず対戦が永久に終わらなくなる。
+        // 盤面がプレイ中のまま固まり、結果待ちが減らず対戦が永久に終わらなくなる。
         // ホストの切断を検知したら、その枠も一緒に倒して順位確定へ進めるはず。
         const HUMANS: usize = 2;
         const AIS: usize = 1;
@@ -2985,14 +3173,11 @@ mod tests {
             "ホストが動かしていたAIの枠も一緒に倒すはず(#308)"
         );
 
-        // 残っているのは自分だけなので、自分が決着すれば対戦も終わる。
-        place_just_above_goal(&mut guest.games[0]);
-        advance_until_outcome(&mut guest, MAX_PUMPS);
-
+        // 残っているのは自分だけなので、#318では自分のゴールを待たずに決着する。
         assert_eq!(
             guest.games[0].status,
-            GameStatus::Cleared,
-            "前提: 自分はゴールしているはず"
+            GameStatus::Playing,
+            "残った自分の状態は変えないはず"
         );
         assert_eq!(
             guest.outcome,
