@@ -31,27 +31,25 @@ const ALPHA_THRESHOLD: u8 = 128;
 /// 受けてcontain寄りに再調整した。
 const SPLASH_ZOOM_BLEND: f32 = 0.25;
 
-/// 起動時スプラッシュ用のピクセルキャンバスを、端末セル`target_cols`×`target_rows`
-/// ぶんの画面全体を覆うサイズで組み立てる(TERM独自拡張。#148。ユーザー提案:
-/// 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。
-///
-/// 以前(#129)はアート:案内文の高さ比を黄金比にする方針だったため、画面全体を
-/// 使わずアート自体の解像度を絞る必要があり、結果としてアートが低解像度で
-/// 潰れて見える問題があった。ロゴ・案内文をアートの上に重ね描きする方式に
-/// 変えたことで、アートは画面全体をそのまま使えるようになった。
+/// 画像バイト列を、端末セル`target_cols`×`target_rows`ぶんの画面全体を覆うサイズの
+/// ピクセルキャンバスへ変換する(`build_canvas`・`build_player_name_canvas`共通の実体)。
 ///
 /// 1端末セル=横1論理ピクセル・縦2論理ピクセル(ハーフブロック疑似2倍解像度、
 /// `pixel_canvas.rs`参照)。containの拡大率(欠けずに収まるが左右の余白が
 /// 大きくなりうる)とcoverの拡大率(画面は埋まるが縦長の元画像では上下を
-/// 大きく切り落とす)を`SPLASH_ZOOM_BLEND`で混ぜ合わせ、全身が見えつつ画面も
-/// そこそこ埋まる中間の拡大率にする(TERM独自拡張。#201フォローアップ)。
+/// 大きく切り落とす)を`zoom_blend`(0.0=contain・1.0=cover)で混ぜ合わせる。
 /// はみ出した分は中央基準で切り落とし、余った分はキャンバスの下地色のまま
 /// 残す(引き伸ばして歪めることはしない)。
-pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
+fn build_canvas_from(
+    image_bytes: &[u8],
+    zoom_blend: f32,
+    target_cols: u16,
+    target_rows: u16,
+) -> PixelCanvas {
     let background = colors::LETTERBOX_BG;
 
-    let decoded = image::load_from_memory(INTRO_IMAGE_BYTES)
-        .expect("assets/intro.png must be a valid, bundled PNG");
+    let decoded = image::load_from_memory(image_bytes)
+        .expect("embedded background image must be a valid, bundled PNG");
     let (src_w, src_h) = decoded.dimensions();
 
     let target_w = (target_cols as u32).max(1);
@@ -61,7 +59,7 @@ pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
     let scale_h = target_h as f32 / src_h.max(1) as f32;
     let contain_scale = scale_w.min(scale_h);
     let cover_scale = scale_w.max(scale_h);
-    let scale = contain_scale + SPLASH_ZOOM_BLEND * (cover_scale - contain_scale);
+    let scale = contain_scale + zoom_blend * (cover_scale - contain_scale);
     let resized_w = ((src_w as f32) * scale).round().max(1.0) as u32;
     let resized_h = ((src_h as f32) * scale).round().max(1.0) as u32;
 
@@ -94,6 +92,41 @@ pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
     canvas
 }
 
+/// 起動時スプラッシュ用のピクセルキャンバスを、端末セル`target_cols`×`target_rows`
+/// ぶんの画面全体を覆うサイズで組み立てる(TERM独自拡張。#148。ユーザー提案:
+/// 「フルスクリーンにAAいっぱいにして題字を挿入したらよくね?」)。
+///
+/// 以前(#129)はアート:案内文の高さ比を黄金比にする方針だったため、画面全体を
+/// 使わずアート自体の解像度を絞る必要があり、結果としてアートが低解像度で
+/// 潰れて見える問題があった。ロゴ・案内文をアートの上に重ね描きする方式に
+/// 変えたことで、アートは画面全体をそのまま使えるようになった。ブレンド係数
+/// `SPLASH_ZOOM_BLEND`は全身が見えつつ画面もそこそこ埋まる値にしてある
+/// (TERM独自拡張。#201フォローアップ)。
+pub fn build_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
+    build_canvas_from(
+        INTRO_IMAGE_BYTES,
+        SPLASH_ZOOM_BLEND,
+        target_cols,
+        target_rows,
+    )
+}
+
+/// 埋め込み画像(`assets/player-name-bg.png`)。対戦の入口となる表示名入力画面(#270)の
+/// 背景アート(#327)。
+const PLAYER_NAME_BG_IMAGE_BYTES: &[u8] = include_bytes!("../../assets/player-name-bg.png");
+
+/// 表示名入力画面(#270)の背景アート(#327)用のピクセルキャンバスを組み立てる。
+/// ブレンド係数はタイトルと同じ`SPLASH_ZOOM_BLEND`を使う(エンブレムの全体を
+/// 見せたい絵なのでcontain寄りが合う)。
+pub fn build_player_name_canvas(target_cols: u16, target_rows: u16) -> PixelCanvas {
+    build_canvas_from(
+        PLAYER_NAME_BG_IMAGE_BYTES,
+        SPLASH_ZOOM_BLEND,
+        target_cols,
+        target_rows,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +156,19 @@ mod tests {
         let canvas = build_canvas(1, 1);
         let lines = canvas.to_lines(1.0);
         assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn build_player_name_canvas_fills_the_exact_requested_terminal_size() {
+        // #327: build_canvasと同じく、アートは画面いっぱいに表示する。
+        let canvas = build_player_name_canvas(100, 40);
+        let lines = canvas.to_lines(1.0);
+        assert!(!lines.is_empty());
+        assert_eq!(lines.len(), 40, "行数は要求したtarget_rowsと一致するはず");
+        assert_eq!(
+            lines[0].spans.len(),
+            100,
+            "幅は要求したtarget_colsと一致するはず"
+        );
     }
 }

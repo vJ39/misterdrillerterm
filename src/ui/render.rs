@@ -773,8 +773,31 @@ fn player_name_input_spans(state: &TextEditState, text_style: Style) -> Vec<Span
     spans
 }
 
-/// 表示名の入力画面(`Screen::PlayerNameInput`)を描画する(#270)。ロビー画面と同じ
-/// 中央の枠付きボックスに、見出し・編集中の1行・操作案内を出す。
+/// 表示名入力画面のアートは端末いっぱいに表示する。アート構築(PNGデコード+Lanczos3
+/// リサイズ)は重く、`draw_player_name_input`は毎フレーム呼ばれるため、端末サイズが
+/// 変わらない限り再利用するキャッシュを持つ(`title_art_lines`と同じ理由・同じ構造)。
+type PlayerNameArtCache = Option<((u16, u16), Vec<Line<'static>>)>;
+
+fn player_name_art_lines(cols: u16, rows: u16) -> Vec<Line<'static>> {
+    thread_local! {
+        static CACHE: RefCell<PlayerNameArtCache> = const { RefCell::new(None) };
+    }
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((size, lines)) = cache.as_ref()
+            && *size == (cols, rows)
+        {
+            return lines.clone();
+        }
+        let canvas = intro::build_player_name_canvas(cols, rows);
+        let lines = canvas.to_lines(1.0);
+        *cache = Some(((cols, rows), lines.clone()));
+        lines
+    })
+}
+
+/// 表示名の入力画面(`Screen::PlayerNameInput`)を描画する(#270)。背景アート(#327)の上に、
+/// ロビー画面と同じ中央の枠付きボックスで見出し・編集中の1行・操作案内を重ね描きする。
 pub fn draw_player_name_input(frame: &mut Frame, state: &TextEditState) {
     let area = frame.area();
 
@@ -783,6 +806,13 @@ pub fn draw_player_name_input(frame: &mut Frame, state: &TextEditState) {
         Style::default()
             .fg(colors::LETTERBOX_BG)
             .bg(colors::LETTERBOX_BG),
+    );
+
+    // アートを画面いっぱいに表示する。
+    let art_lines = player_name_art_lines(area.width, area.height);
+    frame.render_widget(
+        Paragraph::new(Text::from(art_lines)).alignment(Alignment::Center),
+        area,
     );
 
     let frame_rect = centered_fixed_rect(TOTAL_SCREEN_W, TOTAL_SCREEN_H, area);
@@ -4908,6 +4938,14 @@ mod tests {
     /// 表示名入力画面を実描画して、画面に見えている文字を返す。
     fn render_player_name_input(state: &TextEditState) -> String {
         rendered_screen_text(|frame| draw_player_name_input(frame, state))
+    }
+
+    #[test]
+    fn player_name_art_lines_fills_the_exact_requested_terminal_size() {
+        // #327: title_art_linesと同じく、アートは画面いっぱいに表示する。
+        let lines = player_name_art_lines(100, 40);
+        assert_eq!(lines.len(), 40);
+        assert_eq!(lines[0].spans.len(), 100);
     }
 
     #[test]
