@@ -8,21 +8,45 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use crate::constants::{
-    ATTACK_BLOCKS_PER_BOMB_DEFAULT, ATTACK_BLOCKS_PER_ROCK_DEFAULT,
-    ATTACK_BOMB_RATIO_PERCENT_DEFAULT, ATTACK_BOMBS_PER_WAVE_MAX_DEFAULT,
-    ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT, BOMB_FUSE_MS, CHAIN_VANISH_INTERVAL_MS_DEFAULT,
-    COLOR_COUNT_DEFAULT, COURSE_NORMAL_DEPTH_M, DODGE_RECOVERY_MS_DEFAULT, FALL_TICK_MS,
-    FIELD_WIDTH_DEFAULT, MOVE_COOLDOWN_MS_DEFAULT, REWIND_STOCK_MAX_DEFAULT,
+    ATTACK_BLOCKS_PER_BOMB_DEFAULT, ATTACK_BLOCKS_PER_BOMB_MAX, ATTACK_BLOCKS_PER_BOMB_MIN,
+    ATTACK_BLOCKS_PER_ROCK_DEFAULT, ATTACK_BLOCKS_PER_ROCK_MAX, ATTACK_BLOCKS_PER_ROCK_MIN,
+    ATTACK_BOMB_RATIO_PERCENT_DEFAULT, ATTACK_BOMB_RATIO_PERCENT_MAX,
+    ATTACK_BOMB_RATIO_PERCENT_MIN, ATTACK_BOMBS_PER_WAVE_MAX_DEFAULT,
+    ATTACK_BOMBS_PER_WAVE_MAX_MAX, ATTACK_BOMBS_PER_WAVE_MAX_MIN,
+    ATTACK_ROCKS_PER_WAVE_MAX_DEFAULT, ATTACK_ROCKS_PER_WAVE_MAX_MAX,
+    ATTACK_ROCKS_PER_WAVE_MAX_MIN, BOMB_FUSE_MS, BOMB_FUSE_MS_MAX, BOMB_FUSE_MS_MIN,
+    BOMB_SPAWN_RATE_PERCENT_MAX, BOMB_SPAWN_RATE_PERCENT_MIN, CHAIN_VANISH_INTERVAL_MS_DEFAULT,
+    CHAIN_VANISH_INTERVAL_MS_MAX, CHAIN_VANISH_INTERVAL_MS_MIN, COLOR_CLUSTER_RATE_PERCENT_MIN,
+    COLOR_COUNT_DEFAULT, COLOR_COUNT_MAX, COLOR_COUNT_MIN, COURSE_NORMAL_DEPTH_M,
+    DEBUG_FALL_TICK_MS_MAX, DEBUG_FALL_TICK_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX,
+    DEBUG_SHAKE_DURATION_MS_MIN, DIAMOND_SPAWN_RATE_PERCENT_MIN, DODGE_RECOVERY_MS_DEFAULT,
+    DODGE_RECOVERY_MS_MAX, DODGE_RECOVERY_MS_MIN, FALL_TICK_MS, FIELD_WIDTH_DEFAULT,
+    FIELD_WIDTH_MAX, FIELD_WIDTH_MIN, ITEM_SPAWN_RATE_PERCENT_MIN, MOVE_COOLDOWN_MS_DEFAULT,
+    MOVE_COOLDOWN_MS_MAX, MOVE_COOLDOWN_MS_MIN, REWIND_STOCK_MAX_DEFAULT,
     REWIND_STOCK_MAX_SETTING_MAX, REWIND_STOCK_MAX_SETTING_MIN, SHAKE_DURATION_MS,
-    SOUND_VOLUME_PERCENT_DEFAULT, SOUND_VOLUME_PERCENT_MAX, SPAWN_RATE_PERCENT_DEFAULT,
+    SOUND_VOLUME_PERCENT_DEFAULT, SOUND_VOLUME_PERCENT_MAX, SOUND_VOLUME_PERCENT_MIN,
+    SPAWN_RATE_PERCENT_DEFAULT, SPAWN_RATE_PERCENT_MAX, SPAWN_RATE_PERCENT_MIN,
+    STAR_SPAWN_RATE_PERCENT_MAX, STAR_SPAWN_RATE_PERCENT_MIN,
 };
 
 const SETTINGS_DIR_NAME: &str = "misterdrillerterm";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 
 /// 永続化するユーザー設定一式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// JSONのキー名はフィールド名そのままで、`#[serde(rename)]`は使わない(手書きJSONで
+/// 保存していた時代のファイルをそのまま読めるようにするため。フィールド名を変えると
+/// 既存のsettings.jsonの該当項目が読めなくなる)。
+///
+/// `#[serde(default)]`はキーが欠けている項目だけを`Default`で補うためのもの。
+/// 設定項目を追加した版より前に保存されたファイル(#312のai_*追加前等)を読んでも、
+/// 既に保存されていた項目を捨てずに済む。型不一致等でJSONとして解釈できない場合は
+/// 項目単位では救わず、`load_from`が全体を既定値へ差し替える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// MUSIC(BGM)のON/OFF。TERM独自拡張。ユーザー指摘により、一括のサウンドON/OFFから
     /// MUSIC/SEの個別トグルへ分離した。
@@ -226,8 +250,6 @@ fn settings_path() -> Option<PathBuf> {
 
 impl Settings {
     /// 保存済み設定を読み込む。保存先が無い/ファイルが無い場合は既定値を返す。
-    /// 個々のフィールドはファイルの内容に関わらず独立にパースし、壊れている
-    /// フィールドがあってもそのフィールドだけ既定値にフォールバックする。
     pub fn load() -> Self {
         let Some(path) = settings_path() else {
             return Self::default();
@@ -236,177 +258,143 @@ impl Settings {
     }
 
     /// `path`から設定を読み込む(実体、テストからは実ユーザーディレクトリを介さず
-    /// 一時ディレクトリ上のパスで直接呼べる)。ファイルが無い場合は既定値を返す。
+    /// 一時ディレクトリ上のパスで直接呼べる)。ファイルが無い場合、およびJSONとして
+    /// 解釈できない場合(値の型が違う・数値がフィールドの型に収まらない等)は、項目単位で
+    /// 救わずに全体を既定値にする。以前は手書きパーサで項目ごとに拾っていたが、u64で
+    /// 読んでからu32/u8へasキャストする形だったため、範囲外の値が黙って別の値に化ける
+    /// 経路があった(#227で一度踏んでいる)。
     fn load_from(path: &std::path::Path) -> Self {
-        let default = Self::default();
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return default;
-        };
-        Settings {
-            music_enabled: parse_bool_field(&text, "music_enabled")
-                .unwrap_or(default.music_enabled),
-            se_enabled: parse_bool_field(&text, "se_enabled").unwrap_or(default.se_enabled),
-            // 音量は他のフィールドと異なり、読み込み時に意図的にSOUND_VOLUME_PERCENT_MAX
-            // でクランプする。手編集や破損データで異常値が入っていると、起動直後から
-            // 振幅に直結する音量が爆音になりかねないため(#224)。
-            music_volume_percent: parse_u64_field(&text, "music_volume_percent")
-                .map(|v| v.min(SOUND_VOLUME_PERCENT_MAX as u64) as u32)
-                .unwrap_or(default.music_volume_percent),
-            se_volume_percent: parse_u64_field(&text, "se_volume_percent")
-                .map(|v| v.min(SOUND_VOLUME_PERCENT_MAX as u64) as u32)
-                .unwrap_or(default.se_volume_percent),
-            block_fall_tick_ms: parse_u64_field(&text, "block_fall_tick_ms")
-                .unwrap_or(default.block_fall_tick_ms),
-            player_fall_tick_ms: parse_u64_field(&text, "player_fall_tick_ms")
-                .unwrap_or(default.player_fall_tick_ms),
-            shake_duration_ms: parse_u64_field(&text, "shake_duration_ms")
-                .unwrap_or(default.shake_duration_ms),
-            rock_spawn_rate_percent: parse_u64_field(&text, "rock_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.rock_spawn_rate_percent),
-            air_spawn_rate_percent: parse_u64_field(&text, "air_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.air_spawn_rate_percent),
-            star_spawn_rate_percent: parse_u64_field(&text, "star_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.star_spawn_rate_percent),
-            diamond_spawn_rate_percent: parse_u64_field(&text, "diamond_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.diamond_spawn_rate_percent),
-            item_clear_above_rate_percent: parse_u64_field(&text, "item_clear_above_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.item_clear_above_rate_percent),
-            item_unify_colors_rate_percent: parse_u64_field(
-                &text,
-                "item_unify_colors_rate_percent",
-            )
-            .map(|v| v as u32)
-            .unwrap_or(default.item_unify_colors_rate_percent),
-            item_starify_screen_rate_percent: parse_u64_field(
-                &text,
-                "item_starify_screen_rate_percent",
-            )
-            .map(|v| v as u32)
-            .unwrap_or(default.item_starify_screen_rate_percent),
-            color_count: parse_u64_field(&text, "color_count")
-                .map(|v| v as u8)
-                .unwrap_or(default.color_count),
-            color_cluster_rate_percent: parse_u64_field(&text, "color_cluster_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.color_cluster_rate_percent),
-            dodge_recovery_ms: parse_u64_field(&text, "dodge_recovery_ms")
-                .unwrap_or(default.dodge_recovery_ms),
-            move_cooldown_ms: parse_u64_field(&text, "move_cooldown_ms")
-                .unwrap_or(default.move_cooldown_ms),
-            field_width: parse_u64_field(&text, "field_width")
-                .map(|v| v as usize)
-                .unwrap_or(default.field_width),
-            bomb_spawn_rate_percent: parse_u64_field(&text, "bomb_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.bomb_spawn_rate_percent),
-            bomb_fuse_ms: parse_u64_field(&text, "bomb_fuse_ms")
-                .map(|v| v as u32)
-                .unwrap_or(default.bomb_fuse_ms),
-            attack_blocks_per_rock: parse_u64_field(&text, "attack_blocks_per_rock")
-                .map(|v| v as u32)
-                .unwrap_or(default.attack_blocks_per_rock),
-            attack_rocks_per_wave_max: parse_u64_field(&text, "attack_rocks_per_wave_max")
-                .map(|v| v as u32)
-                .unwrap_or(default.attack_rocks_per_wave_max),
-            attack_blocks_per_bomb: parse_u64_field(&text, "attack_blocks_per_bomb")
-                .map(|v| v as u32)
-                .unwrap_or(default.attack_blocks_per_bomb),
-            attack_bombs_per_wave_max: parse_u64_field(&text, "attack_bombs_per_wave_max")
-                .map(|v| v as u32)
-                .unwrap_or(default.attack_bombs_per_wave_max),
-            attack_bomb_ratio_percent: parse_u64_field(&text, "attack_bomb_ratio_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.attack_bomb_ratio_percent),
-            debug_log_enabled: parse_bool_field(&text, "debug_log_enabled")
-                .unwrap_or(default.debug_log_enabled),
-            chain_vanish_interval_ms: parse_u64_field(&text, "chain_vanish_interval_ms")
-                .unwrap_or(default.chain_vanish_interval_ms),
-            last_course_depth_m: parse_u64_field(&text, "last_course_depth_m")
-                .map(|v| v as usize)
-                .unwrap_or(default.last_course_depth_m),
-            // 巻き戻しストック上限(#233)は取り得る値が0〜5と狭く、範囲外の値を
-            // そのまま受け入れても設定画面の増減で戻せないだけなので、範囲外なら
-            // 既定値へフォールバックする。
-            rewind_stock_max: parse_u64_field(&text, "rewind_stock_max")
-                .filter(|&v| {
-                    (REWIND_STOCK_MAX_SETTING_MIN as u64..=REWIND_STOCK_MAX_SETTING_MAX as u64)
-                        .contains(&v)
-                })
-                .map(|v| v as u8)
-                .unwrap_or(default.rewind_stock_max),
-            // AI専用値(#312)。既存の設定ファイルにはこれらのキーが無いので、
-            // 1項目ずつ人間用と同じ既定値へフォールバックする。
-            ai_block_fall_tick_ms: parse_u64_field(&text, "ai_block_fall_tick_ms")
-                .unwrap_or(default.ai_block_fall_tick_ms),
-            ai_player_fall_tick_ms: parse_u64_field(&text, "ai_player_fall_tick_ms")
-                .unwrap_or(default.ai_player_fall_tick_ms),
-            ai_shake_duration_ms: parse_u64_field(&text, "ai_shake_duration_ms")
-                .unwrap_or(default.ai_shake_duration_ms),
-            ai_rock_spawn_rate_percent: parse_u64_field(&text, "ai_rock_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_rock_spawn_rate_percent),
-            ai_air_spawn_rate_percent: parse_u64_field(&text, "ai_air_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_air_spawn_rate_percent),
-            ai_star_spawn_rate_percent: parse_u64_field(&text, "ai_star_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_star_spawn_rate_percent),
-            ai_diamond_spawn_rate_percent: parse_u64_field(&text, "ai_diamond_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_diamond_spawn_rate_percent),
-            ai_item_clear_above_rate_percent: parse_u64_field(
-                &text,
-                "ai_item_clear_above_rate_percent",
-            )
-            .map(|v| v as u32)
-            .unwrap_or(default.ai_item_clear_above_rate_percent),
-            ai_item_unify_colors_rate_percent: parse_u64_field(
-                &text,
-                "ai_item_unify_colors_rate_percent",
-            )
-            .map(|v| v as u32)
-            .unwrap_or(default.ai_item_unify_colors_rate_percent),
-            ai_item_starify_screen_rate_percent: parse_u64_field(
-                &text,
-                "ai_item_starify_screen_rate_percent",
-            )
-            .map(|v| v as u32)
-            .unwrap_or(default.ai_item_starify_screen_rate_percent),
-            ai_color_count: parse_u64_field(&text, "ai_color_count")
-                .map(|v| v as u8)
-                .unwrap_or(default.ai_color_count),
-            ai_color_cluster_rate_percent: parse_u64_field(&text, "ai_color_cluster_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_color_cluster_rate_percent),
-            ai_bomb_spawn_rate_percent: parse_u64_field(&text, "ai_bomb_spawn_rate_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_bomb_spawn_rate_percent),
-            ai_bomb_fuse_ms: parse_u64_field(&text, "ai_bomb_fuse_ms")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_bomb_fuse_ms),
-            ai_attack_blocks_per_rock: parse_u64_field(&text, "ai_attack_blocks_per_rock")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_attack_blocks_per_rock),
-            ai_attack_rocks_per_wave_max: parse_u64_field(&text, "ai_attack_rocks_per_wave_max")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_attack_rocks_per_wave_max),
-            ai_attack_blocks_per_bomb: parse_u64_field(&text, "ai_attack_blocks_per_bomb")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_attack_blocks_per_bomb),
-            ai_attack_bombs_per_wave_max: parse_u64_field(&text, "ai_attack_bombs_per_wave_max")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_attack_bombs_per_wave_max),
-            ai_attack_bomb_ratio_percent: parse_u64_field(&text, "ai_attack_bomb_ratio_percent")
-                .map(|v| v as u32)
-                .unwrap_or(default.ai_attack_bomb_ratio_percent),
-            ai_chain_vanish_interval_ms: parse_u64_field(&text, "ai_chain_vanish_interval_ms")
-                .unwrap_or(default.ai_chain_vanish_interval_ms),
+        let mut settings: Self = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        settings.validate();
+        settings
+    }
+
+    /// 読み込んだ値を設定画面と同じMIN/MAX範囲へ収める。設定ファイルを直接書き換えれば
+    /// 設定画面では選べない値も入ってくるため、ゲームが使う前にここで正す。AI専用項目
+    /// (#312)は人間側と同じ範囲定数を共有する。真偽値の項目は範囲の概念が無いので対象外。
+    fn validate(&mut self) {
+        // 同じ範囲を持つ項目(人間側とAI側のミラー等)はまとめてクランプする。MINが0の
+        // 項目も一律clampにしておく(範囲定数を後から変えたときに漏れないようにするため)。
+        for v in [&mut self.music_volume_percent, &mut self.se_volume_percent] {
+            *v = (*v).clamp(SOUND_VOLUME_PERCENT_MIN, SOUND_VOLUME_PERCENT_MAX);
         }
+        for v in [
+            &mut self.block_fall_tick_ms,
+            &mut self.player_fall_tick_ms,
+            &mut self.ai_block_fall_tick_ms,
+            &mut self.ai_player_fall_tick_ms,
+        ] {
+            *v = (*v).clamp(DEBUG_FALL_TICK_MS_MIN, DEBUG_FALL_TICK_MS_MAX);
+        }
+        for v in [&mut self.shake_duration_ms, &mut self.ai_shake_duration_ms] {
+            *v = (*v).clamp(DEBUG_SHAKE_DURATION_MS_MIN, DEBUG_SHAKE_DURATION_MS_MAX);
+        }
+        for v in [
+            &mut self.rock_spawn_rate_percent,
+            &mut self.air_spawn_rate_percent,
+            &mut self.ai_rock_spawn_rate_percent,
+            &mut self.ai_air_spawn_rate_percent,
+        ] {
+            *v = (*v).clamp(SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX);
+        }
+        for v in [
+            &mut self.star_spawn_rate_percent,
+            &mut self.ai_star_spawn_rate_percent,
+        ] {
+            *v = (*v).clamp(STAR_SPAWN_RATE_PERCENT_MIN, STAR_SPAWN_RATE_PERCENT_MAX);
+        }
+        // ダイヤ・アイテム・色の結合率は下限だけ0(=出現させない)で、上限は
+        // SPAWN_RATE_PERCENT_MAXを共有する(設定画面の増減も同じ組み合わせ)。
+        for v in [
+            &mut self.diamond_spawn_rate_percent,
+            &mut self.ai_diamond_spawn_rate_percent,
+        ] {
+            *v = (*v).clamp(DIAMOND_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX);
+        }
+        for v in [
+            &mut self.item_clear_above_rate_percent,
+            &mut self.item_unify_colors_rate_percent,
+            &mut self.item_starify_screen_rate_percent,
+            &mut self.ai_item_clear_above_rate_percent,
+            &mut self.ai_item_unify_colors_rate_percent,
+            &mut self.ai_item_starify_screen_rate_percent,
+        ] {
+            *v = (*v).clamp(ITEM_SPAWN_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX);
+        }
+        for v in [
+            &mut self.color_cluster_rate_percent,
+            &mut self.ai_color_cluster_rate_percent,
+        ] {
+            *v = (*v).clamp(COLOR_CLUSTER_RATE_PERCENT_MIN, SPAWN_RATE_PERCENT_MAX);
+        }
+        for v in [&mut self.color_count, &mut self.ai_color_count] {
+            *v = (*v).clamp(COLOR_COUNT_MIN, COLOR_COUNT_MAX);
+        }
+        for v in [
+            &mut self.bomb_spawn_rate_percent,
+            &mut self.ai_bomb_spawn_rate_percent,
+        ] {
+            *v = (*v).clamp(BOMB_SPAWN_RATE_PERCENT_MIN, BOMB_SPAWN_RATE_PERCENT_MAX);
+        }
+        for v in [&mut self.bomb_fuse_ms, &mut self.ai_bomb_fuse_ms] {
+            *v = (*v).clamp(BOMB_FUSE_MS_MIN, BOMB_FUSE_MS_MAX);
+        }
+        for v in [
+            &mut self.attack_blocks_per_rock,
+            &mut self.ai_attack_blocks_per_rock,
+        ] {
+            *v = (*v).clamp(ATTACK_BLOCKS_PER_ROCK_MIN, ATTACK_BLOCKS_PER_ROCK_MAX);
+        }
+        for v in [
+            &mut self.attack_rocks_per_wave_max,
+            &mut self.ai_attack_rocks_per_wave_max,
+        ] {
+            *v = (*v).clamp(ATTACK_ROCKS_PER_WAVE_MAX_MIN, ATTACK_ROCKS_PER_WAVE_MAX_MAX);
+        }
+        for v in [
+            &mut self.attack_blocks_per_bomb,
+            &mut self.ai_attack_blocks_per_bomb,
+        ] {
+            *v = (*v).clamp(ATTACK_BLOCKS_PER_BOMB_MIN, ATTACK_BLOCKS_PER_BOMB_MAX);
+        }
+        for v in [
+            &mut self.attack_bombs_per_wave_max,
+            &mut self.ai_attack_bombs_per_wave_max,
+        ] {
+            *v = (*v).clamp(ATTACK_BOMBS_PER_WAVE_MAX_MIN, ATTACK_BOMBS_PER_WAVE_MAX_MAX);
+        }
+        for v in [
+            &mut self.attack_bomb_ratio_percent,
+            &mut self.ai_attack_bomb_ratio_percent,
+        ] {
+            *v = (*v).clamp(ATTACK_BOMB_RATIO_PERCENT_MIN, ATTACK_BOMB_RATIO_PERCENT_MAX);
+        }
+        for v in [
+            &mut self.chain_vanish_interval_ms,
+            &mut self.ai_chain_vanish_interval_ms,
+        ] {
+            *v = (*v).clamp(CHAIN_VANISH_INTERVAL_MS_MIN, CHAIN_VANISH_INTERVAL_MS_MAX);
+        }
+        // AI側を持たない項目。
+        self.dodge_recovery_ms = self
+            .dodge_recovery_ms
+            .clamp(DODGE_RECOVERY_MS_MIN, DODGE_RECOVERY_MS_MAX);
+        self.move_cooldown_ms = self
+            .move_cooldown_ms
+            .clamp(MOVE_COOLDOWN_MS_MIN, MOVE_COOLDOWN_MS_MAX);
+        self.field_width = self.field_width.clamp(FIELD_WIDTH_MIN, FIELD_WIDTH_MAX);
+        // 巻き戻しストック上限(#233)だけはクランプせず既定値へ戻す。0が「機能OFF」という
+        // 意味を持つ有効値なので、範囲外の値を上限/下限へ寄せると別の設定になってしまう。
+        if !(REWIND_STOCK_MAX_SETTING_MIN..=REWIND_STOCK_MAX_SETTING_MAX)
+            .contains(&self.rewind_stock_max)
+        {
+            self.rewind_stock_max = REWIND_STOCK_MAX_DEFAULT;
+        }
+        // last_course_depth_mはMIN/MAX定数を持たない(前回選んだコースの深度をそのまま
+        // 引き継ぐだけの値)ため、ここでは触らない。
     }
 
     /// 設定を保存する。保存先ディレクトリが無ければ作成する。書き込みに失敗しても
@@ -426,59 +414,13 @@ impl Settings {
         {
             return;
         }
-        let json = format!(
-            "{{\n  \"music_enabled\": {},\n  \"se_enabled\": {},\n  \"music_volume_percent\": {},\n  \"se_volume_percent\": {},\n  \"block_fall_tick_ms\": {},\n  \"player_fall_tick_ms\": {},\n  \"shake_duration_ms\": {},\n  \"rock_spawn_rate_percent\": {},\n  \"air_spawn_rate_percent\": {},\n  \"star_spawn_rate_percent\": {},\n  \"diamond_spawn_rate_percent\": {},\n  \"item_clear_above_rate_percent\": {},\n  \"item_unify_colors_rate_percent\": {},\n  \"item_starify_screen_rate_percent\": {},\n  \"color_count\": {},\n  \"color_cluster_rate_percent\": {},\n  \"dodge_recovery_ms\": {},\n  \"move_cooldown_ms\": {},\n  \"field_width\": {},\n  \"bomb_spawn_rate_percent\": {},\n  \"bomb_fuse_ms\": {},\n  \"attack_blocks_per_rock\": {},\n  \"attack_rocks_per_wave_max\": {},\n  \"attack_blocks_per_bomb\": {},\n  \"attack_bombs_per_wave_max\": {},\n  \"attack_bomb_ratio_percent\": {},\n  \"debug_log_enabled\": {},\n  \"chain_vanish_interval_ms\": {},\n  \"last_course_depth_m\": {},\n  \"rewind_stock_max\": {},\n  \"ai_block_fall_tick_ms\": {},\n  \"ai_player_fall_tick_ms\": {},\n  \"ai_shake_duration_ms\": {},\n  \"ai_rock_spawn_rate_percent\": {},\n  \"ai_air_spawn_rate_percent\": {},\n  \"ai_star_spawn_rate_percent\": {},\n  \"ai_diamond_spawn_rate_percent\": {},\n  \"ai_item_clear_above_rate_percent\": {},\n  \"ai_item_unify_colors_rate_percent\": {},\n  \"ai_item_starify_screen_rate_percent\": {},\n  \"ai_color_count\": {},\n  \"ai_color_cluster_rate_percent\": {},\n  \"ai_bomb_spawn_rate_percent\": {},\n  \"ai_bomb_fuse_ms\": {},\n  \"ai_attack_blocks_per_rock\": {},\n  \"ai_attack_rocks_per_wave_max\": {},\n  \"ai_attack_blocks_per_bomb\": {},\n  \"ai_attack_bombs_per_wave_max\": {},\n  \"ai_attack_bomb_ratio_percent\": {},\n  \"ai_chain_vanish_interval_ms\": {}\n}}\n",
-            self.music_enabled,
-            self.se_enabled,
-            self.music_volume_percent,
-            self.se_volume_percent,
-            self.block_fall_tick_ms,
-            self.player_fall_tick_ms,
-            self.shake_duration_ms,
-            self.rock_spawn_rate_percent,
-            self.air_spawn_rate_percent,
-            self.star_spawn_rate_percent,
-            self.diamond_spawn_rate_percent,
-            self.item_clear_above_rate_percent,
-            self.item_unify_colors_rate_percent,
-            self.item_starify_screen_rate_percent,
-            self.color_count,
-            self.color_cluster_rate_percent,
-            self.dodge_recovery_ms,
-            self.move_cooldown_ms,
-            self.field_width,
-            self.bomb_spawn_rate_percent,
-            self.bomb_fuse_ms,
-            self.attack_blocks_per_rock,
-            self.attack_rocks_per_wave_max,
-            self.attack_blocks_per_bomb,
-            self.attack_bombs_per_wave_max,
-            self.attack_bomb_ratio_percent,
-            self.debug_log_enabled,
-            self.chain_vanish_interval_ms,
-            self.last_course_depth_m,
-            self.rewind_stock_max,
-            self.ai_block_fall_tick_ms,
-            self.ai_player_fall_tick_ms,
-            self.ai_shake_duration_ms,
-            self.ai_rock_spawn_rate_percent,
-            self.ai_air_spawn_rate_percent,
-            self.ai_star_spawn_rate_percent,
-            self.ai_diamond_spawn_rate_percent,
-            self.ai_item_clear_above_rate_percent,
-            self.ai_item_unify_colors_rate_percent,
-            self.ai_item_starify_screen_rate_percent,
-            self.ai_color_count,
-            self.ai_color_cluster_rate_percent,
-            self.ai_bomb_spawn_rate_percent,
-            self.ai_bomb_fuse_ms,
-            self.ai_attack_blocks_per_rock,
-            self.ai_attack_rocks_per_wave_max,
-            self.ai_attack_blocks_per_bomb,
-            self.ai_attack_bombs_per_wave_max,
-            self.ai_attack_bomb_ratio_percent,
-            self.ai_chain_vanish_interval_ms
-        );
+        // キー名も並び順もフィールドの宣言順そのままなので、手書きで組み立てていた頃と
+        // 同じ内容になる。to_string_prettyは末尾に改行を付けないため、以前のファイルと
+        // 同じく改行で終わるよう足す。
+        let Ok(mut json) = serde_json::to_string_pretty(&self) else {
+            return;
+        };
+        json.push('\n');
         // 一時ファイルへ書いてからrenameすることで保存をアトミックにする(TERM独自
         // 拡張。#158)。File::create+write_allをpathへ直接行うと、書き込み途中で
         // プロセスが中断された場合に既存の設定ファイルが不完全な内容のまま残る
@@ -502,46 +444,9 @@ impl Settings {
     }
 }
 
-/// 手書きの最小限JSONパーサ: `"key": true|false`の形の真偽値フィールドを1つ読む。
-/// この用途に見合わない`serde`等の依存追加を避けるため、あえて手書きにしている。
-fn parse_bool_field(text: &str, key: &str) -> Option<bool> {
-    let after_colon = value_after_key(text, key)?;
-    if after_colon.starts_with("true") {
-        Some(true)
-    } else if after_colon.starts_with("false") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-/// 手書きの最小限JSONパーサ: `"key": 123`の形の非負整数フィールドを1つ読む。
-fn parse_u64_field(text: &str, key: &str) -> Option<u64> {
-    let after_colon = value_after_key(text, key)?;
-    let digits_end = after_colon
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after_colon.len());
-    after_colon[..digits_end].parse().ok()
-}
-
-/// `"key": <値>`の`<値>`より前の空白を読み飛ばした位置から始まる部分文字列を返す。
-fn value_after_key<'a>(text: &'a str, key: &str) -> Option<&'a str> {
-    let quoted_key = format!("\"{key}\"");
-    let key_pos = text.find(&quoted_key)?;
-    let after_key = &text[key_pos + quoted_key.len()..];
-    let colon_pos = after_key.find(':')?;
-    Some(after_key[colon_pos + 1..].trim_start())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{
-        ATTACK_BLOCKS_PER_BOMB_MAX, ATTACK_BLOCKS_PER_BOMB_MIN, ATTACK_BLOCKS_PER_ROCK_MAX,
-        ATTACK_BLOCKS_PER_ROCK_MIN, ATTACK_BOMB_RATIO_PERCENT_MAX, ATTACK_BOMB_RATIO_PERCENT_MIN,
-        ATTACK_BOMBS_PER_WAVE_MAX_MAX, ATTACK_BOMBS_PER_WAVE_MAX_MIN,
-        ATTACK_ROCKS_PER_WAVE_MAX_MAX, ATTACK_ROCKS_PER_WAVE_MAX_MIN,
-    };
 
     #[test]
     fn default_settings_has_music_and_se_enabled_and_default_fall_speeds() {
@@ -665,41 +570,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    #[test]
-    fn parse_bool_field_reads_true() {
-        assert_eq!(
-            parse_bool_field("{\"music_enabled\": true}", "music_enabled"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn parse_bool_field_reads_false_with_pretty_formatting() {
-        assert_eq!(
-            parse_bool_field("{\n  \"se_enabled\": false\n}\n", "se_enabled"),
-            Some(false)
-        );
-    }
-
-    #[test]
-    fn parse_bool_field_returns_none_for_malformed_or_missing_key() {
-        assert_eq!(parse_bool_field("not json", "music_enabled"), None);
-        assert_eq!(parse_bool_field("{}", "music_enabled"), None);
-    }
-
-    #[test]
-    fn parse_u64_field_reads_value() {
-        assert_eq!(
-            parse_u64_field("{\"block_fall_tick_ms\": 275}", "block_fall_tick_ms"),
-            Some(275)
-        );
-    }
-
-    #[test]
-    fn parse_u64_field_returns_none_for_missing_key() {
-        assert_eq!(parse_u64_field("{}", "block_fall_tick_ms"), None);
-    }
-
     /// テスト専用: OSの実ユーザーデータディレクトリ(`settings_path()`)を一切
     /// 経由しない、一時ディレクトリ上の使い捨てパスを返す。`tag`はテストごとに
     /// ユニークな名前を渡し、並行実行される他テストのファイルと衝突しないようにする。
@@ -749,12 +619,13 @@ mod tests {
             last_course_depth_m: 500,
             rewind_stock_max: REWIND_STOCK_MAX_SETTING_MIN,
             // AI専用値(#312)は対応する人間用の値とわざと別の値にしておく。JSONの
-            // 書き出し順とパース順がずれて取り違えられたらここで落ちる。
+            // キーと値の対応がずれて取り違えられたらここで落ちる。読み込み時に
+            // `validate`が走るため、各値はMIN/MAXの範囲内から選ぶ。
             ai_block_fall_tick_ms: 500,
             ai_player_fall_tick_ms: 450,
             ai_shake_duration_ms: 800,
-            ai_rock_spawn_rate_percent: 11,
-            ai_air_spawn_rate_percent: 12,
+            ai_rock_spawn_rate_percent: 40,
+            ai_air_spawn_rate_percent: 80,
             ai_star_spawn_rate_percent: 13,
             ai_diamond_spawn_rate_percent: 14,
             ai_item_clear_above_rate_percent: 15,
@@ -897,12 +768,14 @@ mod tests {
     fn load_from_missing_ai_setting_keys_falls_back_to_defaults() {
         // #312を追加する前に保存されたsettings.jsonにはai_*のキー自体が無い。
         // 人間用の値だけが書かれたファイルを読んでも、AI専用値は既定値になる。
+        // `Settings`の`#[serde(default)]`(#322)がこの後方互換を担保している部分で、
+        // これが外れると古いファイルを読んだ時に人間用の値まで既定値に戻る。
         let path = temp_settings_path("ai-missing-keys");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "{\"block_fall_tick_ms\": 77, \"color_count\": 2, \"attack_blocks_per_rock\": 33}",
+            "{\"block_fall_tick_ms\": 77, \"color_count\": 2, \"attack_blocks_per_rock\": 23}",
         )
         .unwrap();
 
@@ -910,7 +783,7 @@ mod tests {
 
         assert_eq!(loaded.block_fall_tick_ms, 77);
         assert_eq!(loaded.color_count, 2);
-        assert_eq!(loaded.attack_blocks_per_rock, 33);
+        assert_eq!(loaded.attack_blocks_per_rock, 23);
         assert_eq!(
             ai_only_values(&loaded),
             ai_only_values(&Settings::default())
@@ -921,9 +794,9 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips_the_ai_only_values_without_touching_the_human_ones() {
-        // #312: serdeを使わない手書きJSONなので、20項目のうち1つでも書き出しか
-        // パースを落とすと静かに既定値へ戻る。人間用と別の値を保存して、両方が
-        // 独立に復元されることを確認する。
+        // #312: 20項目のうち1つでもキーの対応を間違えると、静かに既定値へ戻るか
+        // 人間用の値と入れ替わる。人間用と別の値を保存して、両方が独立に
+        // 復元されることを確認する。
         let path = temp_settings_path("ai-roundtrip");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
 
@@ -945,7 +818,9 @@ mod tests {
             ai_bomb_fuse_ms: base.bomb_fuse_ms + 13,
             ai_attack_blocks_per_rock: base.attack_blocks_per_rock + 14,
             ai_attack_rocks_per_wave_max: base.attack_rocks_per_wave_max + 15,
-            ai_attack_blocks_per_bomb: base.attack_blocks_per_bomb + 16,
+            // +16ではATTACK_BLOCKS_PER_BOMB_MAXを超えて`validate`に丸められるため、
+            // 人間用と別の値のまま範囲に収まる+9にしている。
+            ai_attack_blocks_per_bomb: base.attack_blocks_per_bomb + 9,
             ai_attack_bombs_per_wave_max: base.attack_bombs_per_wave_max + 17,
             ai_attack_bomb_ratio_percent: base.attack_bomb_ratio_percent + 18,
             ai_chain_vanish_interval_ms: base.chain_vanish_interval_ms + 19,
@@ -1021,8 +896,9 @@ mod tests {
     }
 
     #[test]
-    fn load_from_partially_corrupted_file_keeps_valid_fields_and_defaults_the_rest() {
-        // music_enabledだけ壊れていても、block_fall_tick_msは正しく読み取れる。
+    fn load_from_partially_corrupted_file_falls_back_to_default_for_every_field() {
+        // #322: 1箇所でもJSONとして解釈できない書き方があれば、同じファイルの中で
+        // 読める値(block_fall_tick_ms)も採用せず全体を既定値にする。
         let path = temp_settings_path("partial");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1034,8 +910,51 @@ mod tests {
 
         let loaded = Settings::load_from(&path);
 
-        assert_eq!(loaded.music_enabled, Settings::default().music_enabled);
-        assert_eq!(loaded.block_fall_tick_ms, 300);
+        assert_eq!(loaded, Settings::default());
+        assert_ne!(loaded.block_fall_tick_ms, 300);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_type_mismatched_field_resets_the_other_valid_fields_too() {
+        // JSON自体は壊れていないが1項目だけ型が合わない(数値のはずが文字列)場合も、
+        // 項目単位では救わず全体を既定値にする(#322)。同じファイルに書かれていた
+        // 正しい値(music_enabled=false, color_count=2)も残らない。
+        let path = temp_settings_path("type-mismatch");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"music_enabled\": false, \"color_count\": 2, \"block_fall_tick_ms\": \"300\"}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded, Settings::default());
+        // 既定値と一致するだけでは書いた値が効いていないと言い切れないので、
+        // ファイルの値がそのまま残っていないことも確かめる。
+        assert!(loaded.music_enabled);
+        assert_ne!(loaded.color_count, 2);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_from_ignores_unknown_keys() {
+        // 設定項目が削除された版で保存したファイルを古い版で読む場合に備えて、
+        // 知らないキーがあっても読み込み全体を失敗させない。
+        let path = temp_settings_path("unknown-keys");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"music_enabled\": false, \"removed_setting_from_another_version\": 1}",
+        )
+        .unwrap();
+
+        assert!(!Settings::load_from(&path).music_enabled);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1060,7 +979,8 @@ mod tests {
     #[test]
     fn load_from_out_of_range_volume_clamps_to_max() {
         // 手編集や破損データで範囲外(150%)の値が入っていても、起動直後から爆音に
-        // ならないようSOUND_VOLUME_PERCENT_MAX(100%)へクランプする。
+        // ならないようSOUND_VOLUME_PERCENT_MAX(100%)へクランプする。u32には収まる値
+        // なので読み込み自体は成功し、その後の`validate`が丸める。
         let path = temp_settings_path("volume-out-of-range");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1079,22 +999,24 @@ mod tests {
     }
 
     #[test]
-    fn load_from_extremely_large_volume_still_clamps_to_max() {
-        // u32の範囲を超える値(4294967296 = 2^32)でもu64のままクランプしてからu32へ
-        // キャストするため、キャスト時の折り返りで小さい値へ化けたりしない(#227)。
+    fn load_from_volume_beyond_u32_falls_back_to_default_without_truncating() {
+        // u32に収まらない値(1099511627776 = 2^40)は読み込み自体が失敗するため、
+        // 全体が既定値になる。以前はu64で読んでu32へasキャストしていたので、下位32bit
+        // だけが残って0(無音)のような別の値へ黙って化ける経路があった(#227)。
         let path = temp_settings_path("volume-huge");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "{\"music_volume_percent\": 4294967296, \"se_volume_percent\": 4294967296}",
+            "{\"music_volume_percent\": 1099511627776, \"se_volume_percent\": 1099511627776}",
         )
         .unwrap();
 
         let loaded = Settings::load_from(&path);
 
-        assert_eq!(loaded.music_volume_percent, SOUND_VOLUME_PERCENT_MAX);
-        assert_eq!(loaded.se_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+        assert_eq!(loaded, Settings::default());
+        assert_ne!(loaded.music_volume_percent, 0);
+        assert_ne!(loaded.se_volume_percent, 0);
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1170,6 +1092,176 @@ mod tests {
 
         assert_eq!(loaded.music_volume_percent, 0);
         assert_eq!(loaded.se_volume_percent, 0);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn validate_keeps_default_settings_unchanged() {
+        // 既定値はすべてMIN/MAXの範囲内にあるはず。ここが落ちるなら定数と既定値の
+        // 組み合わせが壊れていて、初回起動時から値が丸められることになる。
+        let mut settings = Settings::default();
+
+        settings.validate();
+
+        assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn validate_clamps_human_and_ai_values_at_both_ends() {
+        // #322: 読み込み後のクランプを`validate`1箇所に集めたので、人間用とAI用の
+        // どちらも上下両方の範囲外から丸められることを確認する。
+        let mut settings = Settings {
+            music_volume_percent: SOUND_VOLUME_PERCENT_MAX + 1,
+            block_fall_tick_ms: DEBUG_FALL_TICK_MS_MIN - 1,
+            shake_duration_ms: DEBUG_SHAKE_DURATION_MS_MAX + 1,
+            rock_spawn_rate_percent: SPAWN_RATE_PERCENT_MIN - 1,
+            star_spawn_rate_percent: STAR_SPAWN_RATE_PERCENT_MAX + 1,
+            color_count: COLOR_COUNT_MIN - 1,
+            dodge_recovery_ms: DODGE_RECOVERY_MS_MAX + 1,
+            move_cooldown_ms: MOVE_COOLDOWN_MS_MIN - 1,
+            field_width: FIELD_WIDTH_MAX + 1,
+            bomb_fuse_ms: BOMB_FUSE_MS_MIN - 1,
+            attack_blocks_per_rock: ATTACK_BLOCKS_PER_ROCK_MIN - 1,
+            chain_vanish_interval_ms: CHAIN_VANISH_INTERVAL_MS_MAX + 1,
+            ai_block_fall_tick_ms: DEBUG_FALL_TICK_MS_MAX + 1,
+            ai_rock_spawn_rate_percent: SPAWN_RATE_PERCENT_MAX + 1,
+            ai_color_count: COLOR_COUNT_MAX + 1,
+            ai_bomb_fuse_ms: BOMB_FUSE_MS_MAX + 1,
+            ai_attack_bomb_ratio_percent: ATTACK_BOMB_RATIO_PERCENT_MAX + 1,
+            ..Settings::default()
+        };
+
+        settings.validate();
+
+        assert_eq!(settings.music_volume_percent, SOUND_VOLUME_PERCENT_MAX);
+        assert_eq!(settings.block_fall_tick_ms, DEBUG_FALL_TICK_MS_MIN);
+        assert_eq!(settings.shake_duration_ms, DEBUG_SHAKE_DURATION_MS_MAX);
+        assert_eq!(settings.rock_spawn_rate_percent, SPAWN_RATE_PERCENT_MIN);
+        assert_eq!(
+            settings.star_spawn_rate_percent,
+            STAR_SPAWN_RATE_PERCENT_MAX
+        );
+        assert_eq!(settings.color_count, COLOR_COUNT_MIN);
+        assert_eq!(settings.dodge_recovery_ms, DODGE_RECOVERY_MS_MAX);
+        assert_eq!(settings.move_cooldown_ms, MOVE_COOLDOWN_MS_MIN);
+        assert_eq!(settings.field_width, FIELD_WIDTH_MAX);
+        assert_eq!(settings.bomb_fuse_ms, BOMB_FUSE_MS_MIN);
+        assert_eq!(settings.attack_blocks_per_rock, ATTACK_BLOCKS_PER_ROCK_MIN);
+        assert_eq!(
+            settings.chain_vanish_interval_ms,
+            CHAIN_VANISH_INTERVAL_MS_MAX
+        );
+        assert_eq!(settings.ai_block_fall_tick_ms, DEBUG_FALL_TICK_MS_MAX);
+        assert_eq!(settings.ai_rock_spawn_rate_percent, SPAWN_RATE_PERCENT_MAX);
+        assert_eq!(settings.ai_color_count, COLOR_COUNT_MAX);
+        assert_eq!(settings.ai_bomb_fuse_ms, BOMB_FUSE_MS_MAX);
+        assert_eq!(
+            settings.ai_attack_bomb_ratio_percent,
+            ATTACK_BOMB_RATIO_PERCENT_MAX
+        );
+    }
+
+    #[test]
+    fn load_from_out_of_range_file_values_are_clamped() {
+        // `validate`を通す入口が`load_from`であることの確認。ファイル側が範囲外でも
+        // 起動時には範囲内の値になる。
+        let path = temp_settings_path("clamp-on-load");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"field_width\": 1, \"ai_color_count\": 200, \"ai_bomb_fuse_ms\": 999999}",
+        )
+        .unwrap();
+
+        let loaded = Settings::load_from(&path);
+
+        assert_eq!(loaded.field_width, FIELD_WIDTH_MIN);
+        assert_eq!(loaded.ai_color_count, COLOR_COUNT_MAX);
+        assert_eq!(loaded.ai_bomb_fuse_ms, BOMB_FUSE_MS_MAX);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn save_to_writes_every_setting_as_a_json_key() {
+        // #322でserde_jsonへ移したが、キー名が変わると既存のsettings.jsonが読めなく
+        // なる。50項目のキー名をここに書き出して固定し、フィールド名を変えたら
+        // このテストで気付けるようにする。
+        const EXPECTED_KEYS: [&str; 50] = [
+            "music_enabled",
+            "se_enabled",
+            "music_volume_percent",
+            "se_volume_percent",
+            "block_fall_tick_ms",
+            "player_fall_tick_ms",
+            "shake_duration_ms",
+            "rock_spawn_rate_percent",
+            "air_spawn_rate_percent",
+            "star_spawn_rate_percent",
+            "diamond_spawn_rate_percent",
+            "item_clear_above_rate_percent",
+            "item_unify_colors_rate_percent",
+            "item_starify_screen_rate_percent",
+            "color_count",
+            "color_cluster_rate_percent",
+            "dodge_recovery_ms",
+            "move_cooldown_ms",
+            "field_width",
+            "bomb_spawn_rate_percent",
+            "bomb_fuse_ms",
+            "attack_blocks_per_rock",
+            "attack_rocks_per_wave_max",
+            "attack_blocks_per_bomb",
+            "attack_bombs_per_wave_max",
+            "attack_bomb_ratio_percent",
+            "debug_log_enabled",
+            "chain_vanish_interval_ms",
+            "last_course_depth_m",
+            "rewind_stock_max",
+            "ai_block_fall_tick_ms",
+            "ai_player_fall_tick_ms",
+            "ai_shake_duration_ms",
+            "ai_rock_spawn_rate_percent",
+            "ai_air_spawn_rate_percent",
+            "ai_star_spawn_rate_percent",
+            "ai_diamond_spawn_rate_percent",
+            "ai_item_clear_above_rate_percent",
+            "ai_item_unify_colors_rate_percent",
+            "ai_item_starify_screen_rate_percent",
+            "ai_color_count",
+            "ai_color_cluster_rate_percent",
+            "ai_bomb_spawn_rate_percent",
+            "ai_bomb_fuse_ms",
+            "ai_attack_blocks_per_rock",
+            "ai_attack_rocks_per_wave_max",
+            "ai_attack_blocks_per_bomb",
+            "ai_attack_bombs_per_wave_max",
+            "ai_attack_bomb_ratio_percent",
+            "ai_chain_vanish_interval_ms",
+        ];
+
+        let path = temp_settings_path("json-keys");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+
+        Settings::default().save_to(&path);
+        let text = std::fs::read_to_string(&path).unwrap();
+
+        for key in EXPECTED_KEYS {
+            assert!(
+                text.contains(&format!("\"{key}\":")),
+                "キー{key}が書き出されていない"
+            );
+        }
+        // 1行1項目で書き出されるので、行数から項目数も突き合わせる。項目を増やした時に
+        // 上の一覧の更新漏れをここで検出する。
+        assert_eq!(
+            text.lines().filter(|line| line.contains("\": ")).count(),
+            EXPECTED_KEYS.len()
+        );
+        // 手書きで組み立てていた頃と同じく改行で終わる。
+        assert!(text.ends_with('\n'));
 
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
