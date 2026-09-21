@@ -18,6 +18,7 @@
 //! 届いた瞬間に反映する非同期方式にした。盤面の完全一致は前提にしないため、デシンク
 //! という失敗の仕方自体が無くなる(spec.md 12.3)。
 
+use std::cmp::Reverse;
 use std::io;
 use std::net::TcpStream;
 use std::sync::mpsc;
@@ -72,6 +73,13 @@ pub struct BattleState {
     /// 確定する(#289。スコア・到達深度を基準にするには全員の最終結果を比較する必要が
     /// あるため、#273時点の「各自が結果を出した瞬間に確定」という設計から変更した)。
     ranks: Vec<Option<u8>>,
+    /// `Cleared`/`GameOver`になった参加者を、確定した順にバッチとして積んでいく(#326)。
+    /// 同じ`check_results`呼び出し(同一フレーム)で複数人が新たに決着した場合は、同じ
+    /// バッチ(内側の`Vec`)へまとめて入れることで同着として扱う。ゴール到達者の順位付け
+    /// (`ranking_key`)に使う。通信対戦では相手の決着通知が届く順が実際の到達順と通信
+    /// 遅延ぶんずれ得るが、`advance`が元々前提にしている非同期の粒度(自分に見える他人の
+    /// 盤面は少し古い)と同程度のずれなので許容する。
+    settled_order: Vec<Vec<usize>>,
     /// 決着。`Some`になった以後は盤面を進めず、自分の入力も受け付けない。
     outcome: Option<BattleOutcome>,
     /// 自分以外の各参加者との通信路(#274)。`peers[i]`は`games[i+1]`に対応する
@@ -150,6 +158,7 @@ impl BattleState {
             ai_result_sent: Vec::new(),
             player_names,
             ranks: vec![None; player_count],
+            settled_order: Vec::new(),
             outcome: None,
             peers: None,
             my_room_index: 0,
@@ -185,6 +194,7 @@ impl BattleState {
             ai_result_sent,
             player_names,
             ranks: vec![None; player_count],
+            settled_order: Vec::new(),
             outcome: None,
             peers: None,
             my_room_index: 0,
@@ -241,6 +251,7 @@ impl BattleState {
             ai_result_sent,
             player_names,
             ranks: vec![None; player_count],
+            settled_order: Vec::new(),
             outcome: None,
             peers: Some(peers),
             my_room_index: my_index,
@@ -339,6 +350,24 @@ impl BattleState {
         }
     }
 
+    /// 新たに`Cleared`/`GameOver`になった参加者を到達順として記録する(#326)。同じ呼び出しで
+    /// 複数人が新たに決着した場合は、同一フレームでの同着として同じバッチにまとめる
+    /// (`record_newly_settled`を呼ぶのは`check_results`の中の1箇所だけなので、1回の呼び出し
+    /// = 1フレームぶんの決着になる)。既に記録済みの参加者は追記しない。
+    fn record_newly_settled(&mut self) {
+        let newly_settled: Vec<usize> = (0..self.games.len())
+            .filter(|&i| {
+                matches!(
+                    self.games[i].status,
+                    GameStatus::Cleared | GameStatus::GameOver
+                ) && !self.settled_order.iter().any(|batch| batch.contains(&i))
+            })
+            .collect();
+        if !newly_settled.is_empty() {
+            self.settled_order.push(newly_settled);
+        }
+    }
+
     /// 結果(`Cleared`/`GameOver`)待ちの参加者が1人以下になった時点で、最終順位を一括で
     /// 確定する(#289/#318/#323)。
     ///
@@ -384,20 +413,40 @@ impl BattleState {
         }
     }
 
-    /// 順位比較用のキー(#289/#323)。降順で並べると良い順位が先頭に来るタプル:
-    /// (ゴール到達したか, 脱落していないか, スコア, 到達深度)。
+    /// 順位比較用のキー(#289/#323/#326)。降順で並べると良い順位が先頭に来るタプル:
+    /// (ゴール到達したか, 脱落していないか, 到達順(ゴール者のみ有効), スコア, 到達深度)。
     ///
-    /// 2番目の要素は#323。タプルの比較は前の要素で差が付いた時点で決まるため、脱落したか
-    /// どうかをスコア・深度より前に置く。#318ではこれを最後の要素に置いていたので、脱落者の
-    /// 方が深く潜っていてスコアも高いと、生き残っている人が下位になっていた。
-    fn ranking_key(&self, index: usize) -> (bool, bool, u64, usize) {
+    /// 3番目の要素が#326: ゴール(`Cleared`)した参加者同士は、まず到達順(早い方が上位)で
+    /// 比較する。`settled_position`が小さいほど早く到達したので`Reverse`で包み、他の
+    /// 要素と同じ「大きい方が上位」の並びに揃える。同時到達(同じ位置)ならスコア→深度で
+    /// タイブレークする。脱落者(`GameOver`)同士・未決着の残り1人(#318)は到達順を効かせず
+    /// (`Reverse(0)`で全員同値にする)、これまでと同じくスコア→深度で比較する。早く脱落した
+    /// 方が有利になってしまうのを防ぐため。
+    fn ranking_key(&self, index: usize) -> (bool, bool, Reverse<usize>, u64, usize) {
         let game = &self.games[index];
+        let cleared = game.status == GameStatus::Cleared;
+        let arrival_rank = if cleared {
+            Reverse(self.settled_position(index))
+        } else {
+            Reverse(0)
+        };
         (
-            game.status == GameStatus::Cleared,
+            cleared,
             game.status != GameStatus::GameOver,
+            arrival_rank,
             game.player.score,
             game.player.depth_m(),
         )
+    }
+
+    /// `settled_order`内での到達順位置(0が最速)。同じバッチ(同一フレームでの同着)に
+    /// 入っていれば同じ位置になる。まだ記録されていなければ`usize::MAX`(最も遅い扱い)を
+    /// 返す。
+    fn settled_position(&self, index: usize) -> usize {
+        self.settled_order
+            .iter()
+            .position(|batch| batch.contains(&index))
+            .unwrap_or(usize::MAX)
     }
 
     /// 1フレーム進める(#299。spec.md 12.3)。
@@ -572,6 +621,8 @@ impl BattleState {
         // #306: 自分の結果も同様に、全員そろう(`outcome`確定)を待たず
         // 自分が決着した時点で送る(未決着の間は内部で何もしない)。
         self.maybe_send_results();
+        // #326: 到達順の記録は、順位確定(`update_ranks`)より前に済ませておく。
+        self.record_newly_settled();
         self.update_ranks();
     }
 
@@ -1730,6 +1781,99 @@ mod tests {
                 .iter()
                 .all(|rank| rank.is_some_and(|rank| rank >= 2)),
             "脱落した2人はゴール到達者より下位のはず(2人のスコア差次第で2位/3位が入れ替わる)"
+        );
+    }
+
+    #[test]
+    fn reaching_the_goal_earlier_outranks_a_higher_score_reached_later() {
+        // #326: 到達順(`settled_order`)がスコアより優先される。P0が先にゴールし、後から
+        // P1がスコア500でゴールしても、先に到達したP0が上位になるはず。3人目(P2)を
+        // プレイ中のまま残すことで、P0がゴールした直後に#318の即時確定が起きないようにする
+        // (2人だとP0が1人ゴールした時点で残り1人になり即時確定してしまうため)。
+        let mut state = battle_n(&[201, 202, 203]);
+
+        state.games[0].status = GameStatus::Cleared;
+        state.pump_frame(None);
+        assert_eq!(
+            state.outcome, None,
+            "前提: まだP1・P2の結果が出ていないので確定しないはず"
+        );
+
+        state.games[1].status = GameStatus::Cleared;
+        state.games[1].player.score = 500;
+        state.pump_frame(None);
+
+        assert_eq!(
+            state.ranks,
+            vec![Some(1), Some(2), Some(3)],
+            "後からスコア高くゴールしたP1より、先にゴールしたP0が上位のはず"
+        );
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(1)));
+    }
+
+    #[test]
+    fn simultaneous_goals_in_the_same_frame_are_tie_broken_by_score() {
+        // #326: 同じフレーム(同じ`check_results`呼び出し)で複数人が同時にゴールした場合は
+        // 到達順で差が付かない(同じバッチに入る)ため、これまでと同じくスコアでタイブレーク
+        // する。P0・P1を同時にCleared化してから1フレームだけ進める。
+        let mut state = battle_n(&[211, 212, 213]);
+
+        state.games[0].status = GameStatus::Cleared;
+        state.games[1].status = GameStatus::Cleared;
+        state.games[1].player.score = 500;
+        state.pump_frame(None);
+
+        assert_eq!(
+            state.ranks,
+            vec![Some(2), Some(1), Some(3)],
+            "同時到達はスコアの高いP1が上位になるはず"
+        );
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(2)));
+    }
+
+    #[test]
+    fn dropping_out_earlier_does_not_outrank_a_later_dropout_with_a_lower_score() {
+        // #326: 到達順の比較はゴール(Cleared)した参加者どうしだけに効かせる
+        // (`ranking_key`が脱落者には`Reverse(0)`で到達順を効かせない)。脱落(GameOver)どうし
+        // は、先に脱落したかどうかに関係なく、これまでと同じくスコア→深度で順位が決まる
+        // はず。P0を先に脱落させてもスコアを高くしておけば、後から脱落したスコアの低いP1
+        // より上位になることを確認する。
+        let mut state = battle_n(&[221, 222, 223]);
+
+        state.games[0].status = GameStatus::GameOver;
+        state.games[0].player.score = 500;
+        state.pump_frame(None);
+        assert_eq!(
+            state.outcome, None,
+            "前提: まだP1・P2の結果が出ていないので確定しないはず"
+        );
+
+        state.games[1].status = GameStatus::GameOver;
+        state.pump_frame(None);
+
+        assert_eq!(
+            state.ranks,
+            vec![Some(2), Some(3), Some(1)],
+            "先に脱落していても、スコアが高いP0が後から脱落したP1より上位のはず"
+        );
+        assert_eq!(state.outcome, Some(BattleOutcome::Ranked(2)));
+    }
+
+    #[test]
+    fn record_newly_settled_does_not_register_the_same_participant_twice() {
+        // #326: 同じ参加者がCleared/GameOverのまま複数フレームにわたって呼ばれても、
+        // settled_orderには1回しか記録されないはず。
+        let mut state = battle_n(&[231, 232]);
+        state.games[0].status = GameStatus::Cleared;
+
+        state.record_newly_settled();
+        state.record_newly_settled();
+        state.record_newly_settled();
+
+        assert_eq!(
+            state.settled_order,
+            vec![vec![0]],
+            "1人ぶんのバッチが1つだけ記録されるはず(二重登録されていないはず)"
         );
     }
 
