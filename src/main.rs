@@ -150,6 +150,9 @@ enum ScreenTransition {
     /// 表示名の入力画面へ(#270)。タイトルでNキーを押すと、初期値を入れた編集状態が
     /// ここに載って渡ってくる。
     ToPlayerNameInput(TextEditState),
+    /// 対戦決着後、タイトルではなく表示名の入力画面へ戻る(#321)。続けて対戦を始めるとき
+    /// にタイトルからNキーを押し直す手間を省く。後始末は`ToTitleDiscardingGame`と同じ。
+    ToPlayerNameInputDiscardingGame(TextEditState),
     /// 対戦相手を探すロビー画面へ(#256)。表示名の入力画面(#270)でEnterを押すと、
     /// 探索用のソケットを確保済みの`LobbyState`がここに載って渡ってくる。
     ToNetworkLobby(Box<LobbyState>),
@@ -265,18 +268,7 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             Some(ScreenTransition::ToTitle) => screen = Screen::Title,
             Some(ScreenTransition::ToTitleDiscardingGame) => {
                 screen = Screen::Title;
-                app.pause_overlay = PauseOverlay::None;
-                // タイトルへ戻るとGameごと破棄されるため、オートプレイも必ず手放す
-                // (TERM独自拡張。#218)。アイドルタイマーも0から数え直す。
-                app.autopilot = None;
-                app.autopilot_is_attract_demo = false;
-                app.title_idle = Duration::ZERO;
-                // Gameを破棄するので、それを複製した巻き戻し履歴・進行中のセッションも捨てる(#233)。
-                app.rewind_history.clear();
-                app.rewind_session = None;
-                // タイトル画面へ戻った瞬間にプレイ中BGMもリセットする。次にプレイを始めた
-                // とき、前回の再生位置・曲順を引きずらず必ず1曲目の先頭から鳴るようにする。
-                app.gameplay_bgm_restart.store(true, Ordering::Relaxed);
+                reset_state_outside_game(&mut app);
             }
             Some(ScreenTransition::ToModeSelect) => screen = Screen::ModeSelect,
             Some(ScreenTransition::ToSettings) => screen = Screen::Settings,
@@ -287,6 +279,10 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
             }
             Some(ScreenTransition::ToPlayerNameInput(state)) => {
                 screen = Screen::PlayerNameInput(state)
+            }
+            Some(ScreenTransition::ToPlayerNameInputDiscardingGame(state)) => {
+                screen = Screen::PlayerNameInput(state);
+                reset_state_outside_game(&mut app);
             }
             Some(ScreenTransition::ToNetworkLobby(state)) => screen = Screen::NetworkLobby(state),
             Some(ScreenTransition::ToBattle(state)) => {
@@ -319,6 +315,25 @@ fn run(terminal: &mut ratatui::DefaultTerminal) -> io::Result<()> {
     app.bgm_stop.store(true, Ordering::Relaxed);
 
     Ok(())
+}
+
+/// プレイ中のGameを破棄して画面を離れるときの後始末。Gameの外に置いた状態
+/// (オーバーレイ・オートプレイ・巻き戻し履歴)を畳み、プレイ中BGMもリセットする。
+/// タイトルへ戻る場合と、対戦決着後に表示名の入力画面へ戻る場合(#321)で内容が同じため
+/// 1つの関数にまとめている。
+fn reset_state_outside_game(app: &mut App) {
+    app.pause_overlay = PauseOverlay::None;
+    // Gameごと破棄されるため、オートプレイも必ず手放す(TERM独自拡張。#218)。
+    // アイドルタイマーも0から数え直す。
+    app.autopilot = None;
+    app.autopilot_is_attract_demo = false;
+    app.title_idle = Duration::ZERO;
+    // Gameを破棄するので、それを複製した巻き戻し履歴・進行中のセッションも捨てる(#233)。
+    app.rewind_history.clear();
+    app.rewind_session = None;
+    // プレイ中BGMもここでリセットする。次にプレイを始めたとき、前回の再生位置・曲順を
+    // 引きずらず必ず1曲目の先頭から鳴るようにする。
+    app.gameplay_bgm_restart.store(true, Ordering::Relaxed);
 }
 
 /// 新規ゲームを1つ作り、永続化された設定を全て反映して返す。モードセレクトでEnterを
@@ -446,5 +461,63 @@ mod tests {
         assert_eq!(cycle_jukebox_selection(3, 4, true), 0, "末尾の次は先頭へ");
         assert_eq!(cycle_jukebox_selection(2, 4, false), 1);
         assert_eq!(cycle_jukebox_selection(0, 4, false), 3, "先頭の前は末尾へ");
+    }
+
+    /// 後始末の確認用の`App`。音声デバイスは持たせず(`mixer: None`)、設定も保存しない
+    /// 既定値で埋める。
+    fn test_app() -> App {
+        let settings = Settings::default();
+        App {
+            mixer: None,
+            title_music_enabled: Arc::new(AtomicBool::new(false)),
+            gameplay_music_enabled: Arc::new(AtomicBool::new(true)),
+            se_enabled: Arc::new(AtomicBool::new(settings.se_enabled)),
+            music_volume_percent: Arc::new(AtomicU32::new(settings.music_volume_percent)),
+            title_bgm_restart: Arc::new(AtomicBool::new(false)),
+            was_title_bgm_enabled: false,
+            gameplay_bgm_restart: Arc::new(AtomicBool::new(false)),
+            bgm_stop: Arc::new(AtomicBool::new(false)),
+            settings,
+            rng: rand::rng(),
+            last_tick: Instant::now(),
+            mode_select_choice: ui::render::CourseChoice::Normal,
+            settings_selection: ui::render::SettingsChoice::Music,
+            pause_overlay: PauseOverlay::None,
+            lobby_ai_settings_selection: None,
+            help_jukebox_selection: 0,
+            help_jukebox_playing: None,
+            autopilot: None,
+            autopilot_is_attract_demo: false,
+            title_idle: Duration::ZERO,
+            rewind_history: rewind::RewindHistory::new(),
+            rewind_session: None,
+        }
+    }
+
+    #[test]
+    fn leaving_a_game_folds_every_state_kept_outside_it() {
+        // タイトルへ戻る場合と、対戦決着後に表示名の入力画面へ戻る場合(#321)で共通の後始末。
+        let mut app = test_app();
+        let game = Game::new(1);
+        app.pause_overlay = PauseOverlay::Help;
+        app.autopilot = Some(autoplay::Autopilot::new(false));
+        app.autopilot_is_attract_demo = true;
+        app.title_idle = Duration::from_secs(5);
+        let session = rewind::RewindSession::start(&mut app.rewind_history, &game);
+        app.rewind_session = Some(session);
+        assert!(!app.rewind_history.is_empty(), "前提: 履歴が積まれている");
+
+        reset_state_outside_game(&mut app);
+
+        assert_eq!(app.pause_overlay, PauseOverlay::None);
+        assert!(app.autopilot.is_none(), "オートプレイは手放す");
+        assert!(!app.autopilot_is_attract_demo);
+        assert_eq!(app.title_idle, Duration::ZERO);
+        assert!(app.rewind_history.is_empty(), "巻き戻し履歴は捨てる");
+        assert!(app.rewind_session.is_none());
+        assert!(
+            app.gameplay_bgm_restart.load(Ordering::Relaxed),
+            "次のプレイは1曲目の先頭から鳴らす"
+        );
     }
 }

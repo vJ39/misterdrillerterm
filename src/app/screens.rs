@@ -752,11 +752,11 @@ pub fn tick_battle(
 ) -> io::Result<Option<ScreenTransition>> {
     let actions = input::poll_input_batch(FRAME_INTERVAL_MS)?;
 
-    // 決着後は結果表示だけの画面になる(#256)。ここを抜ける操作は「タイトルへ戻る」
-    // のみで、盤面の操作・音声トグルはもう意味を持たない。
+    // 決着後は結果表示だけの画面になる(#256)。ここを抜ける操作は「表示名の入力画面へ
+    // 戻る」のみで(#321)、盤面の操作・音声トグルはもう意味を持たない。
     if battle_leaves_screen(state.outcome(), &actions) {
         state.notify_bye();
-        return Ok(Some(ScreenTransition::ToTitleDiscardingGame));
+        return Ok(Some(battle_exit_transition(&state.player_names[0])));
     }
 
     for &action in &actions {
@@ -832,6 +832,12 @@ fn leaves_battle_result(action: InputAction) -> bool {
 /// 待機中の案内を出す(#302)。
 fn battle_leaves_screen(outcome: Option<BattleOutcome>, actions: &[InputAction]) -> bool {
     outcome.is_some() && actions.iter().any(|&action| leaves_battle_result(action))
+}
+
+/// 決着後に対戦画面を抜けた先の遷移(#321)。タイトルではなく表示名の入力画面へ戻し、
+/// 直前の対戦で使った自分の名前(`own_name`)を初期値として引き継ぐ。
+fn battle_exit_transition(own_name: &str) -> ScreenTransition {
+    ScreenTransition::ToPlayerNameInputDiscardingGame(TextEditState::new(own_name))
 }
 
 /// AI専用設定のオーバーレイ(#312)が、このフレームの入力をどう扱ったか。
@@ -1636,6 +1642,65 @@ mod tests {
             &[InputAction::MoveLeft, InputAction::Drill]
         ));
         assert!(!battle_leaves_screen(None, &[]));
+    }
+
+    /// `tick_battle`の離脱判定だけを1フレーム分再現する。端末と実キー入力を伴わせないため、
+    /// 決着状態・自分の名前・そのフレームの入力を直接渡す。
+    fn feed_battle_exit_frame(
+        outcome: Option<BattleOutcome>,
+        own_name: &str,
+        actions: &[InputAction],
+    ) -> Option<ScreenTransition> {
+        if battle_leaves_screen(outcome, actions) {
+            return Some(battle_exit_transition(own_name));
+        }
+        None
+    }
+
+    #[test]
+    fn the_battle_exit_goes_to_the_player_name_input_after_the_outcome_is_decided() {
+        // #321: 決着後のEnter/Space/Escでの離脱先はタイトルではなく表示名の入力画面。
+        for action in [
+            InputAction::Confirm,
+            InputAction::TogglePause,
+            InputAction::Quit,
+        ] {
+            match feed_battle_exit_frame(Some(BattleOutcome::Ranked(1)), "Player-9f2a", &[action]) {
+                Some(ScreenTransition::ToPlayerNameInputDiscardingGame(edit)) => {
+                    assert_eq!(edit.text(), "Player-9f2a", "直前の名前を初期値に入れる");
+                }
+                _ => panic!("{action:?}では表示名の入力画面へ戻るはず"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_battle_exit_does_not_happen_before_the_outcome_is_decided() {
+        // 決着前(#303)は離脱操作でも遷移しない。
+        assert!(
+            feed_battle_exit_frame(None, "Player-9f2a", &[InputAction::Quit]).is_none(),
+            "決着前のEscでは対戦画面を抜けない"
+        );
+    }
+
+    #[test]
+    fn the_battle_exit_carries_over_the_own_display_name() {
+        // 引き継ぐのは`player_names`のindex 0(自分)で、相手の名前は渡さない。
+        let state = BattleState::new(
+            vec![Game::new(1), Game::new(2)],
+            vec!["Player-9f2a".to_string(), "Rival".to_string()],
+        );
+
+        match feed_battle_exit_frame(
+            Some(BattleOutcome::Ranked(1)),
+            &state.player_names[0],
+            &[InputAction::Confirm],
+        ) {
+            Some(ScreenTransition::ToPlayerNameInputDiscardingGame(edit)) => {
+                assert_eq!(edit.text(), state.player_names[0]);
+            }
+            _ => panic!("決着後は表示名の入力画面へ戻るはず"),
+        }
     }
 
     // --- ロビーのAI専用設定オーバーレイ(#312) ---
